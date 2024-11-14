@@ -12,8 +12,8 @@ jobs:
     environment:
       name: image-registry-controller
     env:
-      CONTROLLER_IMAGE_REGISTRY: ${{ vars.IMAGE_REGISTRY || 'higress-registry.cn-hangzhou.cr.aliyuncs.com' }}
-      CONTROLLER_IMAGE_NAME: ${{ vars.CONTROLLER_IMAGE_NAME || 'higress/higress' }}
+      CONTROLLER_IMAGE_REGISTRY: ${{ vars.IMAGE_REGISTRY || 'registry.cn-hangzhou.aliyuncs.com' }}
+      CONTROLLER_IMAGE_NAME: ${{ vars.CONTROLLER_IMAGE_NAME || 'testwydimage/higress' }}
     steps:
       - name: "Checkout ${{ github.ref }}"
         uses: actions/checkout@v4
@@ -60,8 +60,8 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ${{ env.CONTROLLER_IMAGE_REGISTRY }}
-          username: ${{ secrets.REGISTRY_USERNAME }}
-          password: ${{ secrets.REGISTRY_PASSWORD }}
+          username: ${{ secrets.USERNAME_ALI }}
+          password: ${{ secrets.PASSWORD_ALI }}
 
       - name: Build Docker Image and Push
         run: |
@@ -78,8 +78,8 @@ jobs:
     environment:
       name: image-registry-pilot
     env:
-      PILOT_IMAGE_REGISTRY: ${{ vars.IMAGE_REGISTRY || 'higress-registry.cn-hangzhou.cr.aliyuncs.com' }}
-      PILOT_IMAGE_NAME: ${{ vars.PILOT_IMAGE_NAME || 'higress/pilot' }}
+      PILOT_IMAGE_REGISTRY: ${{ vars.IMAGE_REGISTRY || 'registry.cn-hangzhou.aliyuncs.com' }}
+      PILOT_IMAGE_NAME: ${{ vars.PILOT_IMAGE_NAME || 'testwydimage/pilot' }}
     steps:
       - name: "Checkout ${{ github.ref }}"
         uses: actions/checkout@v4
@@ -137,8 +137,8 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ${{ env.PILOT_IMAGE_REGISTRY }}
-          username: ${{ secrets.REGISTRY_USERNAME }}
-          password: ${{ secrets.REGISTRY_PASSWORD }}
+          username: ${{ secrets.USERNAME_ALI }}
+          password: ${{ secrets.PASSWORD_ALI }}
 
       - name: Build Pilot-Discovery Image and Push
         run: |
@@ -156,8 +156,8 @@ jobs:
     environment:
       name: image-registry-pilot
     env:
-      GATEWAY_IMAGE_REGISTRY: ${{ vars.IMAGE_REGISTRY || 'higress-registry.cn-hangzhou.cr.aliyuncs.com' }}
-      GATEWAY_IMAGE_NAME: ${{ vars.GATEWAY_IMAGE_NAME || 'higress/gateway' }}
+      GATEWAY_IMAGE_REGISTRY: ${{ vars.IMAGE_REGISTRY || 'registry.cn-hangzhou.aliyuncs.com' }}
+      GATEWAY_IMAGE_NAME: ${{ vars.GATEWAY_IMAGE_NAME || 'testwydimage/gateway' }}
     steps:
       - name: "Checkout ${{ github.ref }}"
         uses: actions/checkout@v4
@@ -215,8 +215,8 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ${{ env.GATEWAY_IMAGE_REGISTRY }}
-          username: ${{ secrets.REGISTRY_USERNAME }}
-          password: ${{ secrets.REGISTRY_PASSWORD }}            
+          username: ${{ secrets.USERNAME_ALI }}
+          password: ${{ secrets.PASSWORD_ALI }}          
           
       - name: Build Gateway Image and Push
         run: |
