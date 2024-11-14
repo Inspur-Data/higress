@@ -28,8 +28,8 @@ jobs:
     environment:
       name: image-registry-msg
     env:
-      IMAGE_REGISTRY_SERVICE: ${{ vars.IMAGE_REGISTRY || 'higress-registry.cn-hangzhou.cr.aliyuncs.com' }}
-      IMAGE_REPOSITORY: ${{ vars.PLUGIN_IMAGE_REPOSITORY || 'plugins' }}
+      IMAGE_REGISTRY_SERVICE: ${{ vars.IMAGE_REGISTRY || 'registry.cn-hangzhou.aliyuncs.com' }}
+      IMAGE_REPOSITORY: ${{ vars.PLUGIN_IMAGE_REPOSITORY || 'testwydimage' }}
       RUST_VERSION: 1.82
       GO_VERSION: 1.19
       TINYGO_VERSION: 0.28.1
@@ -125,7 +125,7 @@ jobs:
           go mod tidy
           tinygo build -o ./plugin.wasm -scheduler=none -target=wasi -gc=custom -tags=\"custommalloc nottinygc_finalizer ${EXTRA_TAGS}\" .
           tar czvf plugin.tar.gz plugin.wasm
-          echo ${{ secrets.REGISTRY_PASSWORD }} | oras login -u ${{ secrets.REGISTRY_USERNAME }} --password-stdin ${{ env.IMAGE_REGISTRY_SERVICE }}
+          echo ${{ secrets.PASSWORD_ALI }} | oras login -u ${{ secrets.USERNAME_ALI }} --password-stdin ${{ env.IMAGE_REGISTRY_SERVICE }}
           oras push ${target_image} ${push_command}
           oras push ${target_image_latest} ${push_command}
           "
@@ -136,7 +136,7 @@ jobs:
           cargo build --target wasm32-wasi --release
           cp target/wasm32-wasi/release/*.wasm plugin.wasm
           tar czvf plugin.tar.gz plugin.wasm
-          echo ${{ secrets.REGISTRY_PASSWORD }} | oras login -u ${{ secrets.REGISTRY_USERNAME }} --password-stdin ${{ env.IMAGE_REGISTRY_SERVICE }}
+          echo ${{ secrets.PASSWORD_ALI }} | oras login -u ${{ secrets.USERNAME_ALI }} --password-stdin ${{ env.IMAGE_REGISTRY_SERVICE }}
           oras push ${target_image} ${push_command}
           oras push ${target_image_latest} ${push_command}
           "
