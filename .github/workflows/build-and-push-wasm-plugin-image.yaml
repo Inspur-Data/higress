@@ -77,7 +77,7 @@ jobs:
           # 查找README.md
           if [ -f "${workspace}/README.md" ];then
               echo "README.md exists"
-              push_command="./README.md:application/vnd.module.wasm.doc.v1+markdown $push_command "
+             # push_command="./README.md:application/vnd.module.wasm.doc.v1+markdown $push_command "
           fi
           
           # 查找README_{lang}.md
@@ -86,7 +86,7 @@ jobs:
               file_name=$(basename $file)
               echo "$file_name exists"
               lang=$(basename $file | sed 's/README_//; s/.md//')
-              push_command="./$file_name:application/vnd.module.wasm.doc.v1.$lang+markdown $push_command "
+            #  push_command="./$file_name:application/vnd.module.wasm.doc.v1.$lang+markdown $push_command "
             fi
           done
 
