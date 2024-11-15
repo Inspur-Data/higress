@@ -119,7 +119,7 @@ jobs:
           fi
           echo "EXTRA_TAGS=${EXTRA_TAGS}"
           if [ "${PLUGIN_TYPE}" == "go" ]; then
-          command="
+          docker exec -it builder bash
           set -e
           cd /workspace/plugins/wasm-go/extensions/${PLUGIN_NAME}
           go mod tidy
