@@ -83,13 +83,14 @@ jobs:
           if [ "${PLUGIN_TYPE}" == "cpp" ]; then
           command="
           set -e
+          cd /workspace/plugins/wasm-cpp
           bazel build //extensions/$PLUGIN_NAME:$PLUGIN_NAME.wasm
           "
           fi 
           docker exec builder bash -c "$command"
       - name: Copy binary from container to local
         run: |
-          docker cp $(docker ps -alq):/workspace/plugins/wasm-cpp/extensions/${PLUGIN_NAME}/$PLUGIN_NAME.wasm ./plugin.wasm
+          docker cp $(docker ps -alq):/workspace/bazel-bin/extensions/$PLUGIN_NAME/$PLUGIN_NAME.wasm ./plugin.wasm
       - name: Upload binary as artifact
         uses: actions/upload-artifact@v3
         with:
