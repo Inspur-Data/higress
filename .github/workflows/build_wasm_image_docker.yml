@@ -115,12 +115,14 @@ jobs:
           fi
           echo "EXTRA_TAGS=${EXTRA_TAGS}"
           if [ "${PLUGIN_TYPE}" == "go" ]; then
-          docker exec -it builder bash
+          command="
           set -e
           cd /workspace/plugins/wasm-go/extensions/${PLUGIN_NAME}
           go mod tidy
           tinygo build -o ./plugin.wasm -scheduler=none -target=wasi -gc=custom -tags=\"custommalloc nottinygc_finalizer ${EXTRA_TAGS}\" .
-          fi
+          "
+          fi 
+          docker exec builder bash -c "$command"
       - name: Copy binary from container to local
         run: |
           docker cp $(docker ps -alq):/workspace/plugins/wasm-go/extensions/${PLUGIN_NAME}/plugin.wasm ./plugin.wasm
