@@ -124,26 +124,20 @@ jobs:
           cd /workspace/plugins/wasm-go/extensions/${PLUGIN_NAME}
           go mod tidy
           tinygo build -o ./plugin.wasm -scheduler=none -target=wasi -gc=custom -tags=\"custommalloc nottinygc_finalizer ${EXTRA_TAGS}\" .
-          tar czvf plugin.tar.gz plugin.wasm
-          echo ${{ secrets.PASSWORD_ALI }} | oras login -u ${{ secrets.USERNAME_ALI }} --password-stdin ${{ env.IMAGE_REGISTRY_SERVICE }}
-          oras push ${target_image} ${push_command}
-          oras push ${target_image_latest} ${push_command}
-          "
-          elif [ "${PLUGIN_TYPE}" == "rust" ]; then
-          command="
-          set -e
-          cd /workspace/plugins/wasm-rust/extensions/${PLUGIN_NAME}
-          cargo build --target wasm32-wasi --release
-          cp target/wasm32-wasi/release/*.wasm plugin.wasm
-          tar czvf plugin.tar.gz plugin.wasm
-          echo ${{ secrets.PASSWORD_ALI }} | oras login -u ${{ secrets.USERNAME_ALI }} --password-stdin ${{ env.IMAGE_REGISTRY_SERVICE }}
-          oras push ${target_image} ${push_command}
-          oras push ${target_image_latest} ${push_command}
-          "
-          else
-
-          command="
-          echo "unkown type ${PLUGIN_TYPE}"
-          "
           fi
-          docker exec builder bash -c "$command"
+      - name: Copy binary from container to local
+        run: |
+          docker cp $(docker ps -alq):/workspace/plugins/wasm-go/extensions/${PLUGIN_NAME}/plugin.wasm ./plugin.wasm
+      - name: Build Docker image with WASM binary
+        run: |
+          echo "FROM scratch" > Dockerfile
+          echo "COPY plugin.wasm /plugin.wasm" >> Dockerfile
+          docker build -t ${target_image} .
+      - name: Push Docker image to Docker Hub
+        run: |
+          docker login --username=${{ secrets.USERNAME_ALI }} registry.cn-hangzhou.aliyuncs.com -p ${{ secrets.PASSWORD_ALI }}
+          docker push ${target_image}
+          
+          
+          
+          
