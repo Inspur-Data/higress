@@ -128,9 +128,12 @@ jobs:
           docker cp $(docker ps -alq):/workspace/plugins/wasm-go/extensions/${PLUGIN_NAME}/plugin.wasm ./plugin.wasm
       - name: Build Docker image with WASM binary
         run: |
+          target_image="${{ env.IMAGE_REGISTRY_SERVICE }}/${{ env.IMAGE_REPOSITORY}}/${{ env.PLUGIN_NAME }}:${{ env.VERSION }}"
+          target_image_latest="${{ env.IMAGE_REGISTRY_SERVICE }}/${{ env.IMAGE_REPOSITORY}}/${{ env.PLUGIN_NAME }}:latest"
           echo "FROM scratch" > Dockerfile
           echo "COPY plugin.wasm /plugin.wasm" >> Dockerfile
           echo "TARGET_IMAGE=${target_image}"
+          echo "TARGET_IMAGE_LATEST=${target_image}"
           docker build -t ${target_image_latest} .
           docker build -t ${target_image} .
       - name: Push Docker image to Docker Hub
