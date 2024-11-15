@@ -126,6 +126,11 @@ jobs:
       - name: Copy binary from container to local
         run: |
           docker cp $(docker ps -alq):/workspace/plugins/wasm-go/extensions/${PLUGIN_NAME}/plugin.wasm ./plugin.wasm
+      - name: Upload binary as artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: wasm-binary
+          path: plugin.wasm
       - name: Build Docker image with WASM binary
         run: |
           target_image="${{ env.IMAGE_REGISTRY_SERVICE }}/${{ env.IMAGE_REPOSITORY}}/${{ env.PLUGIN_NAME }}:${{ env.VERSION }}"
