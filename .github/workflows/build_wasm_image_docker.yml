@@ -34,6 +34,9 @@ jobs:
       GO_VERSION: 1.19
       TINYGO_VERSION: 0.28.1
       ORAS_VERSION: 1.0.0
+    strategy:
+      matrix:
+        arch: ["amd64", "arm64"]
     steps:
       - name: Set plugin_type, plugin_name and version from inputs or ref_name
         id: set_vars
@@ -133,21 +136,16 @@ jobs:
           path: plugin.wasm
       - name: Build Docker image with WASM binary
         run: |
-          target_image="${{ env.IMAGE_REGISTRY_SERVICE }}/${{ env.IMAGE_REPOSITORY}}/${{ env.PLUGIN_NAME }}:${{ env.VERSION }}"
-          target_image_latest="${{ env.IMAGE_REGISTRY_SERVICE }}/${{ env.IMAGE_REPOSITORY}}/${{ env.PLUGIN_NAME }}:latest"
+          target_image="${{ env.IMAGE_REGISTRY_SERVICE }}/${{ env.IMAGE_REPOSITORY}}/${{ env.PLUGIN_NAME }}:${{ env.VERSION }}-${{ matrix.arch }}"
+          target_image_latest="${{ env.IMAGE_REGISTRY_SERVICE }}/${{ env.IMAGE_REPOSITORY}}/${{ env.PLUGIN_NAME }}:latest-${{ matrix.arch }}"
           echo "FROM scratch" > Dockerfile
           echo "COPY plugin.wasm /plugin.wasm" >> Dockerfile
           echo "TARGET_IMAGE=${target_image}"
           echo "TARGET_IMAGE_LATEST=${target_image}"
-          docker build -t ${target_image_latest} .
-          docker build -t ${target_image} .
-      - name: Push Docker image to Docker Hub
-        run: |
-          target_image="${{ env.IMAGE_REGISTRY_SERVICE }}/${{ env.IMAGE_REPOSITORY}}/${{ env.PLUGIN_NAME }}:${{ env.VERSION }}"
-          target_image_latest="${{ env.IMAGE_REGISTRY_SERVICE }}/${{ env.IMAGE_REPOSITORY}}/${{ env.PLUGIN_NAME }}:latest"
           docker login --username=${{ secrets.USERNAME_ALI }} registry.cn-hangzhou.aliyuncs.com -p ${{ secrets.PASSWORD_ALI }}
-          docker push ${target_image_latest}
-          docker push ${target_image}
+          docker buildx create --use
+          docker buildx build --no-cache  --platform linux/${{ matrix.arch }} -f Dockerfile -t ${target_image} --push .
+          docker buildx build --no-cache  --platform linux/${{ matrix.arch }} -f Dockerfile -t ${target_image_latest} --push .
           
           
           
