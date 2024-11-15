@@ -101,10 +101,6 @@ jobs:
 
       - name: Build Image and Push
         run: |
-          push_command=${{ env.PUSH_COMMAND }}
-          push_command=${push_command#\"}
-          push_command=${push_command%\"} # 删除PUSH_COMMAND中的双引号，确保oras push正常解析
-          
           target_image="${{ env.IMAGE_REGISTRY_SERVICE }}/${{ env.IMAGE_REPOSITORY}}/${{ env.PLUGIN_NAME }}:${{ env.VERSION }}"
           target_image_latest="${{ env.IMAGE_REGISTRY_SERVICE }}/${{ env.IMAGE_REPOSITORY}}/${{ env.PLUGIN_NAME }}:latest"
           echo "TargetImage=${target_image}"
