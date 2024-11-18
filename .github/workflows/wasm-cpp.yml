@@ -64,8 +64,6 @@ jobs:
 
       - name: Checkout code
         uses: actions/checkout@v3
-        with:
-          ref: release-1.x
       - name: Run a wasm-builder
         env: 
           PLUGIN_NAME: ${{ env.PLUGIN_NAME }}
