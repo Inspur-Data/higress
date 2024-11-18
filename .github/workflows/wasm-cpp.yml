@@ -85,6 +85,7 @@ jobs:
           set -e
           cd /workspace/plugins/wasm-cpp
           bazel build //extensions/$PLUGIN_NAME:$PLUGIN_NAME.wasm
+          bazel cquery //extensions/$PLUGIN_NAME:$PLUGIN_NAME.wasm --output=files
           "
           fi 
           docker exec builder bash -c "$command"
