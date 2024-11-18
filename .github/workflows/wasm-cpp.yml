@@ -2,8 +2,8 @@ name: CPP Build and Push Wasm Plugin Image For Docker
 
 on:
   push:
-    tags:
-    - "wasm-*-*-v*.*.*" # 匹配 wasm-{go|rust}-{pluginName}-vX.Y.Z 格式的标签
+    branches:
+      - release-1.x
   workflow_dispatch:
     inputs:
       plugin_type:
