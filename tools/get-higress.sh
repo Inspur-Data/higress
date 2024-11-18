@@ -16,6 +16,7 @@
 
 export VERSION
 
+
 MODE="install"
 
 HAS_CURL="$(type "curl" &> /dev/null && echo true || echo false)"
