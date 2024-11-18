@@ -86,6 +86,8 @@ jobs:
           cd /workspace/plugins/wasm-cpp
           bazel build //extensions/$PLUGIN_NAME:$PLUGIN_NAME.wasm
           bazel cquery //extensions/$PLUGIN_NAME:$PLUGIN_NAME.wasm --output=files
+          BINARY_PATH=\$(bazel cquery //extensions/$PLUGIN_NAME:$PLUGIN_NAME.wasm --output=files)
+          echo "binpath= $BINARY_PATH"
           "
           fi 
           docker exec builder bash -c "$command"
