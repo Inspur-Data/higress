@@ -86,14 +86,15 @@ jobs:
           cd /workspace/plugins/wasm-cpp
           bazel build //extensions/$PLUGIN_NAME:$PLUGIN_NAME.wasm
           bazel cquery //extensions/$PLUGIN_NAME:$PLUGIN_NAME.wasm --output=files
-          BINARY_PATH= "${{ (bazel cquery //extensions/$PLUGIN_NAME:$PLUGIN_NAME.wasm --output=files) }}"
-          echo "BIN_PATH=${BINARY_PATH}"
+          BINARY_PATH=\$(bazel cquery //extensions/$PLUGIN_NAME:$PLUGIN_NAME.wasm --output=files)
+          echo \$BINARY_PATH > /tmp/wasm_path.txt
           "
           fi 
           docker exec builder bash -c "$command"
       - name: Copy binary from container to local
         run: |
-          docker cp $(docker ps -alq):/workspace/bazel-bin/extensions/$PLUGIN_NAME/$PLUGIN_NAME.wasm ./plugin.wasm
+          WASM_PATH=$(docker exec builder cat /tmp/wasm_path.txt)
+          docker cp builder:$WASM_PATH ./plugin.wasm
       - name: Upload binary as artifact
         uses: actions/upload-artifact@v3
         with:
