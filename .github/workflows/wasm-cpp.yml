@@ -59,7 +59,7 @@ jobs:
           fi
           echo "PLUGIN_TYPE=$plugin_type" >> $GITHUB_ENV
           echo "PLUGIN_NAME=$plugin_name" >> $GITHUB_ENV
-          echo "VERSION=ref: feature-branch$version" >> $GITHUB_ENV
+          echo "VERSION=$version" >> $GITHUB_ENV
           echo "BUILDER_IMAGE=$builder_image" >> $GITHUB_ENV
 
       - name: Checkout code
