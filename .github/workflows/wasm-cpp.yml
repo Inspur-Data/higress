@@ -85,7 +85,7 @@ jobs:
           set -e
           cd /workspace/plugins/wasm-cpp
           bazel build //extensions/$PLUGIN_NAME:$PLUGIN_NAME.wasm
-          OUTPUT_DIR= "/root"
+          OUTPUT_DIR= /root
           find $(bazel info bazel-bin) -name "$PLUGIN_NAME.wasm" -exec cp {} $OUTPUT_DIR/ \
           "
           fi 
