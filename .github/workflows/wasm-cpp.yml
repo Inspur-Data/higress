@@ -94,7 +94,7 @@ jobs:
       - name: Upload binary as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wasm-binary
+          name: wasm-binary-${{ github.run_id }} 
           path: plugin.wasm
       - name: Build Docker image with WASM binary
         run: |
