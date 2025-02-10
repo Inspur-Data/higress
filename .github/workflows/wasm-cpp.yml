@@ -92,7 +92,7 @@ jobs:
         run: |
           docker cp builder:/workspace/plugins/wasm-cpp/bazel-bin/extensions/$PLUGIN_NAME/$PLUGIN_NAME.wasm ./plugin.wasm
       - name: Upload binary as artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: wasm-binary
           path: plugin.wasm
