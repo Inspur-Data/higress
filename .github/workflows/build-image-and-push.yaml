@@ -70,7 +70,7 @@ jobs:
           echo "IMAGES=${{ steps.docker-meta.outputs.tags }}"
       - name: Build Docker Image and Push
         run: |
-          GOPROXY="https://proxy.golang.org,direct" make docker-buildx-push
+          GOPROXY="https://proxy.golang.org,direct" make docker-buildx-push HUB=registry.cn-hangzhou.aliyuncs.com/testwydimage
           BUILT_IMAGE=${{ env.CONTROLLER_IMAGE_REGISTRY }}/${{ env.CONTROLLER_IMAGE_NAME }}
           readarray -t IMAGES <<< "${{ steps.docker-meta.outputs.tags }}"
          
