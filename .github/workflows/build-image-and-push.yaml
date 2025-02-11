@@ -66,7 +66,7 @@ jobs:
       - name: Build Docker Image and Push
         run: |
           GOPROXY="https://proxy.golang.org,direct" make docker-buildx-push
-          BUILT_IMAGE="higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/higress"
+          BUILT_IMAGE=${{ env.CONTROLLER_IMAGE_REGISTRY }}/${{ env.CONTROLLER_IMAGE_NAME }}
           readarray -t IMAGES <<< "${{ steps.docker-meta.outputs.tags }}"
           for image in ${IMAGES[@]}; do
             echo "Image: $image"
