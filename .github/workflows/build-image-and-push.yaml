@@ -62,7 +62,12 @@ jobs:
           registry: ${{ env.CONTROLLER_IMAGE_REGISTRY }}
           username: ${{ secrets.USERNAME_ALI }}
           password: ${{ secrets.PASSWORD_ALI }}
-
+      - name: Debug Image Name
+        run: |
+          echo "CONTROLLER_IMAGE_REGISTRY=${{ env.CONTROLLER_IMAGE_REGISTRY }}"
+          echo "CONTROLLER_IMAGE_NAME=${{ env.CONTROLLER_IMAGE_NAME }}"
+          echo "BUILT_IMAGE=${{ env.CONTROLLER_IMAGE_REGISTRY }}/${{ env.CONTROLLER_IMAGE_NAME }}"
+          echo "IMAGES=${{ steps.docker-meta.outputs.tags }}"
       - name: Build Docker Image and Push
         run: |
           GOPROXY="https://proxy.golang.org,direct" make docker-buildx-push
