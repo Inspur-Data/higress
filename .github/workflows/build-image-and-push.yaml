@@ -70,7 +70,7 @@ jobs:
           readarray -t IMAGES <<< "${{ steps.docker-meta.outputs.tags }}"
           for image in ${IMAGES[@]}; do
             echo "Image: $image"
-            docker buildx imagetools create $BUILT_IMAGE:$GITHUB_SHA --tag $image
+            docker buildx build --platform linux/amd64,linux/arm64 -t $image --push .
           done
 
   build-pilot-image:
