@@ -73,10 +73,9 @@ jobs:
           GOPROXY="https://proxy.golang.org,direct" make docker-buildx-push
           BUILT_IMAGE=${{ env.CONTROLLER_IMAGE_REGISTRY }}/${{ env.CONTROLLER_IMAGE_NAME }}
           readarray -t IMAGES <<< "${{ steps.docker-meta.outputs.tags }}"
-          for image in ${IMAGES[@]}; do
-            echo "Image: $image"
-            docker buildx build --platform linux/amd64,linux/arm64 -t $image --push .
-          done
+         
+          docker buildx build --platform linux/amd64,linux/arm64 -t $BUILT_IMAGE --push .
+       
 
   build-pilot-image:
     runs-on: ubuntu-latest
