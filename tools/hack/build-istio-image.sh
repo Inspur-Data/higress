@@ -31,7 +31,7 @@ GOOS_LOCAL=linux TARGET_OS=linux TARGET_ARCH=${TARGET_ARCH} \
     USE_REAL_USER=${USE_REAL_USER:-0} \
     CONDITIONAL_HOST_MOUNTS=${CONDITIONAL_HOST_MOUNTS} \
     DOCKER_BUILD_VARIANTS=default DOCKER_TARGETS="${DOCKER_TARGETS}" \
-    ISTIO_BASE_REGISTRY="${HUB}" \
+    ISTIO_BASE_REGISTRY=registry.cn-hangzhou.aliyuncs.com/testwydimage \
     BASE_VERSION="${HIGRESS_BASE_VERSION}" \
     DOCKER_RUN_OPTIONS=${DOCKER_RUN_OPTIONS} \
     IMG=higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/build-tools:release-1.19-ef344298e65eeb2d9e2d07b87eb4e715c2def613 \
