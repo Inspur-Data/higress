@@ -145,7 +145,10 @@ jobs:
           registry: ${{ env.PILOT_IMAGE_REGISTRY }}
           username: ${{ secrets.USERNAME_ALI }}
           password: ${{ secrets.PASSWORD_ALI }}
-
+      - name: Debug Image Name
+        run: |
+          echo "BUILT_IMAGE=${{ env.PILOT_IMAGE_REGISTRY }}/${{ env.PILOT_IMAGE_NAME }}"
+          echo "IMAGES=${{ steps.docker-meta.outputs.tags }}"
       - name: Build Pilot-Discovery Image and Push
         run: |
           GOPROXY="https://proxy.golang.org,direct" make build-istio
@@ -223,7 +226,10 @@ jobs:
           registry: ${{ env.GATEWAY_IMAGE_REGISTRY }}
           username: ${{ secrets.USERNAME_ALI }}
           password: ${{ secrets.PASSWORD_ALI }}          
-          
+      - name: Debug Image Name
+        run: |
+          echo "BUILT_IMAGE=${{ env.GATEWAY_IMAGE_REGISTRY }}/${{ env.GATEWAY_IMAGE_NAME }}"
+          echo "IMAGES=${{ steps.docker-meta.outputs.tags }}"
       - name: Build Gateway Image and Push
         run: |
           GOPROXY="https://proxy.golang.org,direct" make build-gateway
