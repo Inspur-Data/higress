@@ -88,7 +88,8 @@ export ARM64_OUT_LINUX=$(pwd)/out/linux_arm64
 export CONTAINER_TARGET_OUT="${CONTAINER_TARGET_OUT:-/work/out/${TARGET_OS}_${TARGET_ARCH}}"
 export CONTAINER_TARGET_OUT_LINUX="${CONTAINER_TARGET_OUT_LINUX:-/work/out/linux_${TARGET_ARCH}}"
 
-export IMG="${IMG:-${HUB:-higress-registry.cn-hangzhou.cr.aliyuncs.com/higress}/${IMAGE_NAME}:${IMAGE_VERSION}}"
+#export IMG="${IMG:-${HUB:-higress-registry.cn-hangzhou.cr.aliyuncs.com/higress}/${IMAGE_NAME}:${IMAGE_VERSION}}"
+export IMG="${IMG:-higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/${IMAGE_NAME}:${IMAGE_VERSION}}"
 
 export CONTAINER_CLI="${CONTAINER_CLI:-docker}"
 
