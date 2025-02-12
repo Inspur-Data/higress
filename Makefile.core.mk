@@ -2,7 +2,7 @@ SHELL := /bin/bash -o pipefail
 
 export HIGRESS_BASE_VERSION ?= 2023-07-20T20-50-43
 
-export HUB ?= higress-registry.cn-hangzhou.cr.aliyuncs.com/higress
+export HUB ?= registry.cn-hangzhou.aliyuncs.com/testwydimage/higress
 
 export ISTIO_BASE_REGISTRY ?= $(HUB)
 
