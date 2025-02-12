@@ -233,7 +233,7 @@ jobs:
       - name: Build Gateway Image and Push
         run: |
           GOPROXY="https://proxy.golang.org,direct" make build-gateway
-          BUILT_IMAGE="higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/proxyv2"
+          BUILT_IMAGE="registry.cn-hangzhou.aliyuncs.com/testwydimage/proxyv2"
           readarray -t IMAGES <<< "${{ steps.docker-meta.outputs.tags }}"
           for image in ${IMAGES[@]}; do
             echo "Image: $image"
