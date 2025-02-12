@@ -149,7 +149,7 @@ jobs:
       - name: Build Pilot-Discovery Image and Push
         run: |
           GOPROXY="https://proxy.golang.org,direct" make build-istio
-          BUILT_IMAGE="higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/pilot"
+          BUILT_IMAGE=${{ env.PILOT_IMAGE_REGISTRY }}/${{ env.PILOT_IMAGE_NAME }}
           readarray -t IMAGES <<< "${{ steps.docker-meta.outputs.tags }}"
           for image in ${IMAGES[@]}; do
             echo "Image: $image"
@@ -227,7 +227,7 @@ jobs:
       - name: Build Gateway Image and Push
         run: |
           GOPROXY="https://proxy.golang.org,direct" make build-gateway
-          BUILT_IMAGE="higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/proxyv2"
+          BUILT_IMAGE=${{ env.GATEWAY_IMAGE_REGISTRY }}/${{ env.GATEWAY_IMAGE_NAME }}
           readarray -t IMAGES <<< "${{ steps.docker-meta.outputs.tags }}"
           for image in ${IMAGES[@]}; do
             echo "Image: $image"
