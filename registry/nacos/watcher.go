@@ -289,7 +289,7 @@ func (w *watcher) unsubscribe(groupName string, serviceName string) error {
 }
 
 func (w *watcher) getSubscribeCallback(groupName string, serviceName string) func(services []model.SubscribeService, err error) {
-	suffix := strings.Join([]string{groupName, w.NacosNamespace, w.Type}, common.DotSeparator)
+	suffix := strings.Join([]string{groupName, w.NacosNamespace, w.Name, w.Type}, common.DotSeparator)
 	suffix = strings.ReplaceAll(suffix, common.Underscore, common.Hyphen)
 	host := strings.Join([]string{serviceName, suffix}, common.DotSeparator)
 

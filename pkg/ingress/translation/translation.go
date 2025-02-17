@@ -45,12 +45,12 @@ type IngressTranslation struct {
 	higressDomainCache model.IngressDomainCollection
 }
 
-func NewIngressTranslation(localKubeClient kube.Client, xdsUpdater istiomodel.XDSUpdater, namespace string, clusterId cluster.ID) *IngressTranslation {
+func NewIngressTranslation(localKubeClient kube.Client, xdsUpdater istiomodel.XDSUpdater, namespace string, clusterId cluster.ID, ingressClass string) *IngressTranslation {
 	if clusterId == "Kubernetes" {
 		clusterId = ""
 	}
 	Config := &IngressTranslation{
-		ingressConfig:  ingressconfig.NewIngressConfig(localKubeClient, xdsUpdater, namespace, clusterId),
+		ingressConfig:  ingressconfig.NewIngressConfig(localKubeClient, xdsUpdater, namespace, clusterId, ingressClass),
 		kingressConfig: ingressconfig.NewKIngressConfig(localKubeClient, xdsUpdater, namespace, clusterId),
 	}
 	return Config

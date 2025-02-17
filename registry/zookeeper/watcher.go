@@ -652,7 +652,7 @@ func (w *watcher) generateServiceEntry(config InterfaceConfig) *v1alpha3.Service
 	}
 
 	se := &v1alpha3.ServiceEntry{
-		Hosts:      []string{config.Host + ".zookeeper"},
+		Hosts:      []string{config.Host + w.Name + ".zookeeper"},
 		Ports:      portList,
 		Location:   v1alpha3.ServiceEntry_MESH_INTERNAL,
 		Resolution: v1alpha3.ServiceEntry_STATIC,

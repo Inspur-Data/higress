@@ -897,7 +897,7 @@ func (c *controller) storeBackendTrafficPolicy(wrapper *common.WrapperConfig, ba
 	if backend == nil {
 		return errors.New("invalid empty backend")
 	}
-	if common.ValidateBackendResource(backend.Resource) && wrapper.AnnotationsConfig.Destination != nil {
+	if common.ValidateBackendResource(backend.Resource, c.options.IngressClass) && wrapper.AnnotationsConfig.Destination != nil {
 		for _, dest := range wrapper.AnnotationsConfig.Destination.McpDestination {
 			portNumber := dest.Destination.GetPort().GetNumber()
 			serviceKey := common.CreateMcpServiceKey(dest.Destination.Host, int32(portNumber))
@@ -949,7 +949,7 @@ func (c *controller) createDefaultRoute(wrapper *common.WrapperConfig, backend *
 
 	var routeDestination []*networking.HTTPRouteDestination
 
-	if common.ValidateBackendResource(backend.Resource) {
+	if common.ValidateBackendResource(backend.Resource, c.options.IngressClass) {
 		routeDestination = wrapper.AnnotationsConfig.Destination.McpDestination
 	} else {
 		service := backend.Service
