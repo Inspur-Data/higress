@@ -152,22 +152,22 @@ type Server struct {
 }
 
 type ServiceFromGatewayItem struct {
-	Attributes *Attributes `json:"attributes"` //属性信息
-	Ports      []*Port     `json:"ports"`      //端口信息
-	Hostname   string      `json:"hostname"`   //主机名称
+	Attributes *Attributes `json:"attributes"` 
+	Ports      []*Port     `json:"ports"`      
+	Hostname   string      `json:"hostname"`   
 }
 
 type Attributes struct {
-	ServiceRegistry string  `json:"serviceRegistry"` //注册中心名称
-	Name            string  `json:"name"`            //服务名称
-	Namespace       string  `json:"namespace"`       //命名空间名称
-	Ports           []*Port `json:"ports"`           //命名空间名称
+	ServiceRegistry string  `json:"serviceRegistry"` 
+	Name            string  `json:"name"`           
+	Namespace       string  `json:"namespace"`       
+	Ports           []*Port `json:"ports"`           
 }
 
 type Port struct {
-	Name     string `json:"name"`     //服务名称
-	Port     uint32 `json:"port"`     //端口
-	Protocol string `json:"protocol"` //协议
+	Name     string `json:"name"`     
+	Port     uint32 `json:"port"`     
+	Protocol string `json:"protocol"` 
 }
 
 type EndpointFromGatewayItem struct {
@@ -595,21 +595,21 @@ func (s *Server) getEndpointz(w http.ResponseWriter, _ *http.Request) {
 		fmt.Println("Error creating request:", err)
 		return
 	}
-	// 发送请求
+	
 	respendpoint, err := client.Do(reqEndpoint)
 	if err != nil {
 		fmt.Println("Error sending request:", err)
 		return
 	}
 	defer respendpoint.Body.Close()
-	// 读取响应
+	
 	endpoints, err := io.ReadAll(respendpoint.Body)
 	if err != nil {
 		fmt.Println("Error reading endpoints response:", err)
 		return
 	}
 
-	// 过滤k8s service，避免传输过大数据
+	
 	var gatewayEndpoints []EndpointFromGatewayItem
 	var returnGatewayEndpoints []EndpointFromGatewayItem
 	err = json.Unmarshal(endpoints, &gatewayEndpoints)
@@ -638,7 +638,7 @@ func (s *Server) getRegistryz(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 
-	// 发送请求
+	
 	resp, err := client.Do(req)
 	if err != nil {
 		fmt.Println("Error sending request:", err)
@@ -646,14 +646,14 @@ func (s *Server) getRegistryz(w http.ResponseWriter, _ *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	// 读取响应
+	
 	registryz, err := io.ReadAll(resp.Body)
 	if err != nil {
 		fmt.Println("Error reading registryz response:", err)
 		return
 	}
 
-	// 过滤k8s service，避免传输过大数据
+	
 	var gatewayServices []ServiceFromGatewayItem
 	err = json.Unmarshal(registryz, &gatewayServices)
 	if err != nil {
