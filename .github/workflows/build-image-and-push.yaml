@@ -2,8 +2,8 @@ name: Build Docker Images and Push to Image Registry
 
 on:
   push:
-    tags:
-    - "v*.*.*"
+    branches:
+    - "inspurdata-v2.0.3"
   workflow_dispatch: ~
 
 jobs:
@@ -14,6 +14,8 @@ jobs:
     env:
       CONTROLLER_IMAGE_REGISTRY: ${{ vars.IMAGE_REGISTRY || 'registry.cn-hangzhou.aliyuncs.com' }}
       CONTROLLER_IMAGE_NAME: ${{ vars.CONTROLLER_IMAGE_NAME || 'testwydimage/higress' }}
+      LANG: en_US.UTF-8
+      LC_ALL: en_US.UTF-8
     steps:
       - name: "Checkout ${{ github.ref }}"
         uses: actions/checkout@v4
