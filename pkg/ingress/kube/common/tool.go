@@ -35,10 +35,10 @@ import (
 	. "github.com/alibaba/higress/pkg/ingress/log"
 )
 
-func ValidateBackendResource(resource *v1.TypedLocalObjectReference) bool {
+func ValidateBackendResource(resource *v1.TypedLocalObjectReference, ingressClass string) bool {
 	if resource == nil || resource.APIGroup == nil ||
 		*resource.APIGroup != netv1.SchemeGroupVersion.Group ||
-		resource.Kind != "McpBridge" || resource.Name != "default" {
+		resource.Kind != "McpBridge" || resource.Name != ingressClass+"default" {
 		return false
 	}
 	return true

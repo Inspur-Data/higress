@@ -45,6 +45,7 @@ import (
 	"istio.io/istio/pkg/config/schema/kind"
 	"istio.io/istio/pkg/log"
 	"istio.io/istio/pkg/util/sets"
+	"istio.io/pkg/env"
 	v1 "k8s.io/api/core/v1"
 	listersv1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
@@ -150,10 +151,12 @@ type IngressConfig struct {
 
 	clusterId cluster.ID
 
+	ingressClass string
+
 	httpsConfigMgr *cert.ConfigMgr
 }
 
-func NewIngressConfig(localKubeClient kube.Client, xdsUpdater istiomodel.XDSUpdater, namespace string, clusterId cluster.ID) *IngressConfig {
+func NewIngressConfig(localKubeClient kube.Client, xdsUpdater istiomodel.XDSUpdater, namespace string, clusterId cluster.ID, ingressClaas string) *IngressConfig {
 	if clusterId == "Kubernetes" {
 		clusterId = ""
 	}
@@ -167,6 +170,7 @@ func NewIngressConfig(localKubeClient kube.Client, xdsUpdater istiomodel.XDSUpda
 		globalGatewayName:        namespace + "/" + common.CreateConvertedName(clusterId.String(), "global"),
 		watchedSecretSet:         sets.New[string](),
 		namespace:                namespace,
+		ingressClass:             ingressClaas,
 		wasmPlugins:              make(map[string]*extensions.WasmPlugin),
 		http2rpcs:                make(map[string]*higressv1.Http2Rpc),
 	}
@@ -852,10 +856,12 @@ func (m *IngressConfig) applyInternalActiveRedirect(convertOptions *common.Conve
 }
 
 func (m *IngressConfig) convertIstioWasmPlugin(obj *higressext.WasmPlugin) (*extensions.WasmPlugin, error) {
+	gatewayName := env.RegisterStringVar("GATEWAY_NAME", "", "").Get()
+	IngressLog.Errorf("gatewayName %s", gatewayName)
 	result := &extensions.WasmPlugin{
 		Selector: &istiotype.WorkloadSelector{
 			MatchLabels: map[string]string{
-				"higress": m.namespace + "-higress-gateway",
+				"higress": m.namespace + "-" + gatewayName,
 			},
 		},
 		Url:             obj.Url,
@@ -991,6 +997,7 @@ func (m *IngressConfig) convertIstioWasmPlugin(obj *higressext.WasmPlugin) (*ext
 
 func (m *IngressConfig) AddOrUpdateWasmPlugin(clusterNamespacedName util.ClusterNamespacedName) {
 	if clusterNamespacedName.Namespace != m.namespace {
+		IngressLog.Infof(" wasmPlugin:%s namespace: %s m: %s", clusterNamespacedName.Name, clusterNamespacedName.Namespace, m.namespace)
 		return
 	}
 	wasmPlugin, err := m.wasmPluginLister.WasmPlugins(clusterNamespacedName.Namespace).Get(clusterNamespacedName.Name)
@@ -1006,8 +1013,12 @@ func (m *IngressConfig) AddOrUpdateWasmPlugin(clusterNamespacedName util.Cluster
 		// Set this label so that we do not compare configs and just push.
 		Labels: map[string]string{constants.AlwaysPushLabel: "true"},
 	}
+	IngressLog.Infof(" wasmPlugin:%s ingressclass: %s m: %s", clusterNamespacedName.Name, wasmPlugin.Annotations["ingressClass"], m.ingressClass)
+	if wasmPlugin.Annotations != nil && wasmPlugin.Annotations["ingressClass"] != m.ingressClass {
+		IngressLog.Infof(" wasmPlugin:%s not belong to this higress instance", clusterNamespacedName.Name)
+	}
 	for _, f := range m.wasmPluginHandlers {
-		IngressLog.Debug("WasmPlugin triggerd update")
+		IngressLog.Info("WasmPlugin triggerd update")
 		f(config.Config{Meta: metadata}, config.Config{Meta: metadata}, istiomodel.EventUpdate)
 	}
 	istioWasmPlugin, err := m.convertIstioWasmPlugin(&wasmPlugin.Spec)
@@ -1023,7 +1034,7 @@ func (m *IngressConfig) AddOrUpdateWasmPlugin(clusterNamespacedName util.Cluster
 		m.mutex.Unlock()
 		return
 	}
-	IngressLog.Debugf("wasmPlugin:%s convert to istioWasmPlugin:%v", clusterNamespacedName.Name, istioWasmPlugin)
+	IngressLog.Errorf("wasmPlugin:%s convert to istioWasmPlugin:%v", clusterNamespacedName.Name, istioWasmPlugin)
 	m.mutex.Lock()
 	m.wasmPlugins[clusterNamespacedName.Name] = istioWasmPlugin
 	m.mutex.Unlock()
@@ -1057,7 +1068,9 @@ func (m *IngressConfig) DeleteWasmPlugin(clusterNamespacedName util.ClusterNames
 
 func (m *IngressConfig) AddOrUpdateMcpBridge(clusterNamespacedName util.ClusterNamespacedName) {
 	// TODO: get resource name from config
+	IngressLog.Errorf("mcp ingressClass:%s, name:%s", m.ingressClass, clusterNamespacedName.Name)
 	if clusterNamespacedName.Name != DefaultMcpbridgeName || clusterNamespacedName.Namespace != m.namespace {
+		IngressLog.Errorf("ingressClass:%s, name:%s namespace:%s, m:%s error 1111111", m.ingressClass, clusterNamespacedName.Name, clusterNamespacedName.Namespace, m.namespace)
 		return
 	}
 	mcpbridge, err := m.mcpbridgeLister.McpBridges(clusterNamespacedName.Namespace).Get(clusterNamespacedName.Name)

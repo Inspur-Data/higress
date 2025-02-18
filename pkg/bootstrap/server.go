@@ -15,7 +15,9 @@
 package bootstrap
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"time"
@@ -149,6 +151,50 @@ type Server struct {
 	certServer       *cert.Server
 }
 
+type ServiceFromGatewayItem struct {
+	Attributes *Attributes `json:"attributes"` //属性信息
+	Ports      []*Port     `json:"ports"`      //端口信息
+	Hostname   string      `json:"hostname"`   //主机名称
+}
+
+type Attributes struct {
+	ServiceRegistry string  `json:"serviceRegistry"` //注册中心名称
+	Name            string  `json:"name"`            //服务名称
+	Namespace       string  `json:"namespace"`       //命名空间名称
+	Ports           []*Port `json:"ports"`           //命名空间名称
+}
+
+type Port struct {
+	Name     string `json:"name"`     //服务名称
+	Port     uint32 `json:"port"`     //端口
+	Protocol string `json:"protocol"` //协议
+}
+
+type EndpointFromGatewayItem struct {
+	Svc string      `json:"svc"`
+	Ep  []*Endpoint `json:"ep"`
+}
+
+type Endpoint struct {
+	Service  *ExternalService  `json:"service"`
+	Endpoint *ExternalEndpoint `json:"endpoint"`
+}
+
+type ExternalService struct {
+	Attributes *Attributes `json:"attributes"`
+	Hostname   string      `json:"hostname"`
+}
+
+type ExternalEndpoint struct {
+	Address      string `json:"address"`
+	EndpointPort uint32 `json:"endpointPort"`
+}
+
+type endpointzResponse struct {
+	Service   string                   `json:"svc"`
+	Endpoints []*model.ServiceInstance `json:"ep"`
+}
+
 func NewServer(args *ServerArgs) (*Server, error) {
 	e := model.NewEnvironment()
 	e.DomainSuffix = constants.DefaultClusterLocalDomain
@@ -235,7 +281,7 @@ func (s *Server) initConfigController() error {
 		options.ClusterId = ""
 	}
 
-	ingressConfig := translation.NewIngressTranslation(s.kubeClient, s.xdsServer, ns, options.ClusterId)
+	ingressConfig := translation.NewIngressTranslation(s.kubeClient, s.xdsServer, ns, options.ClusterId, s.IngressClass)
 	ingressConfig.AddLocalCluster(options)
 
 	s.configStores = append(s.configStores, ingressConfig)
@@ -439,6 +485,8 @@ func (s *Server) initHttpServer() error {
 	s.xdsServer.AddDebugHandlers(s.httpMux, nil, true, nil)
 	s.httpMux.HandleFunc("/ready", s.readyHandler)
 	s.httpMux.HandleFunc("/registry/watcherStatus", s.registryWatcherStatusHandler)
+	s.httpMux.HandleFunc("/registryz", s.getRegistryz)
+	s.httpMux.HandleFunc("/endpointz", s.getEndpointz)
 	return nil
 }
 
@@ -536,4 +584,84 @@ func buildLedger(ca RegistryOptions) ledger.Ledger {
 		result = &model.DisabledLedger{}
 	}
 	return result
+}
+
+func (s *Server) getEndpointz(w http.ResponseWriter, _ *http.Request) {
+	client := &http.Client{}
+	log.Warnf("get endpointz 111")
+
+	reqEndpoint, err := http.NewRequest("GET", "http://localhost:15014/debug/endpointz", nil)
+	if err != nil {
+		fmt.Println("Error creating request:", err)
+		return
+	}
+	// 发送请求
+	respendpoint, err := client.Do(reqEndpoint)
+	if err != nil {
+		fmt.Println("Error sending request:", err)
+		return
+	}
+	defer respendpoint.Body.Close()
+	// 读取响应
+	endpoints, err := io.ReadAll(respendpoint.Body)
+	if err != nil {
+		fmt.Println("Error reading endpoints response:", err)
+		return
+	}
+
+	// 过滤k8s service，避免传输过大数据
+	var gatewayEndpoints []EndpointFromGatewayItem
+	var returnGatewayEndpoints []EndpointFromGatewayItem
+	err = json.Unmarshal(endpoints, &gatewayEndpoints)
+	if err != nil {
+		fmt.Println("---------------Error convert endpoints response=======================", err)
+		return
+	}
+	for _, endpoint := range gatewayEndpoints {
+		if endpoint.Ep == nil || len(endpoint.Ep) < 1 || endpoint.Ep[0].Service == nil || endpoint.Ep[0].Service.Attributes == nil {
+			continue
+		}
+		if endpoint.Ep[0].Service.Attributes.ServiceRegistry == "Kubernetes" {
+			continue
+		}
+		returnGatewayEndpoints = append(returnGatewayEndpoints, endpoint)
+	}
+	jsonBytes, _ := json.Marshal(returnGatewayEndpoints)
+	w.Write(jsonBytes)
+	w.WriteHeader(http.StatusOK)
+}
+func (s *Server) getRegistryz(w http.ResponseWriter, _ *http.Request) {
+	client := &http.Client{}
+	req, err := http.NewRequest("GET", "http://localhost:15014/debug/registryz", nil)
+	if err != nil {
+		fmt.Println("Error creating request:", err)
+		return
+	}
+
+	// 发送请求
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Println("Error sending request:", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	// 读取响应
+	registryz, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Println("Error reading registryz response:", err)
+		return
+	}
+
+	// 过滤k8s service，避免传输过大数据
+	var gatewayServices []ServiceFromGatewayItem
+	err = json.Unmarshal(registryz, &gatewayServices)
+	if err != nil {
+		fmt.Println("---------------Error convert registryz response:", err)
+		return
+	}
+
+	w.Write(registryz)
+	w.WriteHeader(http.StatusOK)
+
 }
