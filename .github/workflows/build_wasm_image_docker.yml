@@ -130,7 +130,7 @@ jobs:
         run: |
           docker cp $(docker ps -alq):/workspace/plugins/wasm-go/extensions/${PLUGIN_NAME}/plugin.wasm ./plugin.wasm
       - name: Upload binary as artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v3.12
         with:
           name: wasm-binary
           path: plugin.wasm
