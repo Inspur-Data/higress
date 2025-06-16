@@ -175,8 +175,8 @@ func (r *Reconciler) generateWatcherFromRegistryConfig(registry *apiv1.RegistryC
 			nacosv2.WithNacosAddressServer(registry.NacosAddressServer),
 			nacosv2.WithDomain(registry.Domain),
 			nacosv2.WithPort(registry.Port),
-			nacosv2.WithNacosAccessKey(registry.NacosAccessKey),
-			nacosv2.WithNacosSecretKey(registry.NacosSecretKey),
+			// nacosv2.WithNacosAccessKey(registry.NacosAccessKey),
+			// nacosv2.WithNacosSecretKey(registry.NacosSecretKey),
 			nacosv2.WithNacosNamespaceId(registry.NacosNamespaceId),
 			nacosv2.WithNacosNamespace(registry.NacosNamespace),
 			nacosv2.WithNacosGroups(registry.NacosGroups),
@@ -248,6 +248,14 @@ func (r *Reconciler) generateWatcherFromRegistryConfig(registry *apiv1.RegistryC
 func (r *Reconciler) getAuthOption(registry *apiv1.RegistryConfig) (AuthOption, error) {
 	authOption := AuthOption{}
 	authSecretName := registry.AuthSecretName
+
+	if len(authOption.NacosUsername) == 0 && len(registry.NacosAccessKey) > 0 {
+		authOption.NacosUsername = registry.NacosAccessKey
+	}
+
+	if len(authOption.NacosPassword) == 0 && len(registry.NacosSecretKey) > 0 {
+		authOption.NacosPassword = registry.NacosSecretKey
+	}
 
 	if len(authSecretName) == 0 {
 		return authOption, nil

@@ -310,7 +310,7 @@ func (w *watcher) fetchAllServices() error {
 				if w.addrProvider != nil {
 					w.addrProvider.Trigger()
 				}
-				log.Errorf("fetch nacos service list failed, err:%v, pageNo:%d", err, page)
+				log.Errorf("fetch nacos service list failed, err:%v, pageNo:%d,mcpname: %s, group: %s, namespace: %s", err, page, w.Name, groupName, w.NacosNamespace)
 				page--
 				tries++
 				continue
