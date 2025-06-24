@@ -98,6 +98,10 @@ func NewWatcher(cache memory.Cache, opts ...WatcherOption) (provider.Watcher, er
 		constant.WithMaxAge(DefaultNacosLogMaxAge),
 		constant.WithUpdateCacheWhenEmpty(w.updateCacheWhenEmpty),
 		constant.WithNamespaceId(w.NacosNamespaceId),
+		constant.WithAccessKey(w.NacosAccessKey),
+		constant.WithSecretKey(w.NacosSecretKey),
+		constant.WithUsername(w.authOption.NacosUsername),
+		constant.WithPassword(w.authOption.NacosPassword),
 	)
 
 	sc := []constant.ServerConfig{
