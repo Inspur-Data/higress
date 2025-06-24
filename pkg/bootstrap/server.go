@@ -152,22 +152,22 @@ type Server struct {
 }
 
 type ServiceFromGatewayItem struct {
-	Attributes *Attributes `json:"attributes"` 
-	Ports      []*Port     `json:"ports"`      
-	Hostname   string      `json:"hostname"`   
+	Attributes *Attributes `json:"attributes"`
+	Ports      []*Port     `json:"ports"`
+	Hostname   string      `json:"hostname"`
 }
 
 type Attributes struct {
-	ServiceRegistry string  `json:"serviceRegistry"` 
-	Name            string  `json:"name"`           
-	Namespace       string  `json:"namespace"`       
-	Ports           []*Port `json:"ports"`           
+	ServiceRegistry string  `json:"serviceRegistry"`
+	Name            string  `json:"name"`
+	Namespace       string  `json:"namespace"`
+	Ports           []*Port `json:"ports"`
 }
 
 type Port struct {
-	Name     string `json:"name"`     
-	Port     uint32 `json:"port"`     
-	Protocol string `json:"protocol"` 
+	Name     string `json:"name"`
+	Port     uint32 `json:"port"`
+	Protocol string `json:"protocol"`
 }
 
 type EndpointFromGatewayItem struct {
@@ -447,11 +447,11 @@ func (s *Server) initAutomaticHttps() error {
 	}
 	s.certServer = certServer
 	log.Infof("init cert default config")
-	s.certServer.InitDefaultConfig()
 	if !s.EnableAutomaticHttps {
 		log.Info("automatic https is disabled")
 		return nil
 	}
+	s.certServer.InitDefaultConfig()
 	return s.certServer.InitServer()
 }
 
@@ -595,21 +595,20 @@ func (s *Server) getEndpointz(w http.ResponseWriter, _ *http.Request) {
 		fmt.Println("Error creating request:", err)
 		return
 	}
-	
+
 	respendpoint, err := client.Do(reqEndpoint)
 	if err != nil {
 		fmt.Println("Error sending request:", err)
 		return
 	}
 	defer respendpoint.Body.Close()
-	
+
 	endpoints, err := io.ReadAll(respendpoint.Body)
 	if err != nil {
 		fmt.Println("Error reading endpoints response:", err)
 		return
 	}
 
-	
 	var gatewayEndpoints []EndpointFromGatewayItem
 	var returnGatewayEndpoints []EndpointFromGatewayItem
 	err = json.Unmarshal(endpoints, &gatewayEndpoints)
@@ -638,7 +637,6 @@ func (s *Server) getRegistryz(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 
-	
 	resp, err := client.Do(req)
 	if err != nil {
 		fmt.Println("Error sending request:", err)
@@ -646,14 +644,12 @@ func (s *Server) getRegistryz(w http.ResponseWriter, _ *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	
 	registryz, err := io.ReadAll(resp.Body)
 	if err != nil {
 		fmt.Println("Error reading registryz response:", err)
 		return
 	}
 
-	
 	var gatewayServices []ServiceFromGatewayItem
 	err = json.Unmarshal(registryz, &gatewayServices)
 	if err != nil {
