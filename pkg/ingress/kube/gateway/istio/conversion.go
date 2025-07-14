@@ -1145,6 +1145,7 @@ func buildHTTPDestination(
 
 func buildDestination(ctx configContext, to k8s.BackendRef, ns string, enforceRefGrant bool) (*istio.Destination, *ConfigError) {
 	// check if the reference is allowed
+	/*
 	if enforceRefGrant {
 		refs := ctx.AllowedReferences
 		if toNs := to.Namespace; toNs != nil && string(*toNs) != ns {
@@ -1156,6 +1157,7 @@ func buildDestination(ctx configContext, to k8s.BackendRef, ns string, enforceRe
 			}
 		}
 	}
+       */
 
 	namespace := ptr.OrDefault((*string)(to.Namespace), ns)
 	var invalidBackendErr *ConfigError
