@@ -192,7 +192,7 @@ func NewIngressConfig(localKubeClient kube.Client, xdsUpdater istiomodel.XDSUpda
 	higressConfigController := configmap.NewController(localKubeClient, clusterId, namespace)
 	config.configmapMgr = configmap.NewConfigmapMgr(xdsUpdater, namespace, higressConfigController, higressConfigController.Lister())
 
-	httpsConfigMgr, _ := cert.NewConfigMgr(namespace, localKubeClient.Kube())
+	httpsConfigMgr, _ := cert.NewConfigMgr(ingressClaas, namespace, localKubeClient.Kube())
 	config.httpsConfigMgr = httpsConfigMgr
 
 	return config
