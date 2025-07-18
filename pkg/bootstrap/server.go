@@ -451,8 +451,8 @@ func (s *Server) initAutomaticHttps() error {
 		log.Info("automatic https is disabled")
 		return nil
 	}
-	s.certServer.InitDefaultConfig()
-	return s.certServer.InitServer()
+	s.certServer.InitDefaultConfig(s.IngressClass)
+	return s.certServer.InitServer(s.IngressClass)
 }
 
 func (s *Server) initKubeClient() error {

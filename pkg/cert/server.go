@@ -50,8 +50,8 @@ func NewServer(clientSet kubernetes.Interface, XDSUpdater model.XDSUpdater, opts
 	return server, nil
 }
 
-func (s *Server) InitDefaultConfig() error {
-	configMgr, _ := NewConfigMgr(s.opts.Namespace, s.clientSet)
+func (s *Server) InitDefaultConfig(ingressClassName string) error {
+	configMgr, _ := NewConfigMgr(ingressClassName, s.opts.Namespace, s.clientSet)
 	// init config if there is not existed
 	_, err := configMgr.InitConfig(s.opts.Email)
 	if err != nil {
@@ -60,8 +60,8 @@ func (s *Server) InitDefaultConfig() error {
 	return nil
 }
 
-func (s *Server) InitServer() error {
-	configMgr, _ := NewConfigMgr(s.opts.Namespace, s.clientSet)
+func (s *Server) InitServer(ingressClassName string) error {
+	configMgr, _ := NewConfigMgr(ingressClassName, s.opts.Namespace, s.clientSet)
 	// init config if there is not existed
 	defaultConfig, err := configMgr.InitConfig(s.opts.Email)
 	if err != nil {

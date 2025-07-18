@@ -1068,15 +1068,15 @@ func (m *IngressConfig) DeleteWasmPlugin(clusterNamespacedName util.ClusterNames
 
 func (m *IngressConfig) AddOrUpdateMcpBridge(clusterNamespacedName util.ClusterNamespacedName) {
 	// TODO: get resource name from config
-	IngressLog.Errorf("mcp ingressClass:%s, name:%s, namespace:%s", m.ingressClass, clusterNamespacedName.Name, clusterNamespacedName.Namespace)
+	IngressLog.Info("mcp ingressClass:%s, name:%s, namespace:%s", m.ingressClass, clusterNamespacedName.Name, clusterNamespacedName.Namespace)
 	mcpbridgeName := m.ingressClass + "-default"
 	mcpbridge, err := m.mcpbridgeLister.McpBridges(clusterNamespacedName.Namespace).Get(mcpbridgeName)
 	if err != nil {
-		IngressLog.Errorf("Mcpbridge is not found, namespace:%s, name:%s",
+		IngressLog.Info("Mcpbridge is not found, namespace:%s, name:%s",
 			clusterNamespacedName.Namespace, clusterNamespacedName.Name)
 		return
 	}
-	IngressLog.Errorf("start reconcile, mcpbridge name:%s", mcpbridge.Name)
+	IngressLog.Info("start reconcile, mcpbridge name:%s", mcpbridge.Name)
 	if m.RegistryReconciler == nil {
 		m.RegistryReconciler = reconcile.NewReconciler(func() {
 			seMetadata := config.Meta{

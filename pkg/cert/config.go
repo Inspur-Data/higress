@@ -168,6 +168,7 @@ type ConfigMgr struct {
 	client    kubernetes.Interface
 	config    atomic.Value
 	namespace string
+	name      string
 }
 
 func (c *ConfigMgr) SetConfig(config *Config) {
@@ -239,13 +240,13 @@ func (c *ConfigMgr) GetConfigFromConfigmap() (*Config, error) {
 }
 
 func (c *ConfigMgr) GetConfigmap() (configmap *v1.ConfigMap, err error) {
-	configmapName := ConfigmapCertName
+	configmapName := c.name
 	cm, err := c.client.CoreV1().ConfigMaps(c.namespace).Get(context.Background(), configmapName, metav1.GetOptions{})
 	return cm, err
 }
 
 func (c *ConfigMgr) ApplyConfigmap(config *Config) error {
-	configmapName := ConfigmapCertName
+	configmapName := c.name
 	cm := &v1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: c.namespace,
@@ -276,10 +277,11 @@ func (c *ConfigMgr) ApplyConfigmap(config *Config) error {
 	return nil
 }
 
-func NewConfigMgr(namespace string, client kubernetes.Interface) (*ConfigMgr, error) {
+func NewConfigMgr(ingressClassName, namespace string, client kubernetes.Interface) (*ConfigMgr, error) {
 	configMgr := &ConfigMgr{
 		client:    client,
 		namespace: namespace,
+		name:      ingressClassName + "-https",
 	}
 	return configMgr, nil
 }
