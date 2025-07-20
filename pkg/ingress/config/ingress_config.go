@@ -857,7 +857,7 @@ func (m *IngressConfig) applyInternalActiveRedirect(convertOptions *common.Conve
 
 func (m *IngressConfig) convertIstioWasmPlugin(obj *higressext.WasmPlugin) (*extensions.WasmPlugin, error) {
 	gatewayName := env.RegisterStringVar("GATEWAY_NAME", "", "").Get()
-	IngressLog.Errorf("gatewayName %s", gatewayName)
+	IngressLog.Info("gatewayName %s", gatewayName)
 	result := &extensions.WasmPlugin{
 		Selector: &istiotype.WorkloadSelector{
 			MatchLabels: map[string]string{

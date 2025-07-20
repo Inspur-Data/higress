@@ -52,7 +52,7 @@ func NewWatcher(cache memory.Cache, opts ...WatcherOption) (provider.Watcher, er
 	if common.ParseProtocol(w.Protocol) == common.Unsupported {
 		return nil, errors.Errorf("invalid protocol:%s", w.Protocol)
 	}
-	log.Errorf("start new mcp registry watcher for type:%s, name:%s", w.Type, w.Name)
+	log.Info("start new mcp registry watcher for type:%s, name:%s", w.Type, w.Name)
 
 	return w, nil
 }
