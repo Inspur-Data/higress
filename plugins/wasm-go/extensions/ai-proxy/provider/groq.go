@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/alibaba/higress/plugins/wasm-go/extensions/ai-proxy/util"
-	"github.com/alibaba/higress/plugins/wasm-go/pkg/wrapper"
+	"github.com/higress-group/wasm-go/pkg/wrapper"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
 )
 
@@ -18,14 +18,21 @@ const (
 
 type groqProviderInitializer struct{}
 
-func (g *groqProviderInitializer) ValidateConfig(config ProviderConfig) error {
+func (g *groqProviderInitializer) ValidateConfig(config *ProviderConfig) error {
 	if config.apiTokens == nil || len(config.apiTokens) == 0 {
 		return errors.New("no apiToken found in provider config")
 	}
 	return nil
 }
 
+func (g *groqProviderInitializer) DefaultCapabilities() map[string]string {
+	return map[string]string{
+		string(ApiNameChatCompletion): groqChatCompletionPath,
+	}
+}
+
 func (g *groqProviderInitializer) CreateProvider(config ProviderConfig) (Provider, error) {
+	config.setDefaultCapabilities(g.DefaultCapabilities())
 	return &groqProvider{
 		config:       config,
 		contextCache: createContextCache(&config),
@@ -41,23 +48,20 @@ func (g *groqProvider) GetProviderType() string {
 	return providerTypeGroq
 }
 
-func (g *groqProvider) OnRequestHeaders(ctx wrapper.HttpContext, apiName ApiName, log wrapper.Log) (types.Action, error) {
-	if apiName != ApiNameChatCompletion {
-		return types.ActionContinue, errUnsupportedApiName
-	}
-	g.config.handleRequestHeaders(g, ctx, apiName, log)
-	return types.ActionContinue, nil
+func (g *groqProvider) OnRequestHeaders(ctx wrapper.HttpContext, apiName ApiName) error {
+	g.config.handleRequestHeaders(g, ctx, apiName)
+	return nil
 }
 
-func (g *groqProvider) OnRequestBody(ctx wrapper.HttpContext, apiName ApiName, body []byte, log wrapper.Log) (types.Action, error) {
-	if apiName != ApiNameChatCompletion {
+func (g *groqProvider) OnRequestBody(ctx wrapper.HttpContext, apiName ApiName, body []byte) (types.Action, error) {
+	if !g.config.isSupportedAPI(apiName) {
 		return types.ActionContinue, errUnsupportedApiName
 	}
-	return g.config.handleRequestBody(g, g.contextCache, ctx, apiName, body, log)
+	return g.config.handleRequestBody(g, g.contextCache, ctx, apiName, body)
 }
 
-func (g *groqProvider) TransformRequestHeaders(ctx wrapper.HttpContext, apiName ApiName, headers http.Header, log wrapper.Log) {
-	util.OverwriteRequestPathHeader(headers, groqChatCompletionPath)
+func (g *groqProvider) TransformRequestHeaders(ctx wrapper.HttpContext, apiName ApiName, headers http.Header) {
+	util.OverwriteRequestPathHeaderByCapability(headers, string(apiName), g.config.capabilities)
 	util.OverwriteRequestHostHeader(headers, groqDomain)
 	util.OverwriteRequestAuthorizationHeader(headers, "Bearer "+g.config.GetApiTokenInUse(ctx))
 	headers.Del("Content-Length")

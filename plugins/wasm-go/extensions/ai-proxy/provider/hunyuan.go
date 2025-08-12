@@ -13,7 +13,8 @@ import (
 	"time"
 
 	"github.com/alibaba/higress/plugins/wasm-go/extensions/ai-proxy/util"
-	"github.com/alibaba/higress/plugins/wasm-go/pkg/wrapper"
+	"github.com/higress-group/wasm-go/pkg/log"
+	"github.com/higress-group/wasm-go/pkg/wrapper"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
 )
@@ -39,10 +40,12 @@ const (
 
 	hunyuanAuthKeyLen = 32
 	hunyuanAuthIdLen  = 36
+
+	// docs: https://cloud.tencent.com/document/product/1729/111007
+	hunyuanOpenAiDomain = "api.hunyuan.cloud.tencent.com"
 )
 
-type hunyuanProviderInitializer struct {
-}
+type hunyuanProviderInitializer struct{}
 
 // ref: https://console.cloud.tencent.com/api/explorer?Product=hunyuan&Version=2023-09-01&Action=ChatCompletions
 type hunyuanTextGenRequest struct {
@@ -85,7 +88,11 @@ type hunyuanChatMessage struct {
 	Content string `json:"Content,omitempty"`
 }
 
-func (m *hunyuanProviderInitializer) ValidateConfig(config ProviderConfig) error {
+func (m *hunyuanProviderInitializer) ValidateConfig(config *ProviderConfig) error {
+	// 允许 hunyuanauthid 和 hunyuanauthkey 为空, 当他们都为空的时候，认为是使用openai的 兼容接口
+	if len(config.hunyuanAuthId) == 0 && len(config.hunyuanAuthKey) == 0 {
+		return nil
+	}
 	// 校验hunyuan id 和 key的合法性
 	if len(config.hunyuanAuthId) != hunyuanAuthIdLen || len(config.hunyuanAuthKey) != hunyuanAuthKeyLen {
 		return errors.New("hunyuanAuthId / hunyuanAuthKey is illegal in config file")
@@ -93,7 +100,15 @@ func (m *hunyuanProviderInitializer) ValidateConfig(config ProviderConfig) error
 	return nil
 }
 
+func (m *hunyuanProviderInitializer) DefaultCapabilities() map[string]string {
+	return map[string]string{
+		string(ApiNameChatCompletion): PathOpenAIChatCompletions,
+		string(ApiNameEmbeddings):     PathOpenAIEmbeddings,
+	}
+}
+
 func (m *hunyuanProviderInitializer) CreateProvider(config ProviderConfig) (Provider, error) {
+	config.setDefaultCapabilities(m.DefaultCapabilities())
 	return &hunyuanProvider{
 		config: config,
 		client: wrapper.NewClusterClient(wrapper.RouteCluster{
@@ -114,31 +129,37 @@ func (m *hunyuanProvider) GetProviderType() string {
 	return providerTypeHunyuan
 }
 
-func (m *hunyuanProvider) OnRequestHeaders(ctx wrapper.HttpContext, apiName ApiName, log wrapper.Log) (types.Action, error) {
-	if apiName != ApiNameChatCompletion {
-		return types.ActionContinue, errUnsupportedApiName
-	}
-	m.config.handleRequestHeaders(m, ctx, apiName, log)
-	// Delay the header processing to allow changing streaming mode in OnRequestBody
-	return types.HeaderStopIteration, nil
+func (m *hunyuanProvider) useOpenAICompatibleAPI() bool {
+	return len(m.config.hunyuanAuthId) == 0 && len(m.config.hunyuanAuthKey) == 0
 }
 
-func (m *hunyuanProvider) TransformRequestHeaders(ctx wrapper.HttpContext, apiName ApiName, headers http.Header, log wrapper.Log) {
-	util.OverwriteRequestHostHeader(headers, hunyuanDomain)
-	util.OverwriteRequestPathHeader(headers, hunyuanRequestPath)
+func (m *hunyuanProvider) OnRequestHeaders(ctx wrapper.HttpContext, apiName ApiName) error {
+	m.config.handleRequestHeaders(m, ctx, apiName)
+	// Delay the header processing to allow changing streaming mode in OnRequestBody
+	return nil
+}
 
-	// 添加 hunyuan 需要的自定义字段
-	headers.Add(actionKey, hunyuanChatCompletionTCAction)
-	headers.Add(versionKey, versionValue)
-
-	headers.Del("Accept-Encoding")
-	headers.Del("Content-Length")
+func (m *hunyuanProvider) TransformRequestHeaders(ctx wrapper.HttpContext, apiName ApiName, headers http.Header) {
+	if m.useOpenAICompatibleAPI() {
+		util.OverwriteRequestHostHeader(headers, hunyuanOpenAiDomain)
+		util.OverwriteRequestPathHeaderByCapability(headers, string(apiName), m.config.capabilities)
+		util.OverwriteRequestAuthorizationHeader(headers, "Bearer "+m.config.GetApiTokenInUse(ctx))
+	} else {
+		util.OverwriteRequestHostHeader(headers, hunyuanDomain)
+		util.OverwriteRequestPathHeader(headers, hunyuanRequestPath)
+		// 添加 hunyuan 需要的自定义字段
+		headers.Set(actionKey, hunyuanChatCompletionTCAction)
+		headers.Set(versionKey, versionValue)
+	}
 }
 
 // hunyuan 的 OnRequestBody 逻辑中包含了对 headers 签名的逻辑，并且插入 context 以后还要重新计算签名，因此无法复用 handleRequestBody 方法
-func (m *hunyuanProvider) OnRequestBody(ctx wrapper.HttpContext, apiName ApiName, body []byte, log wrapper.Log) (types.Action, error) {
-	if apiName != ApiNameChatCompletion {
+func (m *hunyuanProvider) OnRequestBody(ctx wrapper.HttpContext, apiName ApiName, body []byte) (types.Action, error) {
+	if !m.config.isSupportedAPI(apiName) {
 		return types.ActionContinue, errUnsupportedApiName
+	}
+	if m.useOpenAICompatibleAPI() {
+		return types.ActionContinue, nil
 	}
 
 	// 为header添加时间戳字段 （因为需要根据body进行签名时依赖时间戳，故于body处理部分创建时间戳）
@@ -162,7 +183,7 @@ func (m *hunyuanProvider) OnRequestBody(ctx wrapper.HttpContext, apiName ApiName
 
 		// 若无配置文件，直接返回
 		if m.config.context == nil {
-			return types.ActionContinue, replaceJsonRequestBody(request, log)
+			return types.ActionContinue, replaceJsonRequestBody(request)
 		}
 		err := m.contextCache.GetContent(func(content string, err error) {
 			log.Debugf("#debug nash5# ctx file loaded! callback start, content is: %s", content)
@@ -172,7 +193,7 @@ func (m *hunyuanProvider) OnRequestBody(ctx wrapper.HttpContext, apiName ApiName
 
 			if err != nil {
 				log.Errorf("failed to load context file: %v", err)
-				_ = util.SendResponse(500, "ai-proxy.hunyuan.load_ctx_failed", util.MimeTypeTextPlain, fmt.Sprintf("failed to load context file: %v", err))
+				util.ErrorHandler("ai-proxy.hunyuan.load_ctx_failed", fmt.Errorf("failed to load context file: %v", err))
 			}
 			m.insertContextMessageIntoHunyuanRequest(request, content)
 
@@ -181,17 +202,17 @@ func (m *hunyuanProvider) OnRequestBody(ctx wrapper.HttpContext, apiName ApiName
 			authorizedValueNew := GetTC3Authorizationcode(m.config.hunyuanAuthId, m.config.hunyuanAuthKey, timestamp, hunyuanDomain, hunyuanChatCompletionTCAction, string(hunyuanBody))
 			_ = util.OverwriteRequestAuthorization(authorizedValueNew)
 
-			if err := replaceJsonRequestBody(request, log); err != nil {
-				_ = util.SendResponse(500, "ai-proxy.hunyuan.insert_ctx_failed", util.MimeTypeTextPlain, fmt.Sprintf("failed to replace request body: %v", err))
+			if err := replaceJsonRequestBody(request); err != nil {
+				util.ErrorHandler("ai-proxy.hunyuan.insert_ctx_failed", fmt.Errorf("failed to replace request body: %v", err))
 			}
-		}, log)
+		})
 		if err == nil {
 			log.Debugf("#debug nash5# ctx file load success!")
 			return types.ActionPause, nil
 		}
 
 		log.Debugf("#debug nash5# ctx file load failed!")
-		return types.ActionContinue, replaceJsonRequestBody(request, log)
+		return types.ActionContinue, replaceJsonRequestBody(request)
 	}
 
 	// 使用open ai接口协议
@@ -205,7 +226,7 @@ func (m *hunyuanProvider) OnRequestBody(ctx wrapper.HttpContext, apiName ApiName
 		return types.ActionContinue, errors.New("missing model in chat completion request")
 	}
 	ctx.SetContext(ctxKeyOriginalRequestModel, model) // 设置原始请求的model，以便返回值使用
-	mappedModel := getMappedModel(model, m.config.modelMapping, log)
+	mappedModel := getMappedModel(model, m.config.modelMapping)
 	if mappedModel == "" {
 		return types.ActionContinue, errors.New("model becomes empty after applying the configured mapping")
 	}
@@ -235,7 +256,7 @@ func (m *hunyuanProvider) OnRequestBody(ctx wrapper.HttpContext, apiName ApiName
 			string(body),
 		)
 		_ = util.OverwriteRequestAuthorization(authorizedValueNew)
-		return types.ActionContinue, replaceJsonRequestBody(hunyuanRequest, log)
+		return types.ActionContinue, replaceJsonRequestBody(hunyuanRequest)
 	}
 
 	err := m.contextCache.GetContent(func(content string, err error) {
@@ -244,7 +265,7 @@ func (m *hunyuanProvider) OnRequestBody(ctx wrapper.HttpContext, apiName ApiName
 		}()
 		if err != nil {
 			log.Errorf("failed to load context file: %v", err)
-			_ = util.SendResponse(500, "ai-proxy.hunyuan.load_ctx_failed", util.MimeTypeTextPlain, fmt.Sprintf("failed to load context file: %v", err))
+			util.ErrorHandler("ai-proxy.hunyuan.load_ctx_failed", fmt.Errorf("failed to load context file: %v", err))
 			return
 		}
 		insertContextMessage(request, content)
@@ -255,10 +276,10 @@ func (m *hunyuanProvider) OnRequestBody(ctx wrapper.HttpContext, apiName ApiName
 		authorizedValueNew := GetTC3Authorizationcode(m.config.hunyuanAuthId, m.config.hunyuanAuthKey, timestamp, hunyuanDomain, hunyuanChatCompletionTCAction, string(hunyuanBody))
 		_ = util.OverwriteRequestAuthorization(authorizedValueNew)
 
-		if err := replaceJsonRequestBody(hunyuanRequest, log); err != nil {
-			_ = util.SendResponse(500, "ai-proxy.hunyuan.insert_ctx_failed", util.MimeTypeTextPlain, fmt.Sprintf("failed to replace request body: %v", err))
+		if err := replaceJsonRequestBody(hunyuanRequest); err != nil {
+			util.ErrorHandler("ai-proxy.hunyuan.insert_ctx_failed", fmt.Errorf("failed to replace request body: %v", err))
 		}
-	}, log)
+	})
 	if err == nil {
 		return types.ActionPause, nil
 	}
@@ -266,9 +287,12 @@ func (m *hunyuanProvider) OnRequestBody(ctx wrapper.HttpContext, apiName ApiName
 }
 
 // hunyuan 的 TransformRequestBodyHeaders 方法只在 failover 健康检查的时候会调用
-func (m *hunyuanProvider) TransformRequestBodyHeaders(ctx wrapper.HttpContext, apiName ApiName, body []byte, headers http.Header, log wrapper.Log) ([]byte, error) {
+func (m *hunyuanProvider) TransformRequestBodyHeaders(ctx wrapper.HttpContext, apiName ApiName, body []byte, headers http.Header) ([]byte, error) {
+	if m.useOpenAICompatibleAPI() {
+		return m.config.defaultTransformRequestBody(ctx, apiName, body)
+	}
 	request := &chatCompletionRequest{}
-	err := m.config.parseRequestAndMapModel(ctx, request, body, log)
+	err := m.config.parseRequestAndMapModel(ctx, request, body)
 	if err != nil {
 		return nil, err
 	}
@@ -291,18 +315,13 @@ func (m *hunyuanProvider) TransformRequestBodyHeaders(ctx wrapper.HttpContext, a
 	return json.Marshal(hunyuanRequest)
 }
 
-func (m *hunyuanProvider) OnResponseHeaders(ctx wrapper.HttpContext, apiName ApiName, log wrapper.Log) (types.Action, error) {
-	_ = proxywasm.RemoveHttpResponseHeader("Content-Length")
-	return types.ActionContinue, nil
-}
-
-func (m *hunyuanProvider) OnStreamingResponseBody(ctx wrapper.HttpContext, name ApiName, chunk []byte, isLastChunk bool, log wrapper.Log) ([]byte, error) {
-	if m.config.protocol == protocolOriginal {
+func (m *hunyuanProvider) OnStreamingResponseBody(ctx wrapper.HttpContext, name ApiName, chunk []byte, isLastChunk bool) ([]byte, error) {
+	if m.config.IsOriginal() || m.useOpenAICompatibleAPI() || name != ApiNameChatCompletion {
 		return chunk, nil
 	}
 
 	// hunyuan的流式返回:
-	//data: {"Note":"以上内容为AI生成，不代表开发者立场，请勿删除或修改本标记","Choices":[{"Delta":{"Role":"assistant","Content":"有助于"},"FinishReason":""}],"Created":1716359713,"Id":"086b6b19-8b2c-4def-a65c-db6a7bc86acd","Usage":{"PromptTokens":7,"CompletionTokens":145,"TotalTokens":152}}
+	// data: {"Note":"以上内容为AI生成，不代表开发者立场，请勿删除或修改本标记","Choices":[{"Delta":{"Role":"assistant","Content":"有助于"},"FinishReason":""}],"Created":1716359713,"Id":"086b6b19-8b2c-4def-a65c-db6a7bc86acd","Usage":{"PromptTokens":7,"CompletionTokens":145,"TotalTokens":152}}
 
 	// openai的流式返回
 	// data: {"id": "chatcmpl-7QyqpwdfhqwajicIEznoc6Q47XAyW", "object": "chat.completion.chunk", "created": 1677664795, "model": "gpt-3.5-turbo-0613", "choices": [{"delta": {"content": "The "}, "index": 0, "finish_reason": null}]}
@@ -316,7 +335,7 @@ func (m *hunyuanProvider) OnStreamingResponseBody(ctx wrapper.HttpContext, name 
 	}
 
 	// 初始化处理下标，以及将要返回的处理过的chunks
-	var newEventPivot = -1
+	newEventPivot := -1
 	var outputBuffer []byte
 
 	// 从buffer区取出若干完整的chunk，将其转为openAI格式后返回
@@ -343,7 +362,7 @@ func (m *hunyuanProvider) OnStreamingResponseBody(ctx wrapper.HttpContext, name 
 		newBufferedBody = newBufferedBody[newEventPivot+2:] // 跳过结束标识
 
 		// 转换并追加到输出缓冲区
-		convertedData, _ := m.convertChunkFromHunyuanToOpenAI(ctx, eventData, log)
+		convertedData, _ := m.convertChunkFromHunyuanToOpenAI(ctx, eventData)
 		// log.Debugf("@@@ >>> converted one chunk: %s", string(convertedData))
 		outputBuffer = append(outputBuffer, convertedData...)
 	}
@@ -355,7 +374,7 @@ func (m *hunyuanProvider) OnStreamingResponseBody(ctx wrapper.HttpContext, name 
 	return outputBuffer, nil
 }
 
-func (m *hunyuanProvider) convertChunkFromHunyuanToOpenAI(ctx wrapper.HttpContext, hunyuanChunk []byte, log wrapper.Log) ([]byte, error) {
+func (m *hunyuanProvider) convertChunkFromHunyuanToOpenAI(ctx wrapper.HttpContext, hunyuanChunk []byte) ([]byte, error) {
 	// 将hunyuan的chunk转为openai的chunk
 	hunyuanFormattedChunk := &hunyuanTextGenDetailedResponseNonStreaming{}
 	if err := json.Unmarshal(hunyuanChunk, hunyuanFormattedChunk); err != nil {
@@ -368,7 +387,7 @@ func (m *hunyuanProvider) convertChunkFromHunyuanToOpenAI(ctx wrapper.HttpContex
 		Model:             ctx.GetStringContext(ctxKeyFinalRequestModel, ""),
 		SystemFingerprint: "",
 		Object:            objectChatCompletionChunk,
-		Usage: usage{
+		Usage: &usage{
 			PromptTokens:     hunyuanFormattedChunk.Usage.PromptTokens,
 			CompletionTokens: hunyuanFormattedChunk.Usage.CompletionTokens,
 			TotalTokens:      hunyuanFormattedChunk.Usage.TotalTokens,
@@ -381,7 +400,7 @@ func (m *hunyuanProvider) convertChunkFromHunyuanToOpenAI(ctx wrapper.HttpContex
 	if hunyuanFormattedChunk.Choices[0].FinishReason == hunyuanStreamEndMark {
 		// log.Debugf("@@@ --- 最后chunk: ")
 		openAIFormattedChunk.Choices = append(openAIFormattedChunk.Choices, chatCompletionChoice{
-			FinishReason: hunyuanFormattedChunk.Choices[0].FinishReason,
+			FinishReason: util.Ptr(hunyuanFormattedChunk.Choices[0].FinishReason),
 		})
 	} else {
 		deltaMsg := chatMessage{
@@ -412,25 +431,23 @@ func (m *hunyuanProvider) convertChunkFromHunyuanToOpenAI(ctx wrapper.HttpContex
 	return []byte(openAIChunk.String()), nil
 }
 
-func (m *hunyuanProvider) OnResponseBody(ctx wrapper.HttpContext, apiName ApiName, body []byte, log wrapper.Log) (types.Action, error) {
-
+func (m *hunyuanProvider) TransformResponseBody(ctx wrapper.HttpContext, apiName ApiName, body []byte) ([]byte, error) {
+	if m.config.IsOriginal() || m.useOpenAICompatibleAPI() {
+		return body, nil
+	}
+	if apiName != ApiNameChatCompletion {
+		return body, nil
+	}
 	log.Debugf("#debug nash5# onRespBody's resp is: %s", string(body))
 	hunyuanResponse := &hunyuanTextGenResponseNonStreaming{}
 	if err := json.Unmarshal(body, hunyuanResponse); err != nil {
-		return types.ActionContinue, fmt.Errorf("unable to unmarshal hunyuan response: %v", err)
+		return nil, fmt.Errorf("unable to unmarshal hunyuan response: %v", err)
 	}
-
-	if m.config.protocol == protocolOriginal {
-		return types.ActionContinue, replaceJsonResponseBody(hunyuanResponse, log)
-	}
-
 	response := m.buildChatCompletionResponse(ctx, hunyuanResponse)
-
-	return types.ActionContinue, replaceJsonResponseBody(response, log)
+	return json.Marshal(response)
 }
 
 func (m *hunyuanProvider) insertContextMessageIntoHunyuanRequest(request *hunyuanTextGenRequest, content string) {
-
 	fileMessage := hunyuanChatMessage{
 		Role:    roleSystem,
 		Content: content,
@@ -478,7 +495,7 @@ func (m *hunyuanProvider) buildChatCompletionResponse(ctx wrapper.HttpContext, h
 				Content:   choice.Message.Content,
 				ToolCalls: nil,
 			},
-			FinishReason: choice.FinishReason,
+			FinishReason: util.Ptr(choice.FinishReason),
 		})
 	}
 	return &chatCompletionResponse{
@@ -488,7 +505,7 @@ func (m *hunyuanProvider) buildChatCompletionResponse(ctx wrapper.HttpContext, h
 		SystemFingerprint: "",
 		Object:            objectChatCompletion,
 		Choices:           choices,
-		Usage: usage{
+		Usage: &usage{
 			PromptTokens:     hunyuanResponse.Response.Usage.PromptTokens,
 			CompletionTokens: hunyuanResponse.Response.Usage.CompletionTokens,
 			TotalTokens:      hunyuanResponse.Response.Usage.TotalTokens,

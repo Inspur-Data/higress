@@ -2,28 +2,35 @@ package provider
 
 import (
 	"errors"
-	"github.com/alibaba/higress/plugins/wasm-go/extensions/ai-proxy/util"
-	"github.com/alibaba/higress/plugins/wasm-go/pkg/wrapper"
-	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
 	"net/http"
+
+	"github.com/alibaba/higress/plugins/wasm-go/extensions/ai-proxy/util"
+	"github.com/higress-group/wasm-go/pkg/wrapper"
+	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
 )
 
 const (
-	stepfunDomain             = "api.stepfun.com"
-	stepfunChatCompletionPath = "/v1/chat/completions"
+	stepfunDomain = "api.stepfun.com"
 )
 
-type stepfunProviderInitializer struct {
-}
+type stepfunProviderInitializer struct{}
 
-func (m *stepfunProviderInitializer) ValidateConfig(config ProviderConfig) error {
+func (m *stepfunProviderInitializer) ValidateConfig(config *ProviderConfig) error {
 	if config.apiTokens == nil || len(config.apiTokens) == 0 {
 		return errors.New("no apiToken found in provider config")
 	}
 	return nil
 }
 
+func (m *stepfunProviderInitializer) DefaultCapabilities() map[string]string {
+	return map[string]string{
+		// stepfun的chat接口path和OpenAI的chat接口一样
+		string(ApiNameChatCompletion): PathOpenAIChatCompletions,
+	}
+}
+
 func (m *stepfunProviderInitializer) CreateProvider(config ProviderConfig) (Provider, error) {
+	config.setDefaultCapabilities(m.DefaultCapabilities())
 	return &stepfunProvider{
 		config:       config,
 		contextCache: createContextCache(&config),
@@ -39,23 +46,20 @@ func (m *stepfunProvider) GetProviderType() string {
 	return providerTypeStepfun
 }
 
-func (m *stepfunProvider) OnRequestHeaders(ctx wrapper.HttpContext, apiName ApiName, log wrapper.Log) (types.Action, error) {
-	if apiName != ApiNameChatCompletion {
-		return types.ActionContinue, errUnsupportedApiName
-	}
-	m.config.handleRequestHeaders(m, ctx, apiName, log)
-	return types.ActionContinue, nil
+func (m *stepfunProvider) OnRequestHeaders(ctx wrapper.HttpContext, apiName ApiName) error {
+	m.config.handleRequestHeaders(m, ctx, apiName)
+	return nil
 }
 
-func (m *stepfunProvider) OnRequestBody(ctx wrapper.HttpContext, apiName ApiName, body []byte, log wrapper.Log) (types.Action, error) {
-	if apiName != ApiNameChatCompletion {
+func (m *stepfunProvider) OnRequestBody(ctx wrapper.HttpContext, apiName ApiName, body []byte) (types.Action, error) {
+	if !m.config.isSupportedAPI(apiName) {
 		return types.ActionContinue, errUnsupportedApiName
 	}
-	return m.config.handleRequestBody(m, m.contextCache, ctx, apiName, body, log)
+	return m.config.handleRequestBody(m, m.contextCache, ctx, apiName, body)
 }
 
-func (m *stepfunProvider) TransformRequestHeaders(ctx wrapper.HttpContext, apiName ApiName, headers http.Header, log wrapper.Log) {
-	util.OverwriteRequestPathHeader(headers, stepfunChatCompletionPath)
+func (m *stepfunProvider) TransformRequestHeaders(ctx wrapper.HttpContext, apiName ApiName, headers http.Header) {
+	util.OverwriteRequestPathHeaderByCapability(headers, string(apiName), m.config.capabilities)
 	util.OverwriteRequestHostHeader(headers, stepfunDomain)
 	util.OverwriteRequestAuthorizationHeader(headers, "Bearer "+m.config.GetApiTokenInUse(ctx))
 	headers.Del("Content-Length")

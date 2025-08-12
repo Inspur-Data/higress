@@ -29,15 +29,16 @@ Plugin execution priority: `100`
 
 **Details for the `provider` configuration fields:**
 
-| Name           | Data Type        | Requirement | Default | Description                                                                                                                                                                                                                                                           |
-| -------------- | --------------- | -------- | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------                                                                                                  |
-| `type`         | string          | Required     | -      | Name of the AI service provider                                                                                                                                                                                                                                              |
-| `apiTokens`    | array of string | Optional   | -      | Tokens used for authentication when accessing AI services. If multiple tokens are configured, the plugin randomly selects one for each request. Some service providers only support configuring a single token.                                                                                                                                     |
-| `timeout`      | number          | Optional   | -      | Timeout for accessing AI services, in milliseconds. The default value is 120000, which equals 2 minutes.                                                                                                                                                                                                 |
-| `modelMapping` | map of string   | Optional   | -      | Mapping table for AI models, used to map model names in requests to names supported by the service provider.<br/>1. Supports prefix matching. For example, "gpt-3-*" matches all model names starting with “gpt-3-”;<br/>2. Supports using "*" as a key for a general fallback mapping;<br/>3. If the mapped target name is an empty string "", the original model name is preserved. |
-| `protocol`     | string          | Optional   | -      | API contract provided by the plugin. Currently supports the following values: openai (default, uses OpenAI's interface contract), original (uses the raw interface contract of the target service provider)                                                                                                                          |
-| `context`      | object          | Optional   | -      | Configuration for AI conversation context information                                                                                                                                                                                                                                         |
-| `customSettings` | array of customSetting | Optional   | -      | Specifies overrides or fills parameters for AI requests                                                                                                                                                                                                                                 |
+| Name             | Data Type              | Requirement | Default | Description                                                                                                                                                                                                                                                                                                                                                                               |
+| --------------   | ---------------        | --------    | ------  | -------------------------------------------------------------------------------------------------------------------------------------------------------------                                                                                                                                                                                                                             |
+| `type`           | string                 | Required    | -       | Name of the AI service provider                                                                                                                                                                                                                                                                                                                                                           |
+| `apiTokens`      | array of string        | Optional    | -       | Tokens used for authentication when accessing AI services. If multiple tokens are configured, the plugin randomly selects one for each request. Some service providers only support configuring a single token.                                                                                                                                                                           |
+| `timeout`        | number                 | Optional    | -       | Timeout for accessing AI services, in milliseconds. The default value is 120000, which equals 2 minutes. Only used when retrieving context data. Won't affect the request forwarded to the LLM upstream.                                                                                                                                                                                  |
+| `modelMapping`   | map of string          | Optional    | -       | Mapping table for AI models, used to map model names in requests to names supported by the service provider.<br/>1. Supports prefix matching. For example, "gpt-3-\*" matches all model names starting with “gpt-3-”;<br/>2. Supports using "\*" as a key for a general fallback mapping;<br/>3. If the mapped target name is an empty string "", the original model name is preserved. |
+| `protocol`       | string                 | Optional    | -       | API contract provided by the plugin. Currently supports the following values: openai (default, uses OpenAI's interface contract), original (uses the raw interface contract of the target service provider)                                                                                                                                                                               |
+| `context`        | object                 | Optional    | -       | Configuration for AI conversation context information                                                                                                                                                                                                                                                                                                                                     |
+| `customSettings` | array of customSetting | Optional    | -       | Specifies overrides or fills parameters for AI requests                                                                                                                                                                                                                                                                                                                                   |
+| `subPath`        | string                 | Optional    | -       | If subPath is configured, the prefix will be removed from the request path before further processing.                                                                                                                                                                                                                                                                                     |
 
 **Details for the `context` configuration fields:**
 
@@ -106,6 +107,7 @@ For Qwen (Tongyi Qwen), the corresponding `type` is `qwen`. Its unique configura
 |--------------------|-----------------|----------------------|---------------|------------------------------------------------------------------------------------------------------------------------|
 | `qwenEnableSearch`  | boolean          | Optional             | -             | Whether to enable the built-in Internet search function provided by Qwen.                                             |
 | `qwenFileIds`       | array of string   | Optional             | -             | The file IDs uploaded via the Dashscope file interface, whose content will be used as context for AI conversations. Cannot be configured with the `context` field. |
+| `qwenEnableCompatible` | boolean          | Optional | false         | Enable Qwen compatibility mode. When Qwen compatibility mode is enabled, the compatible mode interface of Qwen will be called, and the request/response will not be modified. |
 
 #### Baichuan AI
 
@@ -126,6 +128,10 @@ For DeepSeek, the corresponding `type` is `deepseek`. It has no unique configura
 #### Groq
 
 For Groq, the corresponding `type` is `groq`. It has no unique configuration fields.
+
+#### Grok
+
+For Grok, the corresponding `type` is `grok`. It has no unique configuration fields.
 
 #### ERNIE Bot
 
@@ -198,6 +204,8 @@ For Gemini, the corresponding `type` is `gemini`. Its unique configuration field
 | Name                  | Data Type | Filling Requirements | Default Value | Description                                                                                              |
 |---------------------|----------|----------------------|---------------|---------------------------------------------------------------------------------------------------------|
 | `geminiSafetySetting` | map of string   | Optional             | -             | Gemini AI content filtering and safety level settings. Refer to [Safety settings](https://ai.google.dev/gemini-api/docs/safety-settings). |
+| `apiVersion` | string | 非必填 | `v1beta` | To specify the version of the API, you can choose either 'v1' or 'v1beta'. Version differences refer to https://ai.google.dev/gemini-api/docs/api-versions |
+| `geminiThinkingBudget` | number | 非必填 | - | The parameters of the gemini2.5 series: 0 indicates no thinking mode, -1 represents dynamic adjustment. For specific parameter references, please refer to the official website |
 
 ### DeepL
 
@@ -206,6 +214,29 @@ For DeepL, the corresponding `type` is `deepl`. Its unique configuration field i
 | Name         | Data Type | Requirement | Default | Description                         |
 | ------------ | --------- | ----------- | ------- | ------------------------------------ |
 | `targetLang` | string    | Required    | -       | The target language required by the DeepL translation service |
+
+#### Google Vertex AI
+For Vertex, the corresponding `type` is `vertex`. Its unique configuration field is:
+
+| Name                        | Data Type     | Requirement   | Default | Description                                                                                                                                                 |
+|-----------------------------|---------------|---------------| ------ |-------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `vertexAuthKey`             | string        | Required      | -      | Google Service Account JSON Key used for authentication. The format should be PEM encoded PKCS#8 private key along with client_email and other information  |
+| `vertexRegion`              | string        | Required      | -      | Google Cloud region (e.g., us-central1, europe-west4) used to build the Vertex API address                                                                  |
+| `vertexProjectId`           | string        | Required      | -      | Google Cloud Project ID, used to identify the target GCP project                                                                                            |
+| `vertexAuthServiceName`     | string        | Required      | -      | Service name for OAuth2 authentication, used to access oauth2.googleapis.com                                                                                |
+| `vertexGeminiSafetySetting` | map of string | Optional      | -      | Gemini model content safety filtering settings.                                                                                                             |
+| `vertexTokenRefreshAhead`   | number        | Optional      | -      | Vertex access token refresh ahead time in seconds                                                                                                           |
+
+#### AWS Bedrock
+
+For AWS Bedrock, the corresponding `type` is `bedrock`. Its unique configuration field is:
+
+| Name                      | Data Type | Requirement | Default | Description                                             |
+|---------------------------|-----------|-------------|---------|---------------------------------------------------------|
+| `awsAccessKey`            | string    | Required    | -       | AWS Access Key used for authentication                  |
+| `awsSecretKey`            | string    | Required    | -       | AWS Secret Access Key used for authentication           |
+| `awsRegion`               | string    | Required    | -       | AWS region, e.g., us-east-1                             |
+| `bedrockAdditionalFields` | map       | Optional    | -       | Additional inference parameters that the model supports |
 
 ## Usage Examples
 
@@ -782,6 +813,76 @@ provider:
 }
 ```
 
+### Using OpenAI Protocol Proxy for Grok Service
+
+**Configuration Information**
+
+```yaml
+provider:
+  type: grok
+  apiTokens:
+    - "YOUR_GROK_API_TOKEN"
+```
+
+**Example Request**
+
+```json
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a helpful assistant that can answer questions and help with tasks."
+    },
+    {
+      "role": "user",
+      "content": "What is 101*3?"
+    }
+  ],
+  "model": "grok-4"
+}
+```
+
+**Example Response**
+
+```json
+{
+  "id": "a3d1008e-4544-40d4-d075-11527e794e4a",
+  "object": "chat.completion",
+  "created": 1752854522,
+  "model": "grok-4",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "101 multiplied by 3 is 303.",
+        "refusal": null
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 32,
+    "completion_tokens": 9,
+    "total_tokens": 135,
+    "prompt_tokens_details": {
+      "text_tokens": 32,
+      "audio_tokens": 0,
+      "image_tokens": 0,
+      "cached_tokens": 6
+    },
+    "completion_tokens_details": {
+      "reasoning_tokens": 94,
+      "audio_tokens": 0,
+      "accepted_prediction_tokens": 0,
+      "rejected_prediction_tokens": 0
+    },
+    "num_sources_used": 0
+  },
+  "system_fingerprint": "fp_3a7881249c"
+}
+```
+
 ### Using OpenAI Protocol Proxy for Claude Service
 
 **Configuration Information**
@@ -1353,6 +1454,169 @@ Here, `model` denotes the service tier of DeepL and can only be either `Free` or
   "model": "Free",
   "object": "chat.completion",
   "usage": {}
+}
+```
+
+### Utilizing OpenAI Protocol Proxy for Together-AI Services
+
+**Configuration Information**
+```yaml
+provider:
+  type: together-ai
+  apiTokens:
+    - "YOUR_TOGETHER_AI_API_TOKEN"
+  modelMapping:
+    "*": "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo"
+```
+
+**Request Example**
+```json
+{
+    "model": "Qwen/Qwen2.5-72B-Instruct-Turbo",
+    "messages": [
+        {
+            "role": "user",
+            "content": "Who are you?"
+        }
+    ]
+}
+```
+
+**Response Example**
+```json
+{
+  "id": "8f5809d54b73efac",
+  "object": "chat.completion",
+  "created": 1734785851,
+  "model": "Qwen/Qwen2.5-72B-Instruct-Turbo",
+  "prompt": [],
+  "choices": [
+    {
+      "finish_reason": "eos",
+      "seed": 12830868308626506000,
+      "logprobs": null,
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "I am Qwen, a large language model created by Alibaba Cloud. I am designed to assist users in generating various types of text, such as articles, stories, poems, and more, as well as answering questions and providing information on a wide range of topics. How can I assist you today?",
+        "tool_calls": []
+      }
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 33,
+    "completion_tokens": 61,
+    "total_tokens": 94
+  }
+}
+```
+
+### Utilizing OpenAI Protocol Proxy for Google Vertex Services
+**Configuration Information**
+```yaml
+provider:
+  type: vertex
+  vertexAuthKey: |
+    {
+      "type": "service_account",
+      "project_id": "your-project-id",
+      "private_key_id": "your-private-key-id",
+      "private_key": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n",
+      "client_email": "your-service-account@your-project.iam.gserviceaccount.com",
+      "token_uri": "https://oauth2.googleapis.com/token"
+    }
+  vertexRegion: us-central1
+  vertexProjectId: your-project-id
+  vertexAuthServiceName: your-auth-service-name
+```
+
+**Request Example**
+```json
+{
+  "model": "gemini-2.0-flash-001",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Who are you?"
+    }
+  ],
+  "stream": false
+}
+```
+
+**Response Example**
+```json
+{
+  "id": "chatcmpl-0000000000000",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Hello! I am the Gemini model provided by Vertex AI, developed by Google. I can answer questions, provide information, and assist in completing various tasks. How can I help you today?"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "created": 1729986750,
+  "model": "gemini-2.0-flash-001",
+  "object": "chat.completion",
+  "usage": {
+    "prompt_tokens": 15,
+    "completion_tokens": 43,
+    "total_tokens": 58
+  }
+}
+```
+
+### Utilizing OpenAI Protocol Proxy for AWS Bedrock Services
+**Configuration Information**
+```yaml
+provider:
+  type: bedrock
+  awsAccessKey: "YOUR_AWS_ACCESS_KEY_ID"
+  awsSecretKey: "YOUR_AWS_SECRET_ACCESS_KEY"
+  awsRegion: "YOUR_AWS_REGION"
+  bedrockAdditionalFields:
+    top_k: 200
+```
+
+**Request Example**
+```json
+{
+  "model": "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-3-5-haiku-20241022-v1:0",
+  "messages": [
+    {
+      "role": "user",
+      "content": "who are you"
+    }
+  ],
+  "stream": false
+}
+```
+
+**Response Example**
+```json
+{
+  "id": "d52da49d-daf3-49d9-a105-0b527481fe14",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "I'm Claude, an AI created by Anthropic. I aim to be helpful, honest, and harmless. I won't pretend to be human, and I'll always try to be direct and truthful about what I am and what I can do."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "created": 1749659050,
+  "model": "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-3-5-haiku-20241022-v1:0",
+  "object": "chat.completion",
+  "usage": {
+    "prompt_tokens": 10,
+    "completion_tokens": 57,
+    "total_tokens": 67
+  }
 }
 ```
 

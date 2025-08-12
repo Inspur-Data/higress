@@ -3,25 +3,27 @@ package provider
 import (
 	"errors"
 	"fmt"
+	"net/http"
+	"strings"
+
 	"github.com/alibaba/higress/plugins/wasm-go/extensions/ai-proxy/util"
-	"github.com/alibaba/higress/plugins/wasm-go/pkg/wrapper"
+	"github.com/higress-group/wasm-go/pkg/log"
+	"github.com/higress-group/wasm-go/pkg/wrapper"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
 	"github.com/tidwall/gjson"
-	"net/http"
+	"github.com/tidwall/sjson"
 )
 
 // moonshotProvider is the provider for Moonshot AI service.
 
 const (
-	moonshotDomain             = "api.moonshot.cn"
-	moonshotChatCompletionPath = "/v1/chat/completions"
+	moonshotDomain = "api.moonshot.cn"
 )
 
-type moonshotProviderInitializer struct {
-}
+type moonshotProviderInitializer struct{}
 
-func (m *moonshotProviderInitializer) ValidateConfig(config ProviderConfig) error {
+func (m *moonshotProviderInitializer) ValidateConfig(config *ProviderConfig) error {
 	if config.moonshotFileId != "" && config.context != nil {
 		return errors.New("moonshotFileId and context cannot be configured at the same time")
 	}
@@ -31,7 +33,15 @@ func (m *moonshotProviderInitializer) ValidateConfig(config ProviderConfig) erro
 	return nil
 }
 
+func (m *moonshotProviderInitializer) DefaultCapabilities() map[string]string {
+	return map[string]string{
+		string(ApiNameChatCompletion): PathOpenAIChatCompletions,
+		string(ApiNameModels):         PathOpenAIModels,
+	}
+}
+
 func (m *moonshotProviderInitializer) CreateProvider(config ProviderConfig) (Provider, error) {
+	config.setDefaultCapabilities(m.DefaultCapabilities())
 	return &moonshotProvider{
 		config: config,
 		client: wrapper.NewClusterClient(wrapper.RouteCluster{
@@ -53,16 +63,13 @@ func (m *moonshotProvider) GetProviderType() string {
 	return providerTypeMoonshot
 }
 
-func (m *moonshotProvider) OnRequestHeaders(ctx wrapper.HttpContext, apiName ApiName, log wrapper.Log) (types.Action, error) {
-	if apiName != ApiNameChatCompletion {
-		return types.ActionContinue, errUnsupportedApiName
-	}
-	m.config.handleRequestHeaders(m, ctx, apiName, log)
-	return types.ActionContinue, nil
+func (m *moonshotProvider) OnRequestHeaders(ctx wrapper.HttpContext, apiName ApiName) error {
+	m.config.handleRequestHeaders(m, ctx, apiName)
+	return nil
 }
 
-func (m *moonshotProvider) TransformRequestHeaders(ctx wrapper.HttpContext, apiName ApiName, headers http.Header, log wrapper.Log) {
-	util.OverwriteRequestPathHeader(headers, moonshotChatCompletionPath)
+func (m *moonshotProvider) TransformRequestHeaders(ctx wrapper.HttpContext, apiName ApiName, headers http.Header) {
+	util.OverwriteRequestPathHeaderByCapability(headers, string(apiName), m.config.capabilities)
 	util.OverwriteRequestHostHeader(headers, moonshotDomain)
 	util.OverwriteRequestAuthorizationHeader(headers, "Bearer "+m.config.GetApiTokenInUse(ctx))
 	headers.Del("Content-Length")
@@ -70,18 +77,22 @@ func (m *moonshotProvider) TransformRequestHeaders(ctx wrapper.HttpContext, apiN
 
 // moonshot 有自己获取 context 的配置（moonshotFileId），因此无法复用 handleRequestBody 方法
 // moonshot 的 body 没有修改，无须实现TransformRequestBody，使用默认的 defaultTransformRequestBody 方法
-func (m *moonshotProvider) OnRequestBody(ctx wrapper.HttpContext, apiName ApiName, body []byte, log wrapper.Log) (types.Action, error) {
-	if apiName != ApiNameChatCompletion {
+func (m *moonshotProvider) OnRequestBody(ctx wrapper.HttpContext, apiName ApiName, body []byte) (types.Action, error) {
+	if !m.config.isSupportedAPI(apiName) {
 		return types.ActionContinue, errUnsupportedApiName
+	}
+	// 非chat类型的请求，不做处理
+	if apiName != ApiNameChatCompletion {
+		return types.ActionContinue, nil
 	}
 
 	request := &chatCompletionRequest{}
-	if err := m.config.parseRequestAndMapModel(ctx, request, body, log); err != nil {
+	if err := m.config.parseRequestAndMapModel(ctx, request, body); err != nil {
 		return types.ActionContinue, err
 	}
 
 	if m.config.moonshotFileId == "" && m.contextCache == nil {
-		return types.ActionContinue, replaceJsonRequestBody(request, log)
+		return types.ActionContinue, replaceJsonRequestBody(request)
 	}
 
 	apiKey := m.config.GetOrSetTokenWithContext(ctx)
@@ -91,26 +102,26 @@ func (m *moonshotProvider) OnRequestBody(ctx wrapper.HttpContext, apiName ApiNam
 		}()
 		if err != nil {
 			log.Errorf("failed to load context file: %v", err)
-			_ = util.SendResponse(500, "ai-proxy.moonshot.load_ctx_failed", util.MimeTypeTextPlain, fmt.Sprintf("failed to load context file: %v", err))
+			_ = util.ErrorHandler("ai-proxy.moonshot.load_ctx_failed", fmt.Errorf("failed to load context file: %v", err))
 			return
 		}
-		err = m.performChatCompletion(ctx, content, request, log)
+		err = m.performChatCompletion(ctx, content, request)
 		if err != nil {
-			_ = util.SendResponse(500, "ai-proxy.moonshot.insert_ctx_failed", util.MimeTypeTextPlain, fmt.Sprintf("failed to perform chat completion: %v", err))
+			_ = util.ErrorHandler("ai-proxy.moonshot.insert_ctx_failed", fmt.Errorf("failed to perform chat completion: %v", err))
 		}
-	}, log)
+	})
 	if err == nil {
 		return types.ActionPause, nil
 	}
 	return types.ActionContinue, err
 }
 
-func (m *moonshotProvider) performChatCompletion(ctx wrapper.HttpContext, fileContent string, request *chatCompletionRequest, log wrapper.Log) error {
+func (m *moonshotProvider) performChatCompletion(ctx wrapper.HttpContext, fileContent string, request *chatCompletionRequest) error {
 	insertContextMessage(request, fileContent)
-	return replaceJsonRequestBody(request, log)
+	return replaceJsonRequestBody(request)
 }
 
-func (m *moonshotProvider) getContextContent(apiKey string, callback func(string, error), log wrapper.Log) error {
+func (m *moonshotProvider) getContextContent(apiKey string, callback func(string, error)) error {
 	if m.config.moonshotFileId != "" {
 		if m.fileContent != "" {
 			callback(m.fileContent, nil)
@@ -131,7 +142,7 @@ func (m *moonshotProvider) getContextContent(apiKey string, callback func(string
 	}
 
 	if m.contextCache != nil {
-		return m.contextCache.GetContent(callback, log)
+		return m.contextCache.GetContent(callback)
 	}
 
 	return errors.New("both moonshotFileId and context are not configured")
@@ -148,4 +159,32 @@ func (m *moonshotProvider) sendRequest(method, path, body, apiKey string, callba
 	default:
 		return errors.New("unsupported method: " + method)
 	}
+}
+
+func (m *moonshotProvider) OnStreamingEvent(ctx wrapper.HttpContext, name ApiName, event StreamEvent) ([]StreamEvent, error) {
+	if name != ApiNameChatCompletion {
+		return nil, nil
+	}
+
+	if gjson.Get(event.Data, "choices.0.usage").Exists() {
+		usageStr := gjson.Get(event.Data, "choices.0.usage").Raw
+		newData, err := sjson.Delete(event.Data, "choices.0.usage")
+		if err != nil {
+			log.Errorf("convert usage event error: %v", err)
+			return nil, err
+		}
+		newData, err = sjson.SetRaw(newData, "usage", usageStr)
+		if err != nil {
+			log.Errorf("convert usage event error: %v", err)
+			return nil, err
+		}
+		event.Data = newData
+	}
+	return []StreamEvent{event}, nil
+}
+
+func (m *moonshotProvider) appendStreamEvent(responseBuilder *strings.Builder, event *StreamEvent) {
+	responseBuilder.WriteString(streamDataItemKey)
+	responseBuilder.WriteString(event.Data)
+	responseBuilder.WriteString("\n\n")
 }
