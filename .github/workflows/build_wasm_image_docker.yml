@@ -31,7 +31,7 @@ jobs:
       IMAGE_REGISTRY_SERVICE: ${{ vars.IMAGE_REGISTRY || 'registry.cn-hangzhou.aliyuncs.com' }}
       IMAGE_REPOSITORY: ${{ vars.PLUGIN_IMAGE_REPOSITORY || 'testwydimage' }}
       RUST_VERSION: 1.82
-      GO_VERSION: 1.19
+      GO_VERSION: 1.24.0
       TINYGO_VERSION: 0.28.1
       ORAS_VERSION: 1.0.0
     strategy:
