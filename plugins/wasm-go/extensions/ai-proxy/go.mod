@@ -2,9 +2,9 @@
 
 module github.com/alibaba/higress/plugins/wasm-go/extensions/ai-proxy
 
-go 1.24.1
+go 1.24
 
-toolchain go1.24.4
+//toolchain go1.24.4
 
 require (
 	github.com/higress-group/proxy-wasm-go-sdk v0.0.0-20250611100342-5654e89a7a80
