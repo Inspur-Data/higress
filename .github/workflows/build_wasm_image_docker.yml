@@ -120,6 +120,7 @@ jobs:
           command="
           set -e
           cd /workspace/plugins/wasm-go/extensions/${PLUGIN_NAME}
+          go clean -modcache
           go mod tidy
           GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -o plugin.wasm .
           tar czvf plugin.tar.gz plugin.wasm
