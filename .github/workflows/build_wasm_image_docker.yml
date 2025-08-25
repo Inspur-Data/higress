@@ -1,9 +1,10 @@
 name: Build and Push Wasm Plugin Image For Docker
 
+# 触发条件
 on:
   push:
-    tags:
-    - "wasm-*-*-v*.*.*" # 匹配 wasm-{go|rust}-{pluginName}-vX.Y.Z 格式的标签
+    branches:
+    - upgrade-plugin
   workflow_dispatch:
     inputs:
       plugin_type:
