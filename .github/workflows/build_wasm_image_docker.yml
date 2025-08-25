@@ -18,6 +18,11 @@ on:
         description: 'Name of the plugin'
         required: true
         type: string
+      branch:
+        description: 'Branch to build from'
+        required: true
+        default: 'upgrade-plugin'
+        type: string
       version:
         description: 'Version of the plugin (optional, without leading v)'
         required: false
@@ -66,7 +71,8 @@ jobs:
 
       - name: Checkout code
         uses: actions/checkout@v3
-      
+        with:
+          ref: ${{ github.event.inputs.branch || github.ref_name }}
       - name: File Check
         run: | 
           workspace=${{ github.workspace }}/plugins/wasm-${PLUGIN_TYPE}/extensions/${PLUGIN_NAME}
