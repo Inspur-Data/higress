@@ -304,8 +304,8 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config KeyAuthConfig, log log
 
 	for _, consumer := range config.consumers {
 		if consumer.Credential == tokens[0] && consumer.ExpiresAt != 0 && time.Now().Unix() > consumer.ExpiresAt {
-			log.Warnf("credential %q has expired", tokens[0])
-			return deniedUnauthorizedConsumer()
+			log.Warnf("credential %q has expired,now: %v,expireat: %v", tokens[0], time.Now().Unix(), consumer.ExpiresAt)
+			return deniedExpireConsumer()
 		}
 	}
 	// 全局生效：
@@ -359,6 +359,11 @@ func deniedUnauthorizedConsumer() types.Action {
 	return types.ActionContinue
 }
 
+func deniedExpireConsumer() types.Action {
+	_ = proxywasm.SendHttpResponseWithDetail(http.StatusForbidden, "key-auth.unauthorized", WWWAuthenticateHeader(protectionSpace),
+		[]byte("Request denied by Key Auth check. Expired consumer."), -1)
+	return types.ActionContinue
+}
 func authenticated(name string) types.Action {
 	_ = proxywasm.AddHttpRequestHeader("X-Mse-Consumer", name)
 	return types.ActionContinue
