@@ -21,9 +21,10 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/alibaba/higress/plugins/wasm-go/pkg/wrapper"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
+	"github.com/higress-group/wasm-go/pkg/log"
+	"github.com/higress-group/wasm-go/pkg/wrapper"
 	"github.com/tidwall/gjson"
 )
 
@@ -32,7 +33,9 @@ var (
 	protectionSpace = "MSE Gateway" // 认证失败时，返回响应头 WWW-Authenticate: Key realm=MSE Gateway
 )
 
-func main() {
+func main() {}
+
+func init() {
 	wrapper.SetCtx(
 		"key-auth", // middleware name
 		wrapper.ParseOverrideConfigBy(parseGlobalConfig, parseOverrideRuleConfig),
@@ -134,7 +137,7 @@ type KeyAuthConfig struct {
 	credential2Name map[string]string `yaml:"-"`
 }
 
-func parseGlobalConfig(json gjson.Result, global *KeyAuthConfig, log wrapper.Log) error {
+func parseGlobalConfig(json gjson.Result, global *KeyAuthConfig, log log.Log) error {
 	log.Debug("global config")
 
 	// init
@@ -211,7 +214,7 @@ func parseGlobalConfig(json gjson.Result, global *KeyAuthConfig, log wrapper.Log
 	return nil
 }
 
-func parseOverrideRuleConfig(json gjson.Result, global KeyAuthConfig, config *KeyAuthConfig, log wrapper.Log) error {
+func parseOverrideRuleConfig(json gjson.Result, global KeyAuthConfig, config *KeyAuthConfig, log log.Log) error {
 	log.Debug("domain/route config")
 
 	*config = global
@@ -244,7 +247,7 @@ func parseOverrideRuleConfig(json gjson.Result, global KeyAuthConfig, config *Ke
 // - global_auth 未设置：
 //   - 若没有一个 domain/route 配置该插件：则遵循 (1*)
 //   - 若有至少一个 domain/route 配置该插件：则遵循 (2*)
-func onHttpRequestHeaders(ctx wrapper.HttpContext, config KeyAuthConfig, log wrapper.Log) types.Action {
+func onHttpRequestHeaders(ctx wrapper.HttpContext, config KeyAuthConfig, log log.Log) types.Action {
 	var (
 		noAllow            = len(config.allow) == 0 // 未配置 allow 列表，表示插件在该 domain/route 未生效
 		globalAuthNoSet    = config.globalAuth == nil
