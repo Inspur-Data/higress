@@ -364,7 +364,9 @@ func (c *Controller) secretEvent(name, namespace string) {
 					Name:             cfg.Name,
 				},
 			}
-			c.secretHandler(gw, gw, model.EventUpdate)
+			if c.secretHandler != nil {
+               c.secretHandler(gw, gw, model.EventUpdate)
+            }
 		}
 	}
 }
