@@ -16,6 +16,7 @@ import (
 )
 
 func main() {
+	fmt.Print("a")
 	wrapper.SetCtx(
 		"ai-statistics",
 		wrapper.ParseConfigBy(parseConfig),
@@ -142,7 +143,11 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig, lo
 	// Set user defined log & span attributes which type is request_header
 	setAttributeBySource(ctx, config, RequestHeader, nil, log)
 	// Set request start time.
-
+	// Get client ip and set to log attribute
+	if bs, err := proxywasm.GetProperty([]string{"source", "address"}); err == nil {
+		clientIp := parseIP(string(bs))
+		setLogAttribute(ctx, "client_ip", clientIp, log)
+	}
 	return types.ActionContinue
 }
 
@@ -377,6 +382,18 @@ func extractStreamingBodyByJsonPath(data []byte, jsonPath string, rule string, l
 		log.Errorf("unsupported rule type: %s", rule)
 	}
 	return value
+}
+
+func parseIP(source string) string {
+	if strings.Contains(source, ".") {
+		// parse ipv4
+		return strings.Split(source, ":")[0]
+	}
+	//parse ipv6
+	if strings.Contains(source, "]") {
+		return strings.Split(source, "]")[0][1:]
+	}
+	return source
 }
 
 func setFilterState(key, value string, log wrapper.Log) {
