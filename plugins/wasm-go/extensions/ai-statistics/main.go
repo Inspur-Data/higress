@@ -50,6 +50,7 @@ const (
 	Model                 = "model"
 	InputToken            = "input_token"
 	OutputToken           = "output_token"
+	SOURCEIP              = "source_ip"
 	LLMFirstTokenDuration = "llm_first_token_duration"
 	LLMServiceDuration    = "llm_service_duration"
 	LLMDurationCount      = "llm_duration_count"
@@ -80,8 +81,12 @@ type AIStatisticsConfig struct {
 	shouldBufferStreamingBody bool
 }
 
-func generateMetricName(route, cluster, model, metricName string) string {
+/*func generateMetricName(route, cluster, model, metricName string) string {
 	return fmt.Sprintf("route.%s.upstream.%s.model.%s.metric.%s", route, cluster, model, metricName)
+}*/
+
+func generateMetricName(route, cluster, model, sourceIP, metricName string) string {
+	return fmt.Sprintf("route.%s.upstream.%s.model.%s.srcip.%s.metric.%s", route, cluster, model, sourceIP, metricName)
 }
 
 func getRouteName() (string, error) {
@@ -144,10 +149,10 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig, lo
 	setAttributeBySource(ctx, config, RequestHeader, nil, log)
 	// Set request start time.
 	// Get client ip and set to log attribute
-	if bs, err := proxywasm.GetProperty([]string{"source", "address"}); err == nil {
+	/*if bs, err := proxywasm.GetProperty([]string{"source", "address"}); err == nil {
 		clientIp := parseIP(string(bs))
 		setLogAttribute(ctx, "client_ip", clientIp, log)
-	}
+	}*/
 
 	return types.ActionContinue
 }
@@ -423,6 +428,8 @@ func writeFilterStates(ctx wrapper.HttpContext, log wrapper.Log) {
 	setFilterState(Model, attributes[Model], log)
 	setFilterState(InputToken, attributes[InputToken], log)
 	setFilterState(OutputToken, attributes[OutputToken], log)
+	setFilterState(SOURCEIP, attributes[SOURCEIP], log)
+
 }
 
 func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig, log wrapper.Log) {
@@ -434,13 +441,19 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig, log wrapper
 		log.Errorf("Get model failed")
 		return
 	}
+	// 只改这一行：取源IP，允许为空时给默认
+	sourceIP := "none"
+	if sip, ok := attributes["source_ip"]; ok && sip != "" {
+		sourceIP = sip
+	}
+
 	if inputToken, ok := attributes[InputToken]; ok {
 		inputTokenUint64, err := strconv.ParseUint(inputToken, 10, 0)
 		if err != nil || inputTokenUint64 == 0 {
 			log.Errorf("inputToken convert failed, value is %d, err msg is [%v]", inputTokenUint64, err)
 			return
 		}
-		config.incrementCounter(generateMetricName(route, cluster, model, InputToken), inputTokenUint64)
+		config.incrementCounter(generateMetricName(route, cluster, model, sourceIP,InputToken), inputTokenUint64)
 	}
 	if outputToken, ok := attributes[OutputToken]; ok {
 		outputTokenUint64, err := strconv.ParseUint(outputToken, 10, 0)
@@ -448,7 +461,7 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig, log wrapper
 			log.Errorf("outputToken convert failed, value is %d, err msg is [%v]", outputTokenUint64, err)
 			return
 		}
-		config.incrementCounter(generateMetricName(route, cluster, model, OutputToken), outputTokenUint64)
+		config.incrementCounter(generateMetricName(route, cluster, model, sourceIP, OutputToken), outputTokenUint64)
 	}
 	if llmFirstTokenDuration, ok := attributes[LLMFirstTokenDuration]; ok {
 		llmFirstTokenDurationUint64, err := strconv.ParseUint(llmFirstTokenDuration, 10, 0)
@@ -456,7 +469,7 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig, log wrapper
 			log.Errorf("llmFirstTokenDuration convert failed, value is %d, err msg is [%v]", llmFirstTokenDurationUint64, err)
 			return
 		}
-		config.incrementCounter(generateMetricName(route, cluster, model, LLMFirstTokenDuration), llmFirstTokenDurationUint64)
+		config.incrementCounter(generateMetricName(route, cluster, model, sourceIP, LLMFirstTokenDuration), llmFirstTokenDurationUint64)
 	}
 	if llmServiceDuration, ok := attributes[LLMServiceDuration]; ok {
 		llmServiceDurationUint64, err := strconv.ParseUint(llmServiceDuration, 10, 0)
@@ -464,10 +477,12 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig, log wrapper
 			log.Errorf("llmServiceDuration convert failed, value is %d, err msg is [%v]", llmServiceDurationUint64, err)
 			return
 		}
-		config.incrementCounter(generateMetricName(route, cluster, model, LLMServiceDuration), llmServiceDurationUint64)
+		config.incrementCounter(generateMetricName(route, cluster, model, sourceIP, LLMServiceDuration), llmServiceDurationUint64)
 	}
-	config.incrementCounter(generateMetricName(route, cluster, model, LLMDurationCount), 1)
+	config.incrementCounter(generateMetricName(route, cluster, model, sourceIP, LLMDurationCount), 1)
 }
+
+
 
 func writeLog(ctx wrapper.HttpContext, log wrapper.Log) {
 	attributes, _ := ctx.GetContext(CtxGeneralAtrribute).(map[string]string)
