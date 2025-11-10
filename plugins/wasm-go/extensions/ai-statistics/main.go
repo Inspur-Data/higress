@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -142,6 +143,10 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig, lo
 	ctx.SetContext(CtxGeneralAtrribute, map[string]string{})
 	ctx.SetContext(CtxLogAtrribute, map[string]string{})
 	ctx.SetContext(StatisticsRequestStartTime, time.Now().UnixMilli())
+
+
+	// 先设置 source_ip
+	setAttributeBySource(ctx, config, SOURCEIP, nil, log)
 
 	// Set user defined log & span attributes which type is fixed_value
 	setAttributeBySource(ctx, config, FixedValue, nil, log)
@@ -345,6 +350,39 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 				}
 				log.Debugf("[log attribute] source type: %s, key: %s, value: %s", source, attribute.Key, value)
 				attributes[attribute.Key] = value
+			case SOURCEIP:
+				// 1. 先尝试从 X-Forwarded-For 获取
+				clientIP := "unknown"
+				if xff, err := proxywasm.GetHttpRequestHeader("X-Forwarded-For"); err == nil && xff != "" {
+					ips := strings.Split(xff, ",")
+					for _, ip := range ips {
+						cleanIP := strings.TrimSpace(ip)
+						if isValidIP(cleanIP) {
+							clientIP = cleanIP
+							log.Debugf("Got valid IP from X-Forwarded-For: %s", clientIP)
+							break
+						}
+					}
+				}
+
+				// 2. 如果没有 XFF，使用 source.address
+				if clientIP == "unknown" {
+					if bs, err := proxywasm.GetProperty([]string{"source", "address"}); err == nil {
+						sourceIP := parseIP(string(bs))
+						if isValidIP(sourceIP) {
+							clientIP = sourceIP
+							log.Debugf("Got valid IP from source.address: %s", clientIP)
+						}
+					} else if err != nil {
+						log.Warnf("Failed to get source.address: %v", err)
+					}
+				}
+				// 3. 确保总是有值
+				if clientIP == "" {
+					clientIP = "unknown"
+				}
+				log.Debugf("[attribute] source type: %s, key: %s, value: %s", source, attribute.Key, clientIP)
+				attributes[attribute.Key] = clientIP
 			default:
 			}
 		}
@@ -424,7 +462,11 @@ func setLogAttribute(ctx wrapper.HttpContext, key string, value interface{}, log
 }
 
 func writeFilterStates(ctx wrapper.HttpContext, log wrapper.Log) {
-	attributes, _ := ctx.GetContext(CtxGeneralAtrribute).(map[string]string)
+	attributes, ok := ctx.GetContext(CtxGeneralAtrribute).(map[string]string)
+	if !ok {
+		log.Error("failed to get attributes from context in writeFilterStates")
+		return
+	}
 	setFilterState(Model, attributes[Model], log)
 	setFilterState(InputToken, attributes[InputToken], log)
 	setFilterState(OutputToken, attributes[OutputToken], log)
@@ -433,7 +475,11 @@ func writeFilterStates(ctx wrapper.HttpContext, log wrapper.Log) {
 }
 
 func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig, log wrapper.Log) {
-	attributes, _ := ctx.GetContext(CtxGeneralAtrribute).(map[string]string)
+	attributes, ok  := ctx.GetContext(CtxGeneralAtrribute).(map[string]string)
+	if !ok {
+		log.Error("failed to get attributes in writeMetric")
+		return
+	}
 	route, _ := getRouteName()
 	cluster, _ := getClusterName()
 	model, ok := attributes["model"]
@@ -441,10 +487,12 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig, log wrapper
 		log.Errorf("Get model failed")
 		return
 	}
-	// 只改这一行：取源IP，允许为空时给默认
-	sourceIP := "none"
-	if sip, ok := attributes["source_ip"]; ok && sip != "" {
+
+	// 获取 source_ip，使用常量而不是字符串字面量
+	sourceIP := "unknown"
+	if sip, ok := attributes[SOURCEIP]; ok && sip != "" {
 		sourceIP = sip
+		log.Debugf("Using source_ip: %s for metrics", sourceIP)
 	}
 
 	if inputToken, ok := attributes[InputToken]; ok {
@@ -485,8 +533,16 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig, log wrapper
 
 
 func writeLog(ctx wrapper.HttpContext, log wrapper.Log) {
-	attributes, _ := ctx.GetContext(CtxGeneralAtrribute).(map[string]string)
-	logAttributes, _ := ctx.GetContext(CtxLogAtrribute).(map[string]string)
+	attributes, ok  := ctx.GetContext(CtxGeneralAtrribute).(map[string]string)
+	if !ok {
+		log.Error("failed to get attributes in writeLog")
+		return
+	}
+	logAttributes, ok  := ctx.GetContext(CtxLogAtrribute).(map[string]string)
+	if !ok {
+		log.Error("failed to get logAttributes in writeLog")
+		return
+	}
 	// Set inner log fields
 	if attributes[Model] != "" {
 		logAttributes[Model] = attributes[Model]
@@ -502,6 +558,10 @@ func writeLog(ctx wrapper.HttpContext, log wrapper.Log) {
 	}
 	if attributes[LLMServiceDuration] != "" {
 		logAttributes[LLMServiceDuration] = attributes[LLMServiceDuration]
+	}
+	// 添加 source_ip 到日志
+	if sourceIP, exists := attributes[SOURCEIP]; exists {
+		logAttributes[SOURCEIP] = sourceIP
 	}
 	// Traverse log fields
 	items := []string{}
@@ -521,13 +581,37 @@ func writeLog(ctx wrapper.HttpContext, log wrapper.Log) {
 	}
 }
 func parseIP(source string) string {
+	if source == "" {
+		return "unknown"
+	}
+
+	// IPv4
 	if strings.Contains(source, ".") {
-		// parse ipv4
-		return strings.Split(source, ":")[0]
+		if idx := strings.LastIndex(source, ":"); idx != -1 {
+			return source[:idx]
+		}
+		return source
 	}
-	//parse ipv6
-	if strings.Contains(source, "]") {
-		return strings.Split(source, "]")[0][1:]
+
+	// IPv6
+	if strings.Contains(source, "[") && strings.Contains(source, "]") {
+		if start := strings.Index(source, "["); start != -1 {
+			if end := strings.Index(source, "]"); end != -1 {
+				return source[start+1 : end]
+			}
+		}
 	}
+
+	// 可能是纯 IPv6 地址
+	if strings.Count(source, ":") >= 2 {
+		if idx := strings.LastIndex(source, ":"); idx != -1 {
+			return source[:idx]
+		}
+	}
+
 	return source
+}
+
+func isValidIP(ip string) bool {
+	return ip != "" && ip != "unknown" && net.ParseIP(ip) != nil
 }
