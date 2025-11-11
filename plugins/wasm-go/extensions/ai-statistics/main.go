@@ -17,7 +17,6 @@ import (
 )
 
 func main() {
-	fmt.Print("test")
 	wrapper.SetCtx(
 		"ai-statistics",
 		wrapper.ParseConfigBy(parseConfig),
@@ -85,7 +84,6 @@ type AIStatisticsConfig struct {
 /*func generateMetricName(route, cluster, model, metricName string) string {
 	return fmt.Sprintf("route.%s.upstream.%s.model.%s.metric.%s", route, cluster, model, metricName)
 }*/
-
 func generateMetricName(route, cluster, model, sourceIP, metricName string) string {
 	return fmt.Sprintf("route.%s.upstream.%s.model.%s.srcip.%s.metric.%s", route, cluster, model, sourceIP, metricName)
 }
@@ -116,6 +114,8 @@ func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64
 }
 
 func parseConfig(configJson gjson.Result, config *AIStatisticsConfig, log wrapper.Log) error {
+	log.Debugf("ai-statistics start parseConfig")
+
 	// Parse tracing span attributes setting.
 	attributeConfigs := configJson.Get("attributes").Array()
 	config.attributes = make([]Attribute, len(attributeConfigs))
@@ -144,10 +144,10 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig, lo
 	ctx.SetContext(CtxLogAtrribute, map[string]string{})
 	ctx.SetContext(StatisticsRequestStartTime, time.Now().UnixMilli())
 
-
+	log.Debugf("ai-statistics start onHttpRequestHeaders/setAttributeBySource/SOURCEIP")
 	// 先设置 source_ip
 	setAttributeBySource(ctx, config, SOURCEIP, nil, log)
-
+	log.Debugf("ai-statistics end onHttpRequestHeaders/setAttributeBySource/SOURCEIP")
 	// Set user defined log & span attributes which type is fixed_value
 	setAttributeBySource(ctx, config, FixedValue, nil, log)
 	// Set user defined log & span attributes which type is request_header
@@ -374,7 +374,7 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 							log.Debugf("Got valid IP from source.address: %s", clientIP)
 						}
 					} else if err != nil {
-						log.Warnf("Failed to get source.address: %v", err)
+						log.Errorf("Failed to get source.address: %v", err)
 					}
 				}
 				// 3. 确保总是有值
@@ -462,24 +462,14 @@ func setLogAttribute(ctx wrapper.HttpContext, key string, value interface{}, log
 }
 
 func writeFilterStates(ctx wrapper.HttpContext, log wrapper.Log) {
-	attributes, ok := ctx.GetContext(CtxGeneralAtrribute).(map[string]string)
-	if !ok {
-		log.Error("failed to get attributes from context in writeFilterStates")
-		return
-	}
+	attributes, _ := ctx.GetContext(CtxGeneralAtrribute).(map[string]string)
 	setFilterState(Model, attributes[Model], log)
 	setFilterState(InputToken, attributes[InputToken], log)
 	setFilterState(OutputToken, attributes[OutputToken], log)
-	setFilterState(SOURCEIP, attributes[SOURCEIP], log)
-
 }
 
 func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig, log wrapper.Log) {
-	attributes, ok  := ctx.GetContext(CtxGeneralAtrribute).(map[string]string)
-	if !ok {
-		log.Error("failed to get attributes in writeMetric")
-		return
-	}
+	attributes, _  := ctx.GetContext(CtxGeneralAtrribute).(map[string]string)
 	route, _ := getRouteName()
 	cluster, _ := getClusterName()
 	model, ok := attributes["model"]
@@ -487,7 +477,6 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig, log wrapper
 		log.Errorf("Get model failed")
 		return
 	}
-
 	// 获取 source_ip，使用常量而不是字符串字面量
 	sourceIP := "unknown"
 	if sip, ok := attributes[SOURCEIP]; ok && sip != "" {
@@ -529,20 +518,9 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig, log wrapper
 	}
 	config.incrementCounter(generateMetricName(route, cluster, model, sourceIP, LLMDurationCount), 1)
 }
-
-
-
 func writeLog(ctx wrapper.HttpContext, log wrapper.Log) {
-	attributes, ok  := ctx.GetContext(CtxGeneralAtrribute).(map[string]string)
-	if !ok {
-		log.Error("failed to get attributes in writeLog")
-		return
-	}
-	logAttributes, ok  := ctx.GetContext(CtxLogAtrribute).(map[string]string)
-	if !ok {
-		log.Error("failed to get logAttributes in writeLog")
-		return
-	}
+	attributes, _  := ctx.GetContext(CtxGeneralAtrribute).(map[string]string)
+	logAttributes, _  := ctx.GetContext(CtxLogAtrribute).(map[string]string)
 	// Set inner log fields
 	if attributes[Model] != "" {
 		logAttributes[Model] = attributes[Model]
@@ -608,10 +586,8 @@ func parseIP(source string) string {
 			return source[:idx]
 		}
 	}
-
 	return source
 }
-
 func isValidIP(ip string) bool {
 	return ip != "" && ip != "unknown" && net.ParseIP(ip) != nil
 }
