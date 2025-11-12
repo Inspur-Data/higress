@@ -399,7 +399,7 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 				value = gjson.GetBytes(body, attribute.Value).Value()
 			case SourceIP:
 				// 1. 先尝试从 X-Forwarded-For 获取
-				value := "unknown"
+				value = "unknown"
 				if xff, err := proxywasm.GetHttpRequestHeader("X-Forwarded-For"); err == nil && xff != "" {
 					ips := strings.Split(xff, ",")
 					for _, ip := range ips {
@@ -524,7 +524,7 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 		return
 	}
 
-	if ctx.GetUserAttribute(tokenusage.CtxKeyModel) == nil || ctx.GetUserAttribute(tokenusage.CtxKeyInputToken) == nil || ctx.GetUserAttribute(tokenusage.CtxKeyOutputToken) == nil || ctx.GetUserAttribute(tokenusage.CtxKeyTotalToken) == nil || ctx.GetUserAttribute(SourceIP) == nil {
+	if ctx.GetUserAttribute(tokenusage.CtxKeyModel) == nil || ctx.GetUserAttribute(tokenusage.CtxKeyInputToken) == nil || ctx.GetUserAttribute(tokenusage.CtxKeyOutputToken) == nil || ctx.GetUserAttribute(tokenusage.CtxKeyTotalToken) == nil {
 		log.Warnf("get usage information failed, skip metric record")
 		return
 	}
@@ -539,7 +539,6 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 		log.Warnf("SourceIP typd assert failed, skip metric record")
 		return
 	}
-
 
 	if inputToken, ok := convertToUInt(ctx.GetUserAttribute(tokenusage.CtxKeyInputToken)); ok {
 		config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP,tokenusage.CtxKeyInputToken), inputToken)
