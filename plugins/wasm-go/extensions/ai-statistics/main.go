@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"regexp"
 	"strings"
 	"time"
@@ -20,8 +21,6 @@ import (
 func main() {}
 
 func init() {
-	fmt.Sprintf("ai-statistics start")
-	fmt.Sprint("ai-statistics start")
 	fmt.Print("ai-statistics start")
 	wrapper.SetCtx(
 		"ai-statistics",
@@ -55,6 +54,7 @@ const (
 	ResponseHeader        = "response_header"
 	ResponseStreamingBody = "response_streaming_body"
 	ResponseBody          = "response_body"
+	SourceIP              = "source_ip"
 
 	// Inner metric & log attributes
 	LLMFirstTokenDuration  = "llm_first_token_duration"
@@ -104,8 +104,8 @@ type AIStatisticsConfig struct {
 	disableOpenaiUsage bool
 }
 
-func generateMetricName(route, cluster, model, consumer, metricName string) string {
-	return fmt.Sprintf("route.%s.upstream.%s.model.%s.consumer.%s.metric.%s", route, cluster, model, consumer, metricName)
+func generateMetricName(route, cluster, model, consumer, sourceIP, metricName string) string {
+	return fmt.Sprintf("route.%s.upstream.%s.model.%s.consumer.%s.srcip.%s.metric.%s", route, cluster, model, consumer,sourceIP, metricName)
 }
 
 func getRouteName() (string, error) {
@@ -150,6 +150,7 @@ func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64
 }
 
 func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
+	log.Debugf("ai-statistics start parseConfig")
 	// Parse tracing span attributes setting.
 	attributeConfigs := configJson.Get("attributes").Array()
 	config.attributes = make([]Attribute, len(attributeConfigs))
@@ -197,6 +198,11 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) ty
 	}
 
 	ctx.SetRequestBodyBufferLimit(defaultMaxBodyBytes)
+
+	log.Debugf("ai-statistics start onHttpRequestHeaders/setAttributeBySource/SOURCEIP")
+	// 先设置 source_ip
+	setAttributeBySource(ctx, config, SourceIP, nil)
+	log.Debugf("ai-statistics end onHttpRequestHeaders/setAttributeBySource/SOURCEIP")
 
 	// Set user defined log & span attributes which type is fixed_value
 	setAttributeBySource(ctx, config, FixedValue, nil)
@@ -391,6 +397,37 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 				value = extractStreamingBodyByJsonPath(body, attribute.Value, attribute.Rule)
 			case ResponseBody:
 				value = gjson.GetBytes(body, attribute.Value).Value()
+			case SourceIP:
+				// 1. 先尝试从 X-Forwarded-For 获取
+				value := "unknown"
+				if xff, err := proxywasm.GetHttpRequestHeader("X-Forwarded-For"); err == nil && xff != "" {
+					ips := strings.Split(xff, ",")
+					for _, ip := range ips {
+						cleanIP := strings.TrimSpace(ip)
+						if isValidIP(cleanIP) {
+							value = cleanIP
+							log.Debugf("Got valid IP from X-Forwarded-For: %s", value)
+							break
+						}
+					}
+				}
+
+				// 2. 如果没有 XFF，使用 source.address
+				if value == "unknown" {
+					if bs, err := proxywasm.GetProperty([]string{"source", "address"}); err == nil {
+						sourceIP := parseIP(string(bs))
+						if isValidIP(sourceIP) {
+							value = sourceIP
+							log.Debugf("Got valid IP from source.address: %s", value)
+						}
+					} else if err != nil {
+						log.Errorf("Failed to get source.address: %v", err)
+					}
+				}
+				// 3. 确保总是有值
+				if value == "" {
+					value = "unknown"
+				}
 			default:
 			}
 			if (value == nil || value == "") && attribute.DefaultValue != "" {
@@ -408,7 +445,7 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 				}
 			}
 			// for metrics
-			if key == tokenusage.CtxKeyModel || key == tokenusage.CtxKeyInputToken || key == tokenusage.CtxKeyOutputToken || key == tokenusage.CtxKeyTotalToken {
+			if key == tokenusage.CtxKeyModel || key == tokenusage.CtxKeyInputToken || key == tokenusage.CtxKeyOutputToken || key == tokenusage.CtxKeyTotalToken || key == SourceIP{
 				ctx.SetContext(key, value)
 			}
 			if attribute.ApplyToSpan {
@@ -487,7 +524,7 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 		return
 	}
 
-	if ctx.GetUserAttribute(tokenusage.CtxKeyModel) == nil || ctx.GetUserAttribute(tokenusage.CtxKeyInputToken) == nil || ctx.GetUserAttribute(tokenusage.CtxKeyOutputToken) == nil || ctx.GetUserAttribute(tokenusage.CtxKeyTotalToken) == nil {
+	if ctx.GetUserAttribute(tokenusage.CtxKeyModel) == nil || ctx.GetUserAttribute(tokenusage.CtxKeyInputToken) == nil || ctx.GetUserAttribute(tokenusage.CtxKeyOutputToken) == nil || ctx.GetUserAttribute(tokenusage.CtxKeyTotalToken) == nil || ctx.GetUserAttribute(SourceIP) == nil {
 		log.Warnf("get usage information failed, skip metric record")
 		return
 	}
@@ -496,18 +533,26 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 		log.Warnf("Model typd assert failed, skip metric record")
 		return
 	}
+	sourceIP := "unknown"
+	sourceIP, ok = ctx.GetUserAttribute(SourceIP).(string)
+	if !ok {
+		log.Warnf("SourceIP typd assert failed, skip metric record")
+		return
+	}
+
+
 	if inputToken, ok := convertToUInt(ctx.GetUserAttribute(tokenusage.CtxKeyInputToken)); ok {
-		config.incrementCounter(generateMetricName(route, cluster, model, consumer, tokenusage.CtxKeyInputToken), inputToken)
+		config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP,tokenusage.CtxKeyInputToken), inputToken)
 	} else {
 		log.Warnf("InputToken typd assert failed, skip metric record")
 	}
 	if outputToken, ok := convertToUInt(ctx.GetUserAttribute(tokenusage.CtxKeyOutputToken)); ok {
-		config.incrementCounter(generateMetricName(route, cluster, model, consumer, tokenusage.CtxKeyOutputToken), outputToken)
+		config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP,tokenusage.CtxKeyOutputToken), outputToken)
 	} else {
 		log.Warnf("OutputToken typd assert failed, skip metric record")
 	}
 	if totalToken, ok := convertToUInt(ctx.GetUserAttribute(tokenusage.CtxKeyTotalToken)); ok {
-		config.incrementCounter(generateMetricName(route, cluster, model, consumer, tokenusage.CtxKeyTotalToken), totalToken)
+		config.incrementCounter(generateMetricName(route, cluster, model, consumer,sourceIP, tokenusage.CtxKeyTotalToken), totalToken)
 	} else {
 		log.Warnf("TotalToken typd assert failed, skip metric record")
 	}
@@ -521,8 +566,8 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 			log.Warnf("LLMFirstTokenDuration typd assert failed")
 			return
 		}
-		config.incrementCounter(generateMetricName(route, cluster, model, consumer, LLMFirstTokenDuration), llmFirstTokenDuration)
-		config.incrementCounter(generateMetricName(route, cluster, model, consumer, LLMStreamDurationCount), 1)
+		config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP, LLMFirstTokenDuration), llmFirstTokenDuration)
+		config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP, LLMStreamDurationCount), 1)
 	}
 	if ctx.GetUserAttribute(LLMServiceDuration) != nil {
 		llmServiceDuration, ok = convertToUInt(ctx.GetUserAttribute(LLMServiceDuration))
@@ -530,8 +575,8 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 			log.Warnf("LLMServiceDuration typd assert failed")
 			return
 		}
-		config.incrementCounter(generateMetricName(route, cluster, model, consumer, LLMServiceDuration), llmServiceDuration)
-		config.incrementCounter(generateMetricName(route, cluster, model, consumer, LLMDurationCount), 1)
+		config.incrementCounter(generateMetricName(route, cluster, model, consumer,sourceIP, LLMServiceDuration), llmServiceDuration)
+		config.incrementCounter(generateMetricName(route, cluster, model, consumer,sourceIP, LLMDurationCount), 1)
 	}
 }
 
@@ -552,4 +597,37 @@ func convertToUInt(val interface{}) (uint64, bool) {
 	default:
 		return 0, false
 	}
+}
+func parseIP(source string) string {
+	if source == "" {
+		return "unknown"
+	}
+
+	// IPv4
+	if strings.Contains(source, ".") {
+		if idx := strings.LastIndex(source, ":"); idx != -1 {
+			return source[:idx]
+		}
+		return source
+	}
+
+	// IPv6
+	if strings.Contains(source, "[") && strings.Contains(source, "]") {
+		if start := strings.Index(source, "["); start != -1 {
+			if end := strings.Index(source, "]"); end != -1 {
+				return source[start+1 : end]
+			}
+		}
+	}
+
+	// 可能是纯 IPv6 地址
+	if strings.Count(source, ":") >= 2 {
+		if idx := strings.LastIndex(source, ":"); idx != -1 {
+			return source[:idx]
+		}
+	}
+	return source
+}
+func isValidIP(ip string) bool {
+	return ip != "" && ip != "unknown" && net.ParseIP(ip) != nil
 }
