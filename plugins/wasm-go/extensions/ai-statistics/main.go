@@ -104,8 +104,15 @@ type AIStatisticsConfig struct {
 	disableOpenaiUsage bool
 }
 
+// 仅修改此函数，保持原有指标名称结构，在其后附加Prometheus标签
 func generateMetricName(route, cluster, model, consumer, sourceIP, metricName string) string {
-	return fmt.Sprintf("route.%s.upstream.%s.model.%s.consumer.%s.srcip.%s.metric.%s", route, cluster, model, consumer, sourceIP, metricName)
+	// 保持原有的扁平化命名方式
+	baseName := fmt.Sprintf("route.%s.upstream.%s.model.%s.consumer.%s.srcip.%s.metric.%s", 
+		route, cluster, model, consumer, sourceIP, metricName)
+	
+	// 在名称后附加Prometheus标签，方便后续解析
+	return fmt.Sprintf("%s{route=\"%s\",cluster=\"%s\",model=\"%s\",consumer=\"%s\",source_ip=\"%s\",metric_name=\"%s\"}",
+		baseName, route, cluster, model, consumer, sourceIP, metricName)
 }
 
 func getRouteName() (string, error) {
@@ -135,27 +142,6 @@ func getClusterName() (string, error) {
 	} else {
 		return string(raw), nil
 	}
-}
-
-// incrementCounterWithLabels 创建带有标签的计数器并递增
-func (config *AIStatisticsConfig) incrementCounterWithLabels(metricName string, inc uint64, labels [][2]string) {
-	if inc == 0 {
-		return
-	}
-	
-	// 构建标签数组
-	var labelPairs []string
-	for _, label := range labels {
-		labelPairs = append(labelPairs, label[0], label[1])
-	}
-	
-	// 定义或获取带有标签的指标
-	counter, ok := config.counterMetrics[metricName]
-	if !ok {
-		counter = proxywasm.DefineCounterMetric(metricName, labelPairs...)
-		config.counterMetrics[metricName] = counter
-	}
-	counter.Increment(inc)
 }
 
 func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64) {
@@ -465,7 +451,7 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 					ctx.SetUserAttribute(key, value)
 				}
 			}
-			// for metrics
+			// for metrics - 确保SourceIP总是被存入context
 			if key == tokenusage.CtxKeyModel || key == tokenusage.CtxKeyInputToken || key == tokenusage.CtxKeyOutputToken || key == tokenusage.CtxKeyTotalToken || key == SourceIP{
 				ctx.SetContext(key, value)
 			}
@@ -527,96 +513,121 @@ func setSpanAttribute(key string, value interface{}) {
 
 func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 	// Generate usage metrics
-	var ok bool
-	var route, cluster, model string
-	consumer := ctx.GetStringContext(ConsumerKey, "none")
-	route, ok = ctx.GetContext(RouteName).(string)
-	if !ok {
-		log.Warnf("RouteName typd assert failed, skip metric record")
+	var route, cluster, model, consumer, sourceIP string
+	
+	// Get route
+	routeVal := ctx.GetContext(RouteName)
+	if routeVal == nil {
+		log.Warnf("RouteName is nil, skip metric record")
 		return
 	}
-	cluster, ok = ctx.GetContext(ClusterName).(string)
+	route, ok := routeVal.(string)
 	if !ok {
-		log.Warnf("ClusterName typd assert failed, skip metric record")
+		log.Warnf("RouteName type assert failed, skip metric record")
 		return
+	}
+	
+	// Get cluster
+	clusterVal := ctx.GetContext(ClusterName)
+	if clusterVal == nil {
+		log.Warnf("ClusterName is nil, skip metric record")
+		return
+	}
+	cluster, ok = clusterVal.(string)
+	if !ok {
+		log.Warnf("ClusterName type assert failed, skip metric record")
+		return
+	}
+	
+	// Get consumer
+	consumer = "none"
+	consumerVal := ctx.GetContext(ConsumerKey)
+	if consumerVal != nil {
+		if consumerStr, ok := consumerVal.(string); ok {
+			consumer = consumerStr
+		}
+	}
+
+	// Get sourceIP - FIXED: 从 Context 获取，而不是 UserAttribute
+	sourceIP = "unknown"
+	sourceIPVal := ctx.GetContext(SourceIP)
+	if sourceIPVal != nil {
+		if sourceIPStr, ok := sourceIPVal.(string); ok {
+			sourceIP = sourceIPStr
+		}
 	}
 
 	if config.disableOpenaiUsage {
+		log.Debugf("openai usage is disabled, skip metric record")
 		return
 	}
 
-	if ctx.GetUserAttribute(tokenusage.CtxKeyModel) == nil || ctx.GetUserAttribute(tokenusage.CtxKeyInputToken) == nil || ctx.GetUserAttribute(tokenusage.CtxKeyOutputToken) == nil || ctx.GetUserAttribute(tokenusage.CtxKeyTotalToken) == nil {
-		log.Warnf("get usage information failed, skip metric record")
+	// Get model
+	modelVal := ctx.GetContext(tokenusage.CtxKeyModel)
+	if modelVal == nil {
+		log.Warnf("model information is nil, skip metric record")
 		return
 	}
-	model, ok = ctx.GetUserAttribute(tokenusage.CtxKeyModel).(string)
+	model, ok = modelVal.(string)
 	if !ok {
-		log.Warnf("Model typd assert failed, skip metric record")
-		return
-	}
-	sourceIP := "unknown"
-	sourceIP, ok = ctx.GetUserAttribute(SourceIP).(string)
-	if !ok {
-		log.Warnf("SourceIP typd assert failed, skip metric record")
+		log.Warnf("Model type assert failed, skip metric record")
 		return
 	}
 
-	// 构建通用的标签集合
-	labels := [][2]string{
-		{"route", route},
-		{"cluster", cluster},
-		{"model", model},
-		{"consumer", consumer},
-		{"source_ip", sourceIP},
-	}
-
-	if inputToken, ok := convertToUInt(ctx.GetUserAttribute(tokenusage.CtxKeyInputToken)); ok {
-		metricName := generateMetricName(route, cluster, model, consumer, sourceIP, tokenusage.CtxKeyInputToken)
-		config.incrementCounterWithLabels(metricName, inputToken, labels)
+	// Get tokens
+	inputToken, inputOk := convertToUInt(ctx.GetContext(tokenusage.CtxKeyInputToken))
+	outputToken, outputOk := convertToUInt(ctx.GetContext(tokenusage.CtxKeyOutputToken))
+	totalToken, totalOk := convertToUInt(ctx.GetContext(tokenusage.CtxKeyTotalToken))
+	
+	if !inputOk {
+		log.Warnf("InputToken type assert failed or is nil, skip metric record")
 	} else {
-		log.Warnf("InputToken typd assert failed, skip metric record")
+		config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP, tokenusage.CtxKeyInputToken), inputToken)
 	}
-	if outputToken, ok := convertToUInt(ctx.GetUserAttribute(tokenusage.CtxKeyOutputToken)); ok {
-		metricName := generateMetricName(route, cluster, model, consumer, sourceIP, tokenusage.CtxKeyOutputToken)
-		config.incrementCounterWithLabels(metricName, outputToken, labels)
+	
+	if !outputOk {
+		log.Warnf("OutputToken type assert failed or is nil, skip metric record")
 	} else {
-		log.Warnf("OutputToken typd assert failed, skip metric record")
+		config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP, tokenusage.CtxKeyOutputToken), outputToken)
 	}
-	if totalToken, ok := convertToUInt(ctx.GetUserAttribute(tokenusage.CtxKeyTotalToken)); ok {
-		metricName := generateMetricName(route, cluster, model, consumer, sourceIP, tokenusage.CtxKeyTotalToken)
-		config.incrementCounterWithLabels(metricName, totalToken, labels)
+	
+	if !totalOk {
+		log.Warnf("TotalToken type assert failed or is nil, skip metric record")
 	} else {
-		log.Warnf("TotalToken typd assert failed, skip metric record")
+		config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP, tokenusage.CtxKeyTotalToken), totalToken)
 	}
 
 	// Generate duration metrics
-	var llmFirstTokenDuration, llmServiceDuration uint64
+	
 	// Is stream response
-	if ctx.GetUserAttribute(LLMFirstTokenDuration) != nil {
-		llmFirstTokenDuration, ok = convertToUInt(ctx.GetUserAttribute(LLMFirstTokenDuration))
-		if !ok {
-			log.Warnf("LLMFirstTokenDuration typd assert failed")
-			return
+	firstTokenDurationVal := ctx.GetUserAttribute(LLMFirstTokenDuration)
+	if firstTokenDurationVal != nil {
+		llmFirstTokenDuration, ok := convertToUInt(firstTokenDurationVal)
+		if ok {
+			config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP, LLMFirstTokenDuration), llmFirstTokenDuration)
+			config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP, LLMStreamDurationCount), 1)
+		} else {
+			log.Warnf("LLMFirstTokenDuration type assert failed")
 		}
-		metricName := generateMetricName(route, cluster, model, consumer, sourceIP, LLMFirstTokenDuration)
-		config.incrementCounterWithLabels(metricName, llmFirstTokenDuration, labels)
-		metricName = generateMetricName(route, cluster, model, consumer, sourceIP, LLMStreamDurationCount)
-		config.incrementCounterWithLabels(metricName, 1, labels)
 	}
-	if ctx.GetUserAttribute(LLMServiceDuration) != nil {
-		llmServiceDuration, ok = convertToUInt(ctx.GetUserAttribute(LLMServiceDuration))
-		if !ok {
-			log.Warnf("LLMServiceDuration typd assert failed")
-			return
+	
+	// Always record service duration if available
+	serviceDurationVal := ctx.GetUserAttribute(LLMServiceDuration)
+	if serviceDurationVal != nil {
+		llmServiceDuration, ok := convertToUInt(serviceDurationVal)
+		if ok {
+			config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP, LLMServiceDuration), llmServiceDuration)
+			config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP, LLMDurationCount), 1)
+		} else {
+			log.Warnf("LLMServiceDuration type assert failed")
 		}
-		metricName := generateMetricName(route, cluster, model, consumer, sourceIP, LLMServiceDuration)
-		config.incrementCounterWithLabels(metricName, llmServiceDuration, labels)
-		metricName = generateMetricName(route, cluster, model, consumer, sourceIP, LLMDurationCount)
-		config.incrementCounterWithLabels(metricName, 1, labels)
 	}
 }
 
 func convertToUInt(val interface{}) (uint64, bool) {
+	if val == nil {
+		return 0, false
+	}
 	switch v := val.(type) {
 	case float32:
 		return uint64(v), true
@@ -634,6 +645,7 @@ func convertToUInt(val interface{}) (uint64, bool) {
 		return 0, false
 	}
 }
+
 func parseIP(source string) string {
 	if source == "" {
 		return "unknown"
@@ -664,6 +676,7 @@ func parseIP(source string) string {
 	}
 	return source
 }
+
 func isValidIP(ip string) bool {
 	return ip != "" && ip != "unknown" && net.ParseIP(ip) != nil
 }
