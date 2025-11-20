@@ -104,15 +104,8 @@ type AIStatisticsConfig struct {
 	disableOpenaiUsage bool
 }
 
-// 仅修改此函数：保持原有指标名称结构，在其后附加Prometheus标签
 func generateMetricName(route, cluster, model, consumer, sourceIP, metricName string) string {
-	// 保持原有的扁平化命名方式
-	baseName := fmt.Sprintf("route.%s.upstream.%s.model.%s.consumer.%s.srcip.%s.metric.%s", 
-		route, cluster, model, consumer, sourceIP, metricName)
-	
-	// 在名称后附加Prometheus标签，方便后续解析
-	return fmt.Sprintf("%s{route=\"%s\",cluster=\"%s\",model=\"%s\",consumer=\"%s\",source_ip=\"%s\",metric_name=\"%s\"}",
-		baseName, route, cluster, model, consumer, sourceIP, metricName)
+	return fmt.Sprintf("route.%s.upstream.%s.model.%s.consumer.%s.srcip.%s.metric.%s", route, cluster, model, consumer, sourceIP, metricName)
 }
 
 func getRouteName() (string, error) {
@@ -142,6 +135,27 @@ func getClusterName() (string, error) {
 	} else {
 		return string(raw), nil
 	}
+}
+
+// incrementCounterWithLabels 创建带有标签的计数器并递增
+func (config *AIStatisticsConfig) incrementCounterWithLabels(metricName string, inc uint64, labels [][2]string) {
+	if inc == 0 {
+		return
+	}
+	
+	// 构建标签数组
+	var labelPairs []string
+	for _, label := range labels {
+		labelPairs = append(labelPairs, label[0], label[1])
+	}
+	
+	// 定义或获取带有标签的指标
+	counter, ok := config.counterMetrics[metricName]
+	if !ok {
+		counter = proxywasm.DefineCounterMetric(metricName, labelPairs...)
+		config.counterMetrics[metricName] = counter
+	}
+	counter.Increment(inc)
 }
 
 func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64) {
@@ -547,18 +561,30 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 		return
 	}
 
+	// 构建通用的标签集合
+	labels := [][2]string{
+		{"route", route},
+		{"cluster", cluster},
+		{"model", model},
+		{"consumer", consumer},
+		{"source_ip", sourceIP},
+	}
+
 	if inputToken, ok := convertToUInt(ctx.GetUserAttribute(tokenusage.CtxKeyInputToken)); ok {
-		config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP,tokenusage.CtxKeyInputToken), inputToken)
+		metricName := generateMetricName(route, cluster, model, consumer, sourceIP, tokenusage.CtxKeyInputToken)
+		config.incrementCounterWithLabels(metricName, inputToken, labels)
 	} else {
 		log.Warnf("InputToken typd assert failed, skip metric record")
 	}
 	if outputToken, ok := convertToUInt(ctx.GetUserAttribute(tokenusage.CtxKeyOutputToken)); ok {
-		config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP,tokenusage.CtxKeyOutputToken), outputToken)
+		metricName := generateMetricName(route, cluster, model, consumer, sourceIP, tokenusage.CtxKeyOutputToken)
+		config.incrementCounterWithLabels(metricName, outputToken, labels)
 	} else {
 		log.Warnf("OutputToken typd assert failed, skip metric record")
 	}
 	if totalToken, ok := convertToUInt(ctx.GetUserAttribute(tokenusage.CtxKeyTotalToken)); ok {
-		config.incrementCounter(generateMetricName(route, cluster, model, consumer,sourceIP, tokenusage.CtxKeyTotalToken), totalToken)
+		metricName := generateMetricName(route, cluster, model, consumer, sourceIP, tokenusage.CtxKeyTotalToken)
+		config.incrementCounterWithLabels(metricName, totalToken, labels)
 	} else {
 		log.Warnf("TotalToken typd assert failed, skip metric record")
 	}
@@ -572,8 +598,10 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 			log.Warnf("LLMFirstTokenDuration typd assert failed")
 			return
 		}
-		config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP, LLMFirstTokenDuration), llmFirstTokenDuration)
-		config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP, LLMStreamDurationCount), 1)
+		metricName := generateMetricName(route, cluster, model, consumer, sourceIP, LLMFirstTokenDuration)
+		config.incrementCounterWithLabels(metricName, llmFirstTokenDuration, labels)
+		metricName = generateMetricName(route, cluster, model, consumer, sourceIP, LLMStreamDurationCount)
+		config.incrementCounterWithLabels(metricName, 1, labels)
 	}
 	if ctx.GetUserAttribute(LLMServiceDuration) != nil {
 		llmServiceDuration, ok = convertToUInt(ctx.GetUserAttribute(LLMServiceDuration))
@@ -581,8 +609,10 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 			log.Warnf("LLMServiceDuration typd assert failed")
 			return
 		}
-		config.incrementCounter(generateMetricName(route, cluster, model, consumer,sourceIP, LLMServiceDuration), llmServiceDuration)
-		config.incrementCounter(generateMetricName(route, cluster, model, consumer,sourceIP, LLMDurationCount), 1)
+		metricName := generateMetricName(route, cluster, model, consumer, sourceIP, LLMServiceDuration)
+		config.incrementCounterWithLabels(metricName, llmServiceDuration, labels)
+		metricName = generateMetricName(route, cluster, model, consumer, sourceIP, LLMDurationCount)
+		config.incrementCounterWithLabels(metricName, 1, labels)
 	}
 }
 
