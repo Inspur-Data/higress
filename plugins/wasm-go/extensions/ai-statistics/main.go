@@ -104,8 +104,15 @@ type AIStatisticsConfig struct {
 	disableOpenaiUsage bool
 }
 
+// 仅修改此函数：保持原有指标名称结构，在其后附加Prometheus标签
 func generateMetricName(route, cluster, model, consumer, sourceIP, metricName string) string {
-	return fmt.Sprintf("route.%s.upstream.%s.model.%s.consumer.%s.srcip.%s.metric.%s", route, cluster, model, consumer,sourceIP, metricName)
+	// 保持原有的扁平化命名方式
+	baseName := fmt.Sprintf("route.%s.upstream.%s.model.%s.consumer.%s.srcip.%s.metric.%s", 
+		route, cluster, model, consumer, sourceIP, metricName)
+	
+	// 在名称后附加Prometheus标签，方便后续解析
+	return fmt.Sprintf("%s{route=\"%s\",cluster=\"%s\",model=\"%s\",consumer=\"%s\",source_ip=\"%s\",metric_name=\"%s\"}",
+		baseName, route, cluster, model, consumer, sourceIP, metricName)
 }
 
 func getRouteName() (string, error) {
