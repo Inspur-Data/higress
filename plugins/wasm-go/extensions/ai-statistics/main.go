@@ -77,9 +77,6 @@ const (
 	RuleFirst   = "first"
 	RuleReplace = "replace"
 	RuleAppend  = "append"
-	
-	// Prometheus 固定指标名称（标签将嵌入指标名称中）
-	PrometheusMetricName = "ai_statistics_requests_total"
 )
 
 // TracingSpan is the tracing span configuration.
@@ -96,7 +93,8 @@ type Attribute struct {
 }
 
 type AIStatisticsConfig struct {
-	// 指标映射（键是完整的指标名称，可能包含Prometheus标签语法）
+	// Metrics
+	// TODO: add more metrics in Gauge and Histogram format
 	counterMetrics map[string]proxywasm.MetricCounter
 	// Attributes to be recorded in log & span
 	attributes []Attribute
@@ -106,27 +104,8 @@ type AIStatisticsConfig struct {
 	disableOpenaiUsage bool
 }
 
-// generateMetricName 保留原有函数不变，可用于日志记录等场景
 func generateMetricName(route, cluster, model, consumer, metricName string) string {
 	return fmt.Sprintf("route.%s.upstream.%s.model.%s.consumer.%s.metric.%s", route, cluster, model, consumer, metricName)
-}
-
-// generatePrometheusMetricName 生成包含Prometheus标签语法的指标名称
-// 格式: ai_statistics_requests_total{route="...",upstream="...",model="...",consumer="...",metric="..."}
-func generatePrometheusMetricName(route, cluster, model, consumer, metricName string) string {
-	// 对标签值进行转义，确保符合Prometheus格式
-	escapeLabelValue := func(s string) string {
-		// 替换双引号为下划线，避免破坏标签语法
-		return strings.ReplaceAll(s, `"`, "_")
-	}
-	
-	return fmt.Sprintf(`%s{route="%s",upstream="%s",model="%s",consumer="%s",metric="%s"}`,
-		PrometheusMetricName,
-		escapeLabelValue(route),
-		escapeLabelValue(cluster),
-		escapeLabelValue(model),
-		escapeLabelValue(consumer),
-		escapeLabelValue(metricName))
 }
 
 func getRouteName() (string, error) {
@@ -158,20 +137,14 @@ func getClusterName() (string, error) {
 	}
 }
 
-// incrementCounter 修改为生成Prometheus格式的指标名称
-func (config *AIStatisticsConfig) incrementCounter(route, cluster, model, consumer, metricName string, inc uint64) {
+func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64) {
 	if inc == 0 {
 		return
 	}
-	
-	// 生成包含Prometheus标签语法的指标名称
-	prometheusMetricName := generatePrometheusMetricName(route, cluster, model, consumer, metricName)
-	
-	// 获取或创建指标
-	counter, ok := config.counterMetrics[prometheusMetricName]
+	counter, ok := config.counterMetrics[metricName]
 	if !ok {
-		counter = proxywasm.DefineCounterMetric(prometheusMetricName)
-		config.counterMetrics[prometheusMetricName] = counter
+		counter = proxywasm.DefineCounterMetric(metricName)
+		config.counterMetrics[metricName] = counter
 	}
 	counter.Increment(inc)
 }
@@ -195,8 +168,7 @@ func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
 		}
 		config.attributes[i] = attribute
 	}
-	
-	// 初始化指标映射
+	// Metric settings
 	config.counterMetrics = make(map[string]proxywasm.MetricCounter)
 
 	// Parse openai usage config setting.
@@ -502,12 +474,12 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 	consumer := ctx.GetStringContext(ConsumerKey, "none")
 	route, ok = ctx.GetContext(RouteName).(string)
 	if !ok {
-		log.Warnf("RouteName type assert failed, skip metric record")
+		log.Warnf("RouteName typd assert failed, skip metric record")
 		return
 	}
 	cluster, ok = ctx.GetContext(ClusterName).(string)
 	if !ok {
-		log.Warnf("ClusterName type assert failed, skip metric record")
+		log.Warnf("ClusterName typd assert failed, skip metric record")
 		return
 	}
 
@@ -521,25 +493,23 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 	}
 	model, ok = ctx.GetUserAttribute(tokenusage.CtxKeyModel).(string)
 	if !ok {
-		log.Warnf("Model type assert failed, skip metric record")
+		log.Warnf("Model typd assert failed, skip metric record")
 		return
 	}
-	
-	// 记录指标，所有标签值都会嵌入到指标名称中
 	if inputToken, ok := convertToUInt(ctx.GetUserAttribute(tokenusage.CtxKeyInputToken)); ok {
-		config.incrementCounter(route, cluster, model, consumer, tokenusage.CtxKeyInputToken, inputToken)
+		config.incrementCounter(generateMetricName(route, cluster, model, consumer, tokenusage.CtxKeyInputToken), inputToken)
 	} else {
-		log.Warnf("InputToken type assert failed, skip metric record")
+		log.Warnf("InputToken typd assert failed, skip metric record")
 	}
 	if outputToken, ok := convertToUInt(ctx.GetUserAttribute(tokenusage.CtxKeyOutputToken)); ok {
-		config.incrementCounter(route, cluster, model, consumer, tokenusage.CtxKeyOutputToken, outputToken)
+		config.incrementCounter(generateMetricName(route, cluster, model, consumer, tokenusage.CtxKeyOutputToken), outputToken)
 	} else {
-		log.Warnf("OutputToken type assert failed, skip metric record")
+		log.Warnf("OutputToken typd assert failed, skip metric record")
 	}
 	if totalToken, ok := convertToUInt(ctx.GetUserAttribute(tokenusage.CtxKeyTotalToken)); ok {
-		config.incrementCounter(route, cluster, model, consumer, tokenusage.CtxKeyTotalToken, totalToken)
+		config.incrementCounter(generateMetricName(route, cluster, model, consumer, tokenusage.CtxKeyTotalToken), totalToken)
 	} else {
-		log.Warnf("TotalToken type assert failed, skip metric record")
+		log.Warnf("TotalToken typd assert failed, skip metric record")
 	}
 
 	// Generate duration metrics
@@ -548,20 +518,20 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 	if ctx.GetUserAttribute(LLMFirstTokenDuration) != nil {
 		llmFirstTokenDuration, ok = convertToUInt(ctx.GetUserAttribute(LLMFirstTokenDuration))
 		if !ok {
-			log.Warnf("LLMFirstTokenDuration type assert failed")
+			log.Warnf("LLMFirstTokenDuration typd assert failed")
 			return
 		}
-		config.incrementCounter(route, cluster, model, consumer, LLMFirstTokenDuration, llmFirstTokenDuration)
-		config.incrementCounter(route, cluster, model, consumer, LLMStreamDurationCount, 1)
+		config.incrementCounter(generateMetricName(route, cluster, model, consumer, LLMFirstTokenDuration), llmFirstTokenDuration)
+		config.incrementCounter(generateMetricName(route, cluster, model, consumer, LLMStreamDurationCount), 1)
 	}
 	if ctx.GetUserAttribute(LLMServiceDuration) != nil {
 		llmServiceDuration, ok = convertToUInt(ctx.GetUserAttribute(LLMServiceDuration))
 		if !ok {
-			log.Warnf("LLMServiceDuration type assert failed")
+			log.Warnf("LLMServiceDuration typd assert failed")
 			return
 		}
-		config.incrementCounter(route, cluster, model, consumer, LLMServiceDuration, llmServiceDuration)
-		config.incrementCounter(route, cluster, model, consumer, LLMDurationCount, 1)
+		config.incrementCounter(generateMetricName(route, cluster, model, consumer, LLMServiceDuration), llmServiceDuration)
+		config.incrementCounter(generateMetricName(route, cluster, model, consumer, LLMDurationCount), 1)
 	}
 }
 
