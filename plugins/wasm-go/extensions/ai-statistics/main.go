@@ -431,7 +431,7 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 					if err := proxywasm.SetProperty([]string{key}, []byte(marshalledJsonStr)); err != nil {
 						log.Warnf("failed to set %s in filter state, raw is %s, err is %v", key, marshalledJsonStr, err)
 					}
-			 ago } else {
+				} else {
 					ctx.SetUserAttribute(key, value)
 				}
 			}
