@@ -94,7 +94,6 @@ type Attribute struct {
 
 type AIStatisticsConfig struct {
 	// Metrics
-	// TODO: add more metrics in Gauge and Histogram format
 	counterMetrics map[string]proxywasm.MetricCounter
 	// Attributes to be recorded in log & span
 	attributes []Attribute
@@ -104,17 +103,36 @@ type AIStatisticsConfig struct {
 	disableOpenaiUsage bool
 }
 
-// 定义指标标签
-var metricLabels = []string{"route", "cluster", "model", "consumer", "metric_name"}
+// sanitizeLabel 将标签值转换为Prometheus兼容的格式
+func sanitizeLabel(label string) string {
+	if label == "" {
+		return "unknown"
+	}
+	// 替换非字母数字字符为下划线
+	reg := regexp.MustCompile(`[^a-zA-Z0-9_]`)
+	sanitized := reg.ReplaceAllString(label, "_")
+	// 确保不以数字开头
+	if len(sanitized) > 0 && sanitized[0] >= '0' && sanitized[0] <= '9' {
+		sanitized = "_" + sanitized
+	}
+	return sanitized
+}
 
-// 生成带标签的指标名称
-func generateMetricName() string {
-	return "ai_statistics_metric"
+// generateMetricName 生成包含所有标签信息的唯一指标名称
+func generateMetricName(route, cluster, model, consumer, metricName string) string {
+	safeRoute := sanitizeLabel(route)
+	safeCluster := sanitizeLabel(cluster)
+	safeModel := sanitizeLabel(model)
+	safeConsumer := sanitizeLabel(consumer)
+	safeMetricName := sanitizeLabel(metricName)
+
+	return fmt.Sprintf("ai_statistics_route_%s_cluster_%s_model_%s_consumer_%s_metric_%s",
+		safeRoute, safeCluster, safeModel, safeConsumer, safeMetricName)
 }
 
 func getRouteName() (string, error) {
 	if raw, err := proxywasm.GetProperty([]string{"route_name"}); err != nil {
-		return "-", err
+		return "unknown", err
 	} else {
 		return string(raw), nil
 	}
@@ -122,11 +140,11 @@ func getRouteName() (string, error) {
 
 func getAPIName() (string, error) {
 	if raw, err := proxywasm.GetProperty([]string{"route_name"}); err != nil {
-		return "-", err
+		return "unknown", err
 	} else {
 		parts := strings.Split(string(raw), "@")
 		if len(parts) != 5 {
-			return "-", errors.New("not api type")
+			return "unknown", errors.New("not api type")
 		} else {
 			return strings.Join(parts[:3], "@"), nil
 		}
@@ -135,7 +153,7 @@ func getAPIName() (string, error) {
 
 func getClusterName() (string, error) {
 	if raw, err := proxywasm.GetProperty([]string{"cluster_name"}); err != nil {
-		return "-", err
+		return "unknown", err
 	} else {
 		return string(raw), nil
 	}
@@ -145,18 +163,15 @@ func (config *AIStatisticsConfig) incrementCounter(route, cluster, model, consum
 	if inc == 0 {
 		return
 	}
-	
-	// 创建标签值
-	labelValues := []string{route, cluster, model, consumer, metricName}
-	
-	// 生成缓存的key
-	cacheKey := fmt.Sprintf("%s|%s|%s|%s|%s", route, cluster, model, consumer, metricName)
-	
-	counter, ok := config.counterMetrics[cacheKey]
+
+	// 生成唯一的指标名称
+	uniqueMetricName := generateMetricName(route, cluster, model, consumer, metricName)
+
+	counter, ok := config.counterMetrics[uniqueMetricName]
 	if !ok {
-		// 定义带标签的指标
-		counter = proxywasm.DefineCounterMetricWithLabels(generateMetricName(), metricLabels, labelValues)
-		config.counterMetrics[cacheKey] = counter
+		// 使用兼容的方法定义指标
+		counter = proxywasm.DefineCounterMetric(uniqueMetricName)
+		config.counterMetrics[uniqueMetricName] = counter
 	}
 	counter.Increment(inc)
 }
@@ -224,7 +239,7 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body 
 	// Set user defined log & span attributes.
 	setAttributeBySource(ctx, config, RequestBody, body)
 	// Set span attributes for ARMS.
-	requestModel := "UNKNOWN"
+	requestModel := "unknown"
 	if model := gjson.GetBytes(body, "model"); model.Exists() {
 		requestModel = model.String()
 	} else {
@@ -383,7 +398,6 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body
 }
 
 // fetches the tracing span value from the specified source.
-
 func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, source string, body []byte) {
 	for _, attribute := range config.attributes {
 		var key string
@@ -483,15 +497,15 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 	// Generate usage metrics
 	var ok bool
 	var route, cluster, model string
-	consumer := ctx.GetStringContext(ConsumerKey, "none")
+	consumer := ctx.GetStringContext(ConsumerKey, "unknown")
 	route, ok = ctx.GetContext(RouteName).(string)
 	if !ok {
-		log.Warnf("RouteName typd assert failed, skip metric record")
+		log.Warnf("RouteName type assert failed, skip metric record")
 		return
 	}
 	cluster, ok = ctx.GetContext(ClusterName).(string)
 	if !ok {
-		log.Warnf("ClusterName typd assert failed, skip metric record")
+		log.Warnf("ClusterName type assert failed, skip metric record")
 		return
 	}
 
@@ -505,23 +519,23 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 	}
 	model, ok = ctx.GetUserAttribute(tokenusage.CtxKeyModel).(string)
 	if !ok {
-		log.Warnf("Model typd assert failed, skip metric record")
+		log.Warnf("Model type assert failed, skip metric record")
 		return
 	}
 	if inputToken, ok := convertToUInt(ctx.GetUserAttribute(tokenusage.CtxKeyInputToken)); ok {
-		config.incrementCounter(route, cluster, model, consumer, tokenusage.CtxKeyInputToken, inputToken)
+		config.incrementCounter(route, cluster, model, consumer, "input_token", inputToken)
 	} else {
-		log.Warnf("InputToken typd assert failed, skip metric record")
+		log.Warnf("InputToken type assert failed, skip metric record")
 	}
 	if outputToken, ok := convertToUInt(ctx.GetUserAttribute(tokenusage.CtxKeyOutputToken)); ok {
-		config.incrementCounter(route, cluster, model, consumer, tokenusage.CtxKeyOutputToken, outputToken)
+		config.incrementCounter(route, cluster, model, consumer, "output_token", outputToken)
 	} else {
-		log.Warnf("OutputToken typd assert failed, skip metric record")
+		log.Warnf("OutputToken type assert failed, skip metric record")
 	}
 	if totalToken, ok := convertToUInt(ctx.GetUserAttribute(tokenusage.CtxKeyTotalToken)); ok {
-		config.incrementCounter(route, cluster, model, consumer, tokenusage.CtxKeyTotalToken, totalToken)
+		config.incrementCounter(route, cluster, model, consumer, "total_token", totalToken)
 	} else {
-		log.Warnf("TotalToken typd assert failed, skip metric record")
+		log.Warnf("TotalToken type assert failed, skip metric record")
 	}
 
 	// Generate duration metrics
@@ -530,20 +544,20 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 	if ctx.GetUserAttribute(LLMFirstTokenDuration) != nil {
 		llmFirstTokenDuration, ok = convertToUInt(ctx.GetUserAttribute(LLMFirstTokenDuration))
 		if !ok {
-			log.Warnf("LLMFirstTokenDuration typd assert failed")
+			log.Warnf("LLMFirstTokenDuration type assert failed")
 			return
 		}
-		config.incrementCounter(route, cluster, model, consumer, LLMFirstTokenDuration, llmFirstTokenDuration)
-		config.incrementCounter(route, cluster, model, consumer, LLMStreamDurationCount, 1)
+		config.incrementCounter(route, cluster, model, consumer, "first_token_duration", llmFirstTokenDuration)
+		config.incrementCounter(route, cluster, model, consumer, "stream_duration_count", 1)
 	}
 	if ctx.GetUserAttribute(LLMServiceDuration) != nil {
 		llmServiceDuration, ok = convertToUInt(ctx.GetUserAttribute(LLMServiceDuration))
 		if !ok {
-			log.Warnf("LLMServiceDuration typd assert failed")
+			log.Warnf("LLMServiceDuration type assert failed")
 			return
 		}
-		config.incrementCounter(route, cluster, model, consumer, LLMServiceDuration, llmServiceDuration)
-		config.incrementCounter(route, cluster, model, consumer, LLMDurationCount, 1)
+		config.incrementCounter(route, cluster, model, consumer, "service_duration", llmServiceDuration)
+		config.incrementCounter(route, cluster, model, consumer, "duration_count", 1)
 	}
 }
 
