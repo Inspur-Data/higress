@@ -78,8 +78,7 @@ const (
 	RuleReplace = "replace"
 	RuleAppend  = "append"
 	
-	// Prometheus metric name with labels
-	// 固定指标名称，动态值通过标签传递
+	// Prometheus 固定指标名称（标签将嵌入指标名称中）
 	PrometheusMetricName = "ai_statistics_requests_total"
 )
 
@@ -97,12 +96,8 @@ type Attribute struct {
 }
 
 type AIStatisticsConfig struct {
-	// 带Prometheus标签的指标（推荐）
-	labeledCounter proxywasm.MetricCounter
-	
-	// 保留原有无标签指标映射（用于向后兼容，可根据需要移除）
+	// 指标映射（键是完整的指标名称，可能包含Prometheus标签语法）
 	counterMetrics map[string]proxywasm.MetricCounter
-	
 	// Attributes to be recorded in log & span
 	attributes []Attribute
 	// If there exist attributes extracted from streaming body, chunks should be buffered
@@ -114,6 +109,24 @@ type AIStatisticsConfig struct {
 // generateMetricName 保留原有函数不变，可用于日志记录等场景
 func generateMetricName(route, cluster, model, consumer, metricName string) string {
 	return fmt.Sprintf("route.%s.upstream.%s.model.%s.consumer.%s.metric.%s", route, cluster, model, consumer, metricName)
+}
+
+// generatePrometheusMetricName 生成包含Prometheus标签语法的指标名称
+// 格式: ai_statistics_requests_total{route="...",upstream="...",model="...",consumer="...",metric="..."}
+func generatePrometheusMetricName(route, cluster, model, consumer, metricName string) string {
+	// 对标签值进行转义，确保符合Prometheus格式
+	escapeLabelValue := func(s string) string {
+		// 替换双引号为下划线，避免破坏标签语法
+		return strings.ReplaceAll(s, `"`, "_")
+	}
+	
+	return fmt.Sprintf(`%s{route="%s",upstream="%s",model="%s",consumer="%s",metric="%s"}`,
+		PrometheusMetricName,
+		escapeLabelValue(route),
+		escapeLabelValue(cluster),
+		escapeLabelValue(model),
+		escapeLabelValue(consumer),
+		escapeLabelValue(metricName))
 }
 
 func getRouteName() (string, error) {
@@ -145,25 +158,20 @@ func getClusterName() (string, error) {
 	}
 }
 
-// incrementCounter 修改为支持Prometheus标签的指标记录
+// incrementCounter 修改为生成Prometheus格式的指标名称
 func (config *AIStatisticsConfig) incrementCounter(route, cluster, model, consumer, metricName string, inc uint64) {
 	if inc == 0 {
 		return
 	}
 	
-	// 使用带标签的指标API（假设SDK支持此接口）
-	// 如果实际SDK接口不同，请根据文档调整
-	if config.labeledCounter != nil {
-		// 传递标签值：route, upstream, model, consumer, metric
-		config.labeledCounter.IncrementWithLabels(inc, []string{route, cluster, model, consumer, metricName})
-	}
+	// 生成包含Prometheus标签语法的指标名称
+	prometheusMetricName := generatePrometheusMetricName(route, cluster, model, consumer, metricName)
 	
-	// 保留原有逻辑用于向后兼容（可根据需要移除）
-	legacyMetricName := generateMetricName(route, cluster, model, consumer, metricName)
-	counter, ok := config.counterMetrics[legacyMetricName]
+	// 获取或创建指标
+	counter, ok := config.counterMetrics[prometheusMetricName]
 	if !ok {
-		counter = proxywasm.DefineCounterMetric(legacyMetricName)
-		config.counterMetrics[legacyMetricName] = counter
+		counter = proxywasm.DefineCounterMetric(prometheusMetricName)
+		config.counterMetrics[prometheusMetricName] = counter
 	}
 	counter.Increment(inc)
 }
@@ -188,18 +196,7 @@ func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
 		config.attributes[i] = attribute
 	}
 	
-	// 初始化带标签的Prometheus指标
-	// 定义指标名称和标签维度
-	config.labeledCounter = proxywasm.DefineCounterMetricWithLabels(PrometheusMetricName,
-		[]proxywasm.MetricLabel{
-			{Name: "route"},
-			{Name: "upstream"},
-			{Name: "model"},
-			{Name: "consumer"},
-			{Name: "metric"},
-		})
-	
-	// 初始化原有指标映射（用于向后兼容）
+	// 初始化指标映射
 	config.counterMetrics = make(map[string]proxywasm.MetricCounter)
 
 	// Parse openai usage config setting.
@@ -434,7 +431,7 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 					if err := proxywasm.SetProperty([]string{key}, []byte(marshalledJsonStr)); err != nil {
 						log.Warnf("failed to set %s in filter state, raw is %s, err is %v", key, marshalledJsonStr, err)
 					}
-				} else {
+			 ago } else {
 					ctx.SetUserAttribute(key, value)
 				}
 			}
@@ -528,7 +525,7 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 		return
 	}
 	
-	// 记录指标时传入所有标签值
+	// 记录指标，所有标签值都会嵌入到指标名称中
 	if inputToken, ok := convertToUInt(ctx.GetUserAttribute(tokenusage.CtxKeyInputToken)); ok {
 		config.incrementCounter(route, cluster, model, consumer, tokenusage.CtxKeyInputToken, inputToken)
 	} else {
