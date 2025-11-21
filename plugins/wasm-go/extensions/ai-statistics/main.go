@@ -6,35 +6,31 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/alibaba/higress/plugins/wasm-go/pkg/wrapper"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
-	"github.com/higress-group/wasm-go/pkg/log"
-	"github.com/higress-group/wasm-go/pkg/tokenusage"
-	"github.com/higress-group/wasm-go/pkg/wrapper"
 	"github.com/tidwall/gjson"
 )
 
-func main() {}
-
-func init() {
-	fmt.Print("ai-statistics start")
+func main() {
 	wrapper.SetCtx(
 		"ai-statistics",
-		wrapper.ParseConfig(parseConfig),
-		wrapper.ProcessRequestHeaders(onHttpRequestHeaders),
-		wrapper.ProcessRequestBody(onHttpRequestBody),
-		wrapper.ProcessResponseHeaders(onHttpResponseHeaders),
-		wrapper.ProcessStreamingResponseBody(onHttpStreamingBody),
-		wrapper.ProcessResponseBody(onHttpResponseBody),
+		wrapper.ParseConfigBy(parseConfig),
+		wrapper.ProcessRequestHeadersBy(onHttpRequestHeaders),
+		wrapper.ProcessRequestBodyBy(onHttpRequestBody),
+		wrapper.ProcessResponseHeadersBy(onHttpResponseHeaders),
+		wrapper.ProcessStreamingResponseBodyBy(onHttpStreamingBody),
+		wrapper.ProcessResponseBodyBy(onHttpResponseBody),
 	)
 }
 
 const (
-	defaultMaxBodyBytes uint32 = 100 * 1024 * 1024
+	// Trace span prefix
+	TracePrefix = "trace_span_tag."
 	// Context consts
 	StatisticsRequestStartTime = "ai-statistics-request-start-time"
 	StatisticsFirstTokenTime   = "ai-statistics-first-token-time"
@@ -43,9 +39,8 @@ const (
 	CtxStreamingBodyBuffer     = "streamingBodyBuffer"
 	RouteName                  = "route"
 	ClusterName                = "cluster"
-	APIName                    = "api"
 	ConsumerKey                = "x-mse-consumer"
-	RequestPath                = "request_path"
+	SourceIP                   = "source_ip"
 
 	// Source Type
 	FixedValue            = "fixed_value"
@@ -54,24 +49,15 @@ const (
 	ResponseHeader        = "response_header"
 	ResponseStreamingBody = "response_streaming_body"
 	ResponseBody          = "response_body"
-	SourceIP              = "source_ip"
+	SourceIPSource        = "source_ip"
 
-	// Inner metric & log attributes
-	LLMFirstTokenDuration  = "llm_first_token_duration"
-	LLMServiceDuration     = "llm_service_duration"
-	LLMDurationCount       = "llm_duration_count"
-	LLMStreamDurationCount = "llm_stream_duration_count"
-	ResponseType           = "response_type"
-	ChatID                 = "chat_id"
-	ChatRound              = "chat_round"
-
-	// Inner span attributes
-	ArmsSpanKind     = "gen_ai.span.kind"
-	ArmsModelName    = "gen_ai.model_name"
-	ArmsRequestModel = "gen_ai.request.model"
-	ArmsInputToken   = "gen_ai.usage.input_tokens"
-	ArmsOutputToken  = "gen_ai.usage.output_tokens"
-	ArmsTotalToken   = "gen_ai.usage.total_tokens"
+	// Inner metric & log attributes name
+	Model                 = "model"
+	InputToken            = "input_token"
+	OutputToken           = "output_token"
+	LLMFirstTokenDuration = "llm_first_token_duration"
+	LLMServiceDuration    = "llm_service_duration"
+	LLMDurationCount      = "llm_duration_count"
 
 	// Extract Rule
 	RuleFirst   = "first"
@@ -81,15 +67,12 @@ const (
 
 // TracingSpan is the tracing span configuration.
 type Attribute struct {
-	Key                string `json:"key"`
-	ValueSource        string `json:"value_source"`
-	Value              string `json:"value"`
-	TraceSpanKey       string `json:"trace_span_key,omitempty"`
-	DefaultValue       string `json:"default_value,omitempty"`
-	Rule               string `json:"rule,omitempty"`
-	ApplyToLog         bool   `json:"apply_to_log,omitempty"`
-	ApplyToSpan        bool   `json:"apply_to_span,omitempty"`
-	AsSeparateLogField bool   `json:"as_separate_log_field,omitempty"`
+	Key         string `json:"key"`
+	ValueSource string `json:"value_source"`
+	Value       string `json:"value"`
+	Rule        string `json:"rule,omitempty"`
+	ApplyToLog  bool   `json:"apply_to_log,omitempty"`
+	ApplyToSpan bool   `json:"apply_to_span,omitempty"`
 }
 
 type AIStatisticsConfig struct {
@@ -100,16 +83,14 @@ type AIStatisticsConfig struct {
 	attributes []Attribute
 	// If there exist attributes extracted from streaming body, chunks should be buffered
 	shouldBufferStreamingBody bool
-	// If disableOpenaiUsage is true, model/input_token/output_token logs will be skipped
-	disableOpenaiUsage bool
 }
 
-// 仅修改此函数，保持原有指标名称结构，在其后附加Prometheus标签
+// 修改：增加consumer和sourceIP参数，生成带Prometheus标签的指标名称
 func generateMetricName(route, cluster, model, consumer, sourceIP, metricName string) string {
 	// 保持原有的扁平化命名方式
-	baseName := fmt.Sprintf("route.%s.upstream.%s.model.%s.consumer.%s.srcip.%s.metric.%s", 
+	baseName := fmt.Sprintf("route.%s.upstream.%s.model.%s.consumer.%s.srcip.%s.metric.%s",
 		route, cluster, model, consumer, sourceIP, metricName)
-	
+
 	// 在名称后附加Prometheus标签，方便后续解析
 	return fmt.Sprintf("%s{route=\"%s\",cluster=\"%s\",model=\"%s\",consumer=\"%s\",source_ip=\"%s\",metric_name=\"%s\"}",
 		baseName, route, cluster, model, consumer, sourceIP, metricName)
@@ -123,19 +104,6 @@ func getRouteName() (string, error) {
 	}
 }
 
-func getAPIName() (string, error) {
-	if raw, err := proxywasm.GetProperty([]string{"route_name"}); err != nil {
-		return "-", err
-	} else {
-		parts := strings.Split(string(raw), "@")
-		if len(parts) != 5 {
-			return "-", errors.New("not api type")
-		} else {
-			return strings.Join(parts[:3], "@"), nil
-		}
-	}
-}
-
 func getClusterName() (string, error) {
 	if raw, err := proxywasm.GetProperty([]string{"cluster_name"}); err != nil {
 		return "-", err
@@ -145,9 +113,6 @@ func getClusterName() (string, error) {
 }
 
 func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64) {
-	if inc == 0 {
-		return
-	}
 	counter, ok := config.counterMetrics[metricName]
 	if !ok {
 		counter = proxywasm.DefineCounterMetric(metricName)
@@ -156,8 +121,7 @@ func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64
 	counter.Increment(inc)
 }
 
-func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
-	log.Debugf("ai-statistics start parseConfig")
+func parseConfig(configJson gjson.Result, config *AIStatisticsConfig, log wrapper.Log) error {
 	// Parse tracing span attributes setting.
 	attributeConfigs := configJson.Get("attributes").Array()
 	config.attributes = make([]Attribute, len(attributeConfigs))
@@ -178,105 +142,62 @@ func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
 	}
 	// Metric settings
 	config.counterMetrics = make(map[string]proxywasm.MetricCounter)
-
-	// Parse openai usage config setting.
-	config.disableOpenaiUsage = configJson.Get("disable_openai_usage").Bool()
-
 	return nil
 }
 
-func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) types.Action {
-	ctx.DisableReroute()
-	route, _ := getRouteName()
-	cluster, _ := getClusterName()
-	api, apiError := getAPIName()
-	if apiError == nil {
-		route = api
-	}
-	ctx.SetContext(RouteName, route)
-	ctx.SetContext(ClusterName, cluster)
-	ctx.SetUserAttribute(APIName, api)
+func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig, log wrapper.Log) types.Action {
+	ctx.SetContext(CtxGeneralAtrribute, map[string]string{})
+	ctx.SetContext(CtxLogAtrribute, map[string]string{})
 	ctx.SetContext(StatisticsRequestStartTime, time.Now().UnixMilli())
-	if requestPath, _ := proxywasm.GetHttpRequestHeader(":path"); requestPath != "" {
-		ctx.SetContext(RequestPath, requestPath)
-	}
+
+	// 获取并存储route
+	route, _ := getRouteName()
+	ctx.SetContext(RouteName, route)
+
+	// 获取并存储cluster
+	cluster, _ := getClusterName()
+	ctx.SetContext(ClusterName, cluster)
+
+	// 获取并存储consumer
 	if consumer, _ := proxywasm.GetHttpRequestHeader(ConsumerKey); consumer != "" {
 		ctx.SetContext(ConsumerKey, consumer)
+	} else {
+		ctx.SetContext(ConsumerKey, "none")
 	}
 
-	ctx.SetRequestBodyBufferLimit(defaultMaxBodyBytes)
-
-	log.Debugf("ai-statistics start onHttpRequestHeaders/setAttributeBySource/SOURCEIP")
-	// 先设置 source_ip
-	setAttributeBySource(ctx, config, SourceIP, nil)
-	log.Debugf("ai-statistics end onHttpRequestHeaders/setAttributeBySource/SOURCEIP")
+	// 获取并存储sourceIP
+	setAttributeBySource(ctx, config, SourceIPSource, nil, log)
 
 	// Set user defined log & span attributes which type is fixed_value
-	setAttributeBySource(ctx, config, FixedValue, nil)
+	setAttributeBySource(ctx, config, FixedValue, nil, log)
 	// Set user defined log & span attributes which type is request_header
-	setAttributeBySource(ctx, config, RequestHeader, nil)
-	// Set span attributes for ARMS.
-	setSpanAttribute(ArmsSpanKind, "LLM")
+	setAttributeBySource(ctx, config, RequestHeader, nil, log)
 
 	return types.ActionContinue
 }
 
-func onHttpRequestBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body []byte) types.Action {
+func onHttpRequestBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body []byte, log wrapper.Log) types.Action {
 	// Set user defined log & span attributes.
-	setAttributeBySource(ctx, config, RequestBody, body)
-	// Set span attributes for ARMS.
-	requestModel := "UNKNOWN"
-	if model := gjson.GetBytes(body, "model"); model.Exists() {
-		requestModel = model.String()
-	} else {
-		requestPath := ctx.GetStringContext(RequestPath, "")
-		if strings.Contains(requestPath, "generateContent") || strings.Contains(requestPath, "streamGenerateContent") { // Google Gemini GenerateContent
-			reg := regexp.MustCompile(`^.*/(?P<api_version>[^/]+)/models/(?P<model>[^:]+):\w+Content$`)
-			matches := reg.FindStringSubmatch(requestPath)
-			if len(matches) == 3 {
-				requestModel = matches[2]
-			}
-		}
-	}
-	setSpanAttribute(ArmsRequestModel, requestModel)
-	// Set the number of conversation rounds
-
-	userPromptCount := 0
-	if messages := gjson.GetBytes(body, "messages"); messages.Exists() && messages.IsArray() {
-		for _, msg := range messages.Array() {
-			if msg.Get("role").String() == "user" {
-				userPromptCount += 1
-			}
-		}
-	} else if contents := gjson.GetBytes(body, "contents"); contents.Exists() && contents.IsArray() { // Google Gemini GenerateContent
-		for _, content := range contents.Array() {
-			if !content.Get("role").Exists() || content.Get("role").String() == "user" {
-				userPromptCount += 1
-			}
-		}
-	}
-	ctx.SetUserAttribute(ChatRound, userPromptCount)
-
-	// Write log
-	ctx.WriteUserAttributeToLogWithKey(wrapper.AILogKey)
+	setAttributeBySource(ctx, config, RequestBody, body, log)
 	return types.ActionContinue
 }
 
-func onHttpResponseHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) types.Action {
+func onHttpResponseHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig, log wrapper.Log) types.Action {
 	contentType, _ := proxywasm.GetHttpResponseHeader("content-type")
 	if !strings.Contains(contentType, "text/event-stream") {
 		ctx.BufferResponseBody()
 	}
 
 	// Set user defined log & span attributes.
-	setAttributeBySource(ctx, config, ResponseHeader, nil)
+	setAttributeBySource(ctx, config, ResponseHeader, nil, log)
 
 	return types.ActionContinue
 }
 
-func onHttpStreamingBody(ctx wrapper.HttpContext, config AIStatisticsConfig, data []byte, endOfStream bool) []byte {
+func onHttpStreamingBody(ctx wrapper.HttpContext, config AIStatisticsConfig, data []byte, endOfStream bool, log wrapper.Log) []byte {
 	// Buffer stream body for record log & span attributes
 	if config.shouldBufferStreamingBody {
+		var streamingBodyBuffer []byte
 		streamingBodyBuffer, ok := ctx.GetContext(CtxStreamingBodyBuffer).([]byte)
 		if !ok {
 			streamingBodyBuffer = data
@@ -284,16 +205,6 @@ func onHttpStreamingBody(ctx wrapper.HttpContext, config AIStatisticsConfig, dat
 			streamingBodyBuffer = append(streamingBodyBuffer, data...)
 		}
 		ctx.SetContext(CtxStreamingBodyBuffer, streamingBodyBuffer)
-	}
-
-	ctx.SetUserAttribute(ResponseType, "stream")
-	if chatID := wrapper.GetValueFromBody(data, []string{
-		"id",
-		"response.id",
-		"responseId", // Gemini generateContent
-		"message.id", // anthropic messages
-	}); chatID != nil {
-		ctx.SetUserAttribute(ChatID, chatID.String())
 	}
 
 	// Get requestStartTime from http context
@@ -307,23 +218,27 @@ func onHttpStreamingBody(ctx wrapper.HttpContext, config AIStatisticsConfig, dat
 	if ctx.GetContext(StatisticsFirstTokenTime) == nil {
 		firstTokenTime := time.Now().UnixMilli()
 		ctx.SetContext(StatisticsFirstTokenTime, firstTokenTime)
-		ctx.SetUserAttribute(LLMFirstTokenDuration, firstTokenTime-requestStartTime)
+		attributes, _ := ctx.GetContext(CtxGeneralAtrribute).(map[string]string)
+		attributes[LLMFirstTokenDuration] = fmt.Sprint(firstTokenTime - requestStartTime)
+		ctx.SetContext(CtxGeneralAtrribute, attributes)
 	}
 
 	// Set information about this request
-	if !config.disableOpenaiUsage {
-		if usage := tokenusage.GetTokenUsage(ctx, data); usage.TotalToken > 0 {
-			// Set span attributes for ARMS.
-			setSpanAttribute(ArmsTotalToken, usage.TotalToken)
-			setSpanAttribute(ArmsModelName, usage.Model)
-			setSpanAttribute(ArmsInputToken, usage.InputToken)
-			setSpanAttribute(ArmsOutputToken, usage.OutputToken)
-		}
+	if model, inputToken, outputToken, ok := getUsage(data); ok {
+		attributes, _ := ctx.GetContext(CtxGeneralAtrribute).(map[string]string)
+		// Record Log Attributes
+		attributes[Model] = model
+		attributes[InputToken] = fmt.Sprint(inputToken)
+		attributes[OutputToken] = fmt.Sprint(outputToken)
+		// Set attributes to http context
+		ctx.SetContext(CtxGeneralAtrribute, attributes)
 	}
 	// If the end of the stream is reached, record metrics/logs/spans.
 	if endOfStream {
 		responseEndTime := time.Now().UnixMilli()
-		ctx.SetUserAttribute(LLMServiceDuration, responseEndTime-requestStartTime)
+		attributes, _ := ctx.GetContext(CtxGeneralAtrribute).(map[string]string)
+		attributes[LLMServiceDuration] = fmt.Sprint(responseEndTime - requestStartTime)
+		ctx.SetContext(CtxGeneralAtrribute, attributes)
 
 		// Set user defined log & span attributes.
 		if config.shouldBufferStreamingBody {
@@ -331,82 +246,126 @@ func onHttpStreamingBody(ctx wrapper.HttpContext, config AIStatisticsConfig, dat
 			if !ok {
 				return data
 			}
-			setAttributeBySource(ctx, config, ResponseStreamingBody, streamingBodyBuffer)
+			setAttributeBySource(ctx, config, ResponseStreamingBody, streamingBodyBuffer, log)
 		}
 
+		// Write inner filter states which can be used by other plugins such as ai-token-ratelimit
+		writeFilterStates(ctx, log)
+
 		// Write log
-		ctx.WriteUserAttributeToLogWithKey(wrapper.AILogKey)
+		writeLog(ctx, log)
 
 		// Write metrics
-		writeMetric(ctx, config)
+		writeMetric(ctx, config, log)
 	}
 	return data
 }
 
-func onHttpResponseBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body []byte) types.Action {
+func onHttpResponseBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body []byte, log wrapper.Log) types.Action {
+	// Get attributes from http context
+	attributes, _ := ctx.GetContext(CtxGeneralAtrribute).(map[string]string)
+
 	// Get requestStartTime from http context
 	requestStartTime, _ := ctx.GetContext(StatisticsRequestStartTime).(int64)
 
 	responseEndTime := time.Now().UnixMilli()
-	ctx.SetUserAttribute(LLMServiceDuration, responseEndTime-requestStartTime)
-
-	ctx.SetUserAttribute(ResponseType, "normal")
-	if chatID := wrapper.GetValueFromBody(body, []string{
-		"id",
-		"response.id",
-		"responseId", // Gemini generateContent
-		"message.id", // anthropic messages
-	}); chatID != nil {
-		ctx.SetUserAttribute(ChatID, chatID.String())
-	}
+	attributes[LLMServiceDuration] = fmt.Sprint(responseEndTime - requestStartTime)
 
 	// Set information about this request
-	if !config.disableOpenaiUsage {
-		if usage := tokenusage.GetTokenUsage(ctx, body); usage.TotalToken > 0 {
-			// Set span attributes for ARMS.
-			setSpanAttribute(ArmsModelName, usage.Model)
-			setSpanAttribute(ArmsInputToken, usage.InputToken)
-			setSpanAttribute(ArmsOutputToken, usage.OutputToken)
-			setSpanAttribute(ArmsTotalToken, usage.TotalToken)
-		}
+	model, inputToken, outputToken, ok := getUsage(body)
+	if ok {
+		attributes[Model] = model
+		attributes[InputToken] = fmt.Sprint(inputToken)
+		attributes[OutputToken] = fmt.Sprint(outputToken)
+		// Update attributes
+		ctx.SetContext(CtxGeneralAtrribute, attributes)
 	}
 
 	// Set user defined log & span attributes.
-	setAttributeBySource(ctx, config, ResponseBody, body)
+	setAttributeBySource(ctx, config, ResponseBody, body, log)
+
+	// Write inner filter states which can be used by other plugins such as ai-token-ratelimit
+	writeFilterStates(ctx, log)
 
 	// Write log
-	ctx.WriteUserAttributeToLogWithKey(wrapper.AILogKey)
+	writeLog(ctx, log)
 
 	// Write metrics
-	writeMetric(ctx, config)
+	writeMetric(ctx, config, log)
 
 	return types.ActionContinue
 }
 
-// fetches the tracing span value from the specified source.
+func getUsage(data []byte) (model string, inputTokenUsage int64, outputTokenUsage int64, ok bool) {
+	chunks := bytes.Split(bytes.TrimSpace(data), []byte("\n\n"))
+	for _, chunk := range chunks {
+		// the feature strings are used to identify the usage data, like:
+		// {"model":"gpt2","usage":{"prompt_tokens":1,"completion_tokens":1}}
+		if !bytes.Contains(chunk, []byte("prompt_tokens")) {
+			continue
+		}
+		if !bytes.Contains(chunk, []byte("completion_tokens")) {
+			continue
+		}
+		modelObj := gjson.GetBytes(chunk, "model")
+		inputTokenObj := gjson.GetBytes(chunk, "usage.prompt_tokens")
+		outputTokenObj := gjson.GetBytes(chunk, "usage.completion_tokens")
+		if modelObj.Exists() && inputTokenObj.Exists() && outputTokenObj.Exists() {
+			model = modelObj.String()
+			inputTokenUsage = inputTokenObj.Int()
+			outputTokenUsage = outputTokenObj.Int()
+			ok = true
+			return
+		}
+	}
+	return
+}
 
-func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, source string, body []byte) {
+// fetches the tracing span value from the specified source.
+func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, source string, body []byte, log wrapper.Log) {
+	attributes, ok := ctx.GetContext(CtxGeneralAtrribute).(map[string]string)
+	if !ok {
+		log.Error("failed to get attributes from http context")
+		return
+	}
 	for _, attribute := range config.attributes {
-		var key string
-		var value interface{}
 		if source == attribute.ValueSource {
-			key = attribute.Key
 			switch source {
 			case FixedValue:
-				value = attribute.Value
+				log.Debugf("[attribute] source type: %s, key: %s, value: %s", source, attribute.Key, attribute.Value)
+				attributes[attribute.Key] = attribute.Value
 			case RequestHeader:
-				value, _ = proxywasm.GetHttpRequestHeader(attribute.Value)
+				if value, err := proxywasm.GetHttpRequestHeader(attribute.Value); err == nil {
+					log.Debugf("[attribute] source type: %s, key: %s, value: %s", source, attribute.Key, value)
+					attributes[attribute.Key] = value
+				}
 			case RequestBody:
-				value = gjson.GetBytes(body, attribute.Value).Value()
+				raw := gjson.GetBytes(body, attribute.Value).Raw
+				var value string
+				if len(raw) > 2 {
+					value = raw[1 : len(raw)-1]
+				}
+				log.Debugf("[attribute] source type: %s, key: %s, value: %s", source, attribute.Key, value)
+				attributes[attribute.Key] = value
 			case ResponseHeader:
-				value, _ = proxywasm.GetHttpResponseHeader(attribute.Value)
+				if value, err := proxywasm.GetHttpResponseHeader(attribute.Value); err == nil {
+					log.Debugf("[log attribute] source type: %s, key: %s, value: %s", source, attribute.Key, value)
+					attributes[attribute.Key] = value
+				}
 			case ResponseStreamingBody:
-				value = extractStreamingBodyByJsonPath(body, attribute.Value, attribute.Rule)
+				value := extractStreamingBodyByJsonPath(body, attribute.Value, attribute.Rule, log)
+				log.Debugf("[log attribute] source type: %s, key: %s, value: %s", source, attribute.Key, value)
+				attributes[attribute.Key] = value
 			case ResponseBody:
-				value = gjson.GetBytes(body, attribute.Value).Value()
-			case SourceIP:
+				value := gjson.GetBytes(body, attribute.Value).Raw
+				if len(value) > 2 && value[0] == '"' && value[len(value)-1] == '"' {
+					value = value[1 : len(value)-1]
+				}
+				log.Debugf("[log attribute] source type: %s, key: %s, value: %s", source, attribute.Key, value)
+				attributes[attribute.Key] = value
+			case SourceIPSource:
 				// 1. 先尝试从 X-Forwarded-For 获取
-				value = "unknown"
+				value := "unknown"
 				if xff, err := proxywasm.GetHttpRequestHeader("X-Forwarded-For"); err == nil && xff != "" {
 					ips := strings.Split(xff, ",")
 					for _, ip := range ips {
@@ -435,44 +394,28 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 				if value == "" {
 					value = "unknown"
 				}
+				attributes[attribute.Key] = value
 			default:
 			}
-			if (value == nil || value == "") && attribute.DefaultValue != "" {
-				value = attribute.DefaultValue
-			}
-			log.Debugf("[attribute] source type: %s, key: %s, value: %+v", source, key, value)
-			if attribute.ApplyToLog {
-				if attribute.AsSeparateLogField {
-					marshalledJsonStr := wrapper.MarshalStr(fmt.Sprint(value))
-					if err := proxywasm.SetProperty([]string{key}, []byte(marshalledJsonStr)); err != nil {
-						log.Warnf("failed to set %s in filter state, raw is %s, err is %v", key, marshalledJsonStr, err)
-					}
-				} else {
-					ctx.SetUserAttribute(key, value)
-				}
-			}
-			// for metrics - 确保SourceIP总是被存入context
-			if key == tokenusage.CtxKeyModel || key == tokenusage.CtxKeyInputToken || key == tokenusage.CtxKeyOutputToken || key == tokenusage.CtxKeyTotalToken || key == SourceIP{
-				ctx.SetContext(key, value)
-			}
-			if attribute.ApplyToSpan {
-				if attribute.TraceSpanKey != "" {
-					key = attribute.TraceSpanKey
-				}
-				setSpanAttribute(key, value)
-			}
+		}
+		if attribute.ApplyToLog {
+			setLogAttribute(ctx, attribute.Key, attributes[attribute.Key], log)
+		}
+		if attribute.ApplyToSpan {
+			setSpanAttribute(attribute.Key, attributes[attribute.Key], log)
 		}
 	}
+	ctx.SetContext(CtxGeneralAtrribute, attributes)
 }
 
-func extractStreamingBodyByJsonPath(data []byte, jsonPath string, rule string) interface{} {
-	chunks := bytes.Split(bytes.TrimSpace(wrapper.UnifySSEChunk(data)), []byte("\n\n"))
-	var value interface{}
+func extractStreamingBodyByJsonPath(data []byte, jsonPath string, rule string, log wrapper.Log) string {
+	chunks := bytes.Split(bytes.TrimSpace(data), []byte("\n\n"))
+	var value string
 	if rule == RuleFirst {
 		for _, chunk := range chunks {
 			jsonObj := gjson.GetBytes(chunk, jsonPath)
 			if jsonObj.Exists() {
-				value = jsonObj.Value()
+				value = jsonObj.String()
 				break
 			}
 		}
@@ -480,172 +423,174 @@ func extractStreamingBodyByJsonPath(data []byte, jsonPath string, rule string) i
 		for _, chunk := range chunks {
 			jsonObj := gjson.GetBytes(chunk, jsonPath)
 			if jsonObj.Exists() {
-				value = jsonObj.Value()
+				value = jsonObj.String()
 			}
 		}
 	} else if rule == RuleAppend {
 		// extract llm response
-		var strValue string
 		for _, chunk := range chunks {
-			jsonObj := gjson.GetBytes(chunk, jsonPath)
-			if jsonObj.Exists() {
-				strValue += jsonObj.String()
+			raw := gjson.GetBytes(chunk, jsonPath).Raw
+			if len(raw) > 2 && raw[0] == '"' && raw[len(raw)-1] == '"' {
+				value += raw[1 : len(raw)-1]
 			}
 		}
-		value = strValue
 	} else {
 		log.Errorf("unsupported rule type: %s", rule)
 	}
 	return value
 }
 
-// Set the tracing span with value.
-func setSpanAttribute(key string, value interface{}) {
+func setFilterState(key, value string, log wrapper.Log) {
 	if value != "" {
-		traceSpanTag := wrapper.TraceSpanTagPrefix + key
-		if e := proxywasm.SetProperty([]string{traceSpanTag}, []byte(fmt.Sprint(value))); e != nil {
-			log.Warnf("failed to set %s in filter state: %v", traceSpanTag, e)
+		if e := proxywasm.SetProperty([]string{key}, []byte(fmt.Sprint(value))); e != nil {
+			log.Errorf("failed to set %s in filter state: %v", key, e)
+		}
+	} else {
+		log.Debugf("failed to write filter state [%s], because it's value is empty")
+	}
+}
+
+// Set the tracing span with value.
+func setSpanAttribute(key, value string, log wrapper.Log) {
+	if value != "" {
+		traceSpanTag := TracePrefix + key
+		if e := proxywasm.SetProperty([]string{traceSpanTag}, []byte(value)); e != nil {
+			log.Errorf("failed to set %s in filter state: %v", traceSpanTag, e)
 		}
 	} else {
 		log.Debugf("failed to write span attribute [%s], because it's value is empty")
 	}
 }
 
-func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig) {
-	// Generate usage metrics
-	var route, cluster, model, consumer, sourceIP string
-	
-	// Get route
-	routeVal := ctx.GetContext(RouteName)
-	if routeVal == nil {
-		log.Warnf("RouteName is nil, skip metric record")
-		return
-	}
-	route, ok := routeVal.(string)
+// fetches the tracing span value from the specified source.
+func setLogAttribute(ctx wrapper.HttpContext, key string, value interface{}, log wrapper.Log) {
+	logAttributes, ok := ctx.GetContext(CtxLogAtrribute).(map[string]string)
 	if !ok {
-		log.Warnf("RouteName type assert failed, skip metric record")
+		log.Error("failed to get logAttributes from http context")
 		return
 	}
-	
-	// Get cluster
-	clusterVal := ctx.GetContext(ClusterName)
-	if clusterVal == nil {
-		log.Warnf("ClusterName is nil, skip metric record")
-		return
-	}
-	cluster, ok = clusterVal.(string)
+	logAttributes[key] = fmt.Sprint(value)
+	ctx.SetContext(CtxLogAtrribute, logAttributes)
+}
+
+func writeFilterStates(ctx wrapper.HttpContext, log wrapper.Log) {
+	attributes, _ := ctx.GetContext(CtxGeneralAtrribute).(map[string]string)
+	setFilterState(Model, attributes[Model], log)
+	setFilterState(InputToken, attributes[InputToken], log)
+	setFilterState(OutputToken, attributes[OutputToken], log)
+}
+
+// 修改：增加consumer和sourceIP参数
+func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig, log wrapper.Log) {
+	attributes, _ := ctx.GetContext(CtxGeneralAtrribute).(map[string]string)
+
+	// 从Context获取所有需要的标签值
+	route, ok := ctx.GetContext(RouteName).(string)
 	if !ok {
-		log.Warnf("ClusterName type assert failed, skip metric record")
-		return
-	}
-	
-	// Get consumer
-	consumer = "none"
-	consumerVal := ctx.GetContext(ConsumerKey)
-	if consumerVal != nil {
-		if consumerStr, ok := consumerVal.(string); ok {
-			consumer = consumerStr
-		}
-	}
-
-	// Get sourceIP - FIXED: 从 Context 获取，而不是 UserAttribute
-	sourceIP = "unknown"
-	sourceIPVal := ctx.GetContext(SourceIP)
-	if sourceIPVal != nil {
-		if sourceIPStr, ok := sourceIPVal.(string); ok {
-			sourceIP = sourceIPStr
-		}
-	}
-
-	if config.disableOpenaiUsage {
-		log.Debugf("openai usage is disabled, skip metric record")
+		log.Errorf("RouteName not found in context, skip metric record")
 		return
 	}
 
-	// Get model
-	modelVal := ctx.GetContext(tokenusage.CtxKeyModel)
-	if modelVal == nil {
-		log.Warnf("model information is nil, skip metric record")
-		return
-	}
-	model, ok = modelVal.(string)
+	cluster, ok := ctx.GetContext(ClusterName).(string)
 	if !ok {
-		log.Warnf("Model type assert failed, skip metric record")
+		log.Errorf("ClusterName not found in context, skip metric record")
 		return
 	}
 
-	// Get tokens
-	inputToken, inputOk := convertToUInt(ctx.GetContext(tokenusage.CtxKeyInputToken))
-	outputToken, outputOk := convertToUInt(ctx.GetContext(tokenusage.CtxKeyOutputToken))
-	totalToken, totalOk := convertToUInt(ctx.GetContext(tokenusage.CtxKeyTotalToken))
-	
-	if !inputOk {
-		log.Warnf("InputToken type assert failed or is nil, skip metric record")
-	} else {
-		config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP, tokenusage.CtxKeyInputToken), inputToken)
-	}
-	
-	if !outputOk {
-		log.Warnf("OutputToken type assert failed or is nil, skip metric record")
-	} else {
-		config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP, tokenusage.CtxKeyOutputToken), outputToken)
-	}
-	
-	if !totalOk {
-		log.Warnf("TotalToken type assert failed or is nil, skip metric record")
-	} else {
-		config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP, tokenusage.CtxKeyTotalToken), totalToken)
+	consumer, ok := ctx.GetContext(ConsumerKey).(string)
+	if !ok {
+		consumer = "none"
 	}
 
-	// Generate duration metrics
-	
-	// Is stream response
-	firstTokenDurationVal := ctx.GetUserAttribute(LLMFirstTokenDuration)
-	if firstTokenDurationVal != nil {
-		llmFirstTokenDuration, ok := convertToUInt(firstTokenDurationVal)
-		if ok {
-			config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP, LLMFirstTokenDuration), llmFirstTokenDuration)
-			config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP, LLMStreamDurationCount), 1)
-		} else {
-			log.Warnf("LLMFirstTokenDuration type assert failed")
-		}
+	sourceIP, ok := ctx.GetContext(SourceIP).(string)
+	if !ok {
+		sourceIP = "unknown"
 	}
-	
-	// Always record service duration if available
-	serviceDurationVal := ctx.GetUserAttribute(LLMServiceDuration)
-	if serviceDurationVal != nil {
-		llmServiceDuration, ok := convertToUInt(serviceDurationVal)
-		if ok {
-			config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP, LLMServiceDuration), llmServiceDuration)
-			config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP, LLMDurationCount), 1)
-		} else {
-			log.Warnf("LLMServiceDuration type assert failed")
+
+	model, ok := attributes["model"]
+	if !ok {
+		log.Errorf("model not found in attributes, skip metric record")
+		return
+	}
+
+	if inputToken, ok := attributes[InputToken]; ok {
+		inputTokenUint64, err := strconv.ParseUint(inputToken, 10, 0)
+		if err != nil || inputTokenUint64 == 0 {
+			log.Errorf("inputToken convert failed, value is %s, err msg is [%v]", inputToken, err)
+			return
 		}
+		// 修改：传递所有标签参数
+		config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP, InputToken), inputTokenUint64)
+	}
+	if outputToken, ok := attributes[OutputToken]; ok {
+		outputTokenUint64, err := strconv.ParseUint(outputToken, 10, 0)
+		if err != nil || outputTokenUint64 == 0 {
+			log.Errorf("outputToken convert failed, value is %s, err msg is [%v]", outputToken, err)
+			return
+		}
+		// 修改：传递所有标签参数
+		config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP, OutputToken), outputTokenUint64)
+	}
+	if llmFirstTokenDuration, ok := attributes[LLMFirstTokenDuration]; ok {
+		llmFirstTokenDurationUint64, err := strconv.ParseUint(llmFirstTokenDuration, 10, 0)
+		if err != nil || llmFirstTokenDurationUint64 == 0 {
+			log.Errorf("llmFirstTokenDuration convert failed, value is %s, err msg is [%v]", llmFirstTokenDuration, err)
+			return
+		}
+		// 修改：传递所有标签参数
+		config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP, LLMFirstTokenDuration), llmFirstTokenDurationUint64)
+	}
+	if llmServiceDuration, ok := attributes[LLMServiceDuration]; ok {
+		llmServiceDurationUint64, err := strconv.ParseUint(llmServiceDuration, 10, 0)
+		if err != nil || llmServiceDurationUint64 == 0 {
+			log.Errorf("llmServiceDuration convert failed, value is %s, err msg is [%v]", llmServiceDuration, err)
+			return
+		}
+		// 修改：传递所有标签参数
+		config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP, LLMServiceDuration), llmServiceDurationUint64)
+	}
+	// 修改：传递所有标签参数
+	config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP, LLMDurationCount), 1)
+}
+
+func writeLog(ctx wrapper.HttpContext, log wrapper.Log) {
+	attributes, _ := ctx.GetContext(CtxGeneralAtrribute).(map[string]string)
+	logAttributes, _ := ctx.GetContext(CtxLogAtrribute).(map[string]string)
+	// Set inner log fields
+	if attributes[Model] != "" {
+		logAttributes[Model] = attributes[Model]
+	}
+	if attributes[InputToken] != "" {
+		logAttributes[InputToken] = attributes[InputToken]
+	}
+	if attributes[OutputToken] != "" {
+		logAttributes[OutputToken] = attributes[OutputToken]
+	}
+	if attributes[LLMFirstTokenDuration] != "" {
+		logAttributes[LLMFirstTokenDuration] = attributes[LLMFirstTokenDuration]
+	}
+	if attributes[LLMServiceDuration] != "" {
+		logAttributes[LLMServiceDuration] = attributes[LLMServiceDuration]
+	}
+	// Traverse log fields
+	items := []string{}
+	for k, v := range logAttributes {
+		items = append(items, fmt.Sprintf(`"%s":"%s"`, k, v))
+	}
+	aiLogField := fmt.Sprintf(`{%s}`, strings.Join(items, ","))
+	// log.Infof("ai request json log: %s", aiLogField)
+	jsonMap := map[string]string{
+		"ai_log": aiLogField,
+	}
+	serialized, _ := json.Marshal(jsonMap)
+	jsonLogRaw := gjson.GetBytes(serialized, "ai_log").Raw
+	jsonLog := jsonLogRaw[1 : len(jsonLogRaw)-1]
+	if err := proxywasm.SetProperty([]string{"ai_log"}, []byte(jsonLog)); err != nil {
+		log.Errorf("failed to set ai_log in filter state: %v", err)
 	}
 }
 
-func convertToUInt(val interface{}) (uint64, bool) {
-	if val == nil {
-		return 0, false
-	}
-	switch v := val.(type) {
-	case float32:
-		return uint64(v), true
-	case float64:
-		return uint64(v), true
-	case int32:
-		return uint64(v), true
-	case int64:
-		return uint64(v), true
-	case uint32:
-		return uint64(v), true
-	case uint64:
-		return v, true
-	default:
-		return 0, false
-	}
-}
-
+// IP解析辅助函数
 func parseIP(source string) string {
 	if source == "" {
 		return "unknown"
