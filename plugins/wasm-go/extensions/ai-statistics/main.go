@@ -534,11 +534,6 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 		return
 	}
 	sourceIP := "unknown"
-	sourceIP, ok = ctx.GetUserAttribute(SourceIP).(string)
-	if !ok {
-		log.Warnf("SourceIP typd assert failed, skip metric record")
-		return
-	}
 
 	if inputToken, ok := convertToUInt(ctx.GetUserAttribute(tokenusage.CtxKeyInputToken)); ok {
 		config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP,tokenusage.CtxKeyInputToken), inputToken)
