@@ -401,31 +401,34 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 			case SourceIP:
 				// 1. 先尝试从 X-Forwarded-For 获取
 				value = "unknown"
-				if xff, err := proxywasm.GetHttpRequestHeader("X-Forwarded-For"); err == nil && xff != "" {
-					ips := strings.Split(xff, ",")
-					for _, ip := range ips {
-						cleanIP := strings.TrimSpace(ip)
-						if isValidIP(cleanIP) {
-							value = cleanIP
-							log.Debugf("Got valid IP from X-Forwarded-For: %s", value)
-							break
+				// 1. 优先从 source.address 获取 (eBPF PPv2 注入后的真实 IP)
+				if bs, err := proxywasm.GetProperty([]string{"source", "address"}); err == nil {
+					rawSource := string(bs)
+					sourceIP := parseIP(rawSource)
+					if isValidIP(sourceIP) {
+						value = sourceIP
+						// 打印 Info 级别日志验证 eBPF 是否生效
+						log.Infof("[Check-eBPF] Got Source IP from connection: %s (Raw: %s)", value, rawSource)
+					}
+				}
+
+				// 2. 如果上面的方式拿到的是内网 IP 或者是 unknown，尝试 XFF (可选，视你的信任策略而定)
+				// 注意：如果你确定 eBPF 正常工作，其实不需要 XFF 了，因为 source.address 是最可信的
+				if value == "unknown" {
+					if xff, err := proxywasm.GetHttpRequestHeader("X-Forwarded-For"); err == nil && xff != "" {
+						ips := strings.Split(xff, ",")
+						for _, ip := range ips {
+							cleanIP := strings.TrimSpace(ip)
+							if isValidIP(cleanIP) {
+								value = cleanIP
+								log.Debugf("Got IP from XFF: %s", value)
+								break
+							}
 						}
 					}
 				}
 
-				// 2. 如果没有 XFF，使用 source.address
-				if value == "unknown" {
-					if bs, err := proxywasm.GetProperty([]string{"source", "address"}); err == nil {
-						sourceIP := parseIP(string(bs))
-						if isValidIP(sourceIP) {
-							value = sourceIP
-							log.Debugf("Got valid IP from source.address: %s", value)
-						}
-					} else if err != nil {
-						log.Errorf("Failed to get source.address: %v", err)
-					}
-				}
-				// 3. 确保总是有值
+				// 3. 兜底
 				if value == "" {
 					value = "unknown"
 				}
