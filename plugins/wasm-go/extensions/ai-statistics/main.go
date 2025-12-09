@@ -105,7 +105,7 @@ type AIStatisticsConfig struct {
 }
 
 func generateMetricName(route, cluster, model, consumer, sourceIP, metricName string) string {
-	return fmt.Sprintf("route.%s.upstream.%s.model.%s.consumer.%s.srcip.%s.metric.%s", route, cluster, model, consumer,sourceIP, metricName)
+	return fmt.Sprintf("route.%s.upstream.%s.model.%s.consumer.%s.srcip.%s.metric.%s", route, cluster, model, consumer, sourceIP, metricName)
 }
 
 func getRouteName() (string, error) {
@@ -170,8 +170,8 @@ func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
 		config.attributes[i] = attribute
 	}
 	// Metric settings
-	_ = proxywasm.DefineCounterMetric("gateway_model_metrics")
-	config.counterMetrics = make(map[string]proxywasm.MetricCounter)
+	counter1 := proxywasm.DefineCounterMetric("gateway_model_metrics")
+	config.counterMetrics["gateway_model_metrics"] = counter1
 
 	// Parse openai usage config setting.
 	config.disableOpenaiUsage = configJson.Get("disable_openai_usage").Bool()
@@ -449,7 +449,7 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 				}
 			}
 			// for metrics
-			if key == tokenusage.CtxKeyModel || key == tokenusage.CtxKeyInputToken || key == tokenusage.CtxKeyOutputToken || key == tokenusage.CtxKeyTotalToken || key == SourceIP{
+			if key == tokenusage.CtxKeyModel || key == tokenusage.CtxKeyInputToken || key == tokenusage.CtxKeyOutputToken || key == tokenusage.CtxKeyTotalToken || key == SourceIP {
 				ctx.SetContext(key, value)
 			}
 			if attribute.ApplyToSpan {
@@ -541,23 +541,23 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 	sourceIPByAttribute, ok := ctx.GetUserAttribute(SourceIP).(string)
 	if !ok {
 		log.Warnf("attribute 'sourceIP' does not exist or is not a string")
-	} else{
+	} else {
 		sourceIP = sourceIPByAttribute
 		log.Debugf("sourceIP is %v", sourceIP)
 	}
 
 	if inputToken, ok := convertToUInt(ctx.GetUserAttribute(tokenusage.CtxKeyInputToken)); ok {
-		config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP,tokenusage.CtxKeyInputToken), inputToken)
+		config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP, tokenusage.CtxKeyInputToken), inputToken)
 	} else {
 		log.Warnf("InputToken typd assert failed, skip metric record")
 	}
 	if outputToken, ok := convertToUInt(ctx.GetUserAttribute(tokenusage.CtxKeyOutputToken)); ok {
-		config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP,tokenusage.CtxKeyOutputToken), outputToken)
+		config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP, tokenusage.CtxKeyOutputToken), outputToken)
 	} else {
 		log.Warnf("OutputToken typd assert failed, skip metric record")
 	}
 	if totalToken, ok := convertToUInt(ctx.GetUserAttribute(tokenusage.CtxKeyTotalToken)); ok {
-		config.incrementCounter(generateMetricName(route, cluster, model, consumer,sourceIP, tokenusage.CtxKeyTotalToken), totalToken)
+		config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP, tokenusage.CtxKeyTotalToken), totalToken)
 	} else {
 		log.Warnf("TotalToken typd assert failed, skip metric record")
 	}
@@ -580,8 +580,8 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 			log.Warnf("LLMServiceDuration typd assert failed")
 			return
 		}
-		config.incrementCounter(generateMetricName(route, cluster, model, consumer,sourceIP, LLMServiceDuration), llmServiceDuration)
-		config.incrementCounter(generateMetricName(route, cluster, model, consumer,sourceIP, LLMDurationCount), 1)
+		config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP, LLMServiceDuration), llmServiceDuration)
+		config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP, LLMDurationCount), 1)
 	}
 }
 
