@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -211,23 +212,39 @@ func (config *AIStatisticsConfig) getUint64Value(key string) (uint64, error) {
 	var err error
 	err = config.RedisClient.Get(key, func(response resp.Value) {
 		if err := response.Error(); err != nil {
+			log.Errorf("Redis error for key '%s': %w", key, err)
 			return
 		}
+
 		if response.IsNull() {
-			err = fmt.Errorf("key '%s' does not exist or is null", key)
+			log.Errorf("key '%s' does not exist or is null", key)
 			return
 		}
 
-		intVal := response.Integer()
-		if intVal < 0 {
-			err = fmt.Errorf("unexpected negative integer value for key '%s': %d", key, intVal)
+		switch response.Type() {
+		case resp.BulkString:
+			strVal := response.String()
+			u64Val, parseErr := strconv.ParseUint(strVal, 10, 64)
+			if parseErr != nil {
+				log.Errorf("failed to parse string value '%s' as uint64 for key '%s': %w", strVal, key, parseErr)
+				return
+			}
+			result = u64Val
+		case resp.Integer:
+			intVal := response.Integer()
+			if intVal < 0 {
+				log.Errorf("unexpected negative integer value for key '%s': %d (may be overflow)", key, intVal)
+				return
+			}
+			result = uint64(intVal)
+		default:
+			log.Errorf("unexpected response type for key '%s': %s", key, response.Type())
 			return
 		}
-		result = uint64(intVal)
 	})
-
 	if err != nil {
-		return 0, err
+		log.Errorf("failed to execute Redis GET command: %w", err)
+		return 0, fmt.Errorf("failed to execute Redis GET command: %w", err)
 	}
 	return result, nil
 }
