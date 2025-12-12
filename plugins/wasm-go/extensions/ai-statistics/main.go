@@ -184,12 +184,15 @@ func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64
 		ctx := context.Background()
 		// Try to get the current value from Redis
 		val, err := redisClient.Get(ctx, metricName).Result()
+		log.Errorf("it is not error. redisClient is not null. now metricname is %s", metricName)
 		if err == nil {
 			parsedValue, parseErr := strconv.ParseUint(val, 10, 64)
 			if parseErr == nil {
 				currentRedisValue = parsedValue
 			}
 		}
+	} else {
+		log.Errorf("it is not error. redisClient is null, so it can not get key")
 	}
 
 	// Get the current local counter value (if it exists)
@@ -253,6 +256,7 @@ func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
 		username := redisConfig.Get("username").String()
 		password := redisConfig.Get("password").String()
 		addr := redisConfig.Get("addr").String()
+		log.Errorf("it is not error. redisClient is not null. username=%s, password=%s, addr=%s", username, password, addr)
 		if config.redisAddr != "" {
 			// Initialize Redis client
 			redisClient = redis.NewClient(&redis.Options{
@@ -272,6 +276,8 @@ func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
 		} else {
 			log.Info("Redis address not configured, metrics will only be kept locally.")
 		}
+	} else {
+		log.Errorf("it is not error. redisConfig is null")
 	}
 
 	return nil
