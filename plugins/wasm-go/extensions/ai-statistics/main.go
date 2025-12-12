@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -172,11 +171,12 @@ func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64
 	var currentRedisValue uint64 = 0
 	if config.RedisClient != nil {
 		log.Errorf("it is not error. redisClient is not null. now metricname is %s", metricName)
-		err := config.RedisClient.Get(metricName, func(response resp.Value) {
-			currentRedisValue, _ = strconv.ParseUint(response.String(), 10, 64)
-		})
+		value, err := config.getUint64Value(metricName)
 		if err != nil {
 			log.Errorf("failed to get redis key %s,error is %v", metricName, err)
+		} else {
+			log.Errorf("it is not error,value is %d", value)
+			currentRedisValue = value
 		}
 	} else {
 		log.Errorf("it is not error. redisClient is null, so it can not get key")
@@ -204,6 +204,32 @@ func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64
 			log.Warnf("Failed to update Redis metric %s: %v", metricName, err)
 		}
 	}
+}
+
+func (config *AIStatisticsConfig) getUint64Value(key string) (uint64, error) {
+	var result uint64
+	var err error
+	err = config.RedisClient.Get(key, func(response resp.Value) {
+		if err := response.Error(); err != nil {
+			return
+		}
+		if response.IsNull() {
+			err = fmt.Errorf("key '%s' does not exist or is null", key)
+			return
+		}
+
+		intVal := response.Integer()
+		if intVal < 0 {
+			err = fmt.Errorf("unexpected negative integer value for key '%s': %d", key, intVal)
+			return
+		}
+		result = uint64(intVal)
+	})
+
+	if err != nil {
+		return 0, err
+	}
+	return result, nil
 }
 
 func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
