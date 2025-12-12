@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -172,7 +173,7 @@ func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64
 	if config.RedisClient != nil {
 		log.Errorf("it is not error. redisClient is not null. now metricname is %s", metricName)
 		err := config.RedisClient.Get(metricName, func(response resp.Value) {
-			currentRedisValue = uint64(response.Integer())
+			currentRedisValue, _ = strconv.ParseUint(response.String(), 10, 64)
 		})
 		if err != nil {
 			log.Errorf("failed to get redis key %s,error is %v", metricName, err)
