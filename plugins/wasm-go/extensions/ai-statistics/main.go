@@ -2,14 +2,18 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/go-redis/redis/v8"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
 	"github.com/higress-group/wasm-go/pkg/log"
@@ -19,6 +23,12 @@ import (
 )
 
 func main() {}
+
+var (
+	redisClient *redis.Client
+	metricLocks = make(map[string]*sync.RWMutex)
+	lockMutex   sync.Mutex // Protects metricLocks map access
+)
 
 func init() {
 	fmt.Print("ai-statistics start")
@@ -102,6 +112,8 @@ type AIStatisticsConfig struct {
 	shouldBufferStreamingBody bool
 	// If disableOpenaiUsage is true, model/input_token/output_token logs will be skipped
 	disableOpenaiUsage bool
+	// Redis address for persistent metrics
+	redisAddr string
 }
 
 func generateMetricName(route, cluster, model, consumer, sourceIP, metricName string) string {
@@ -137,16 +149,72 @@ func getClusterName() (string, error) {
 	}
 }
 
+// acquireMetricLock gets or creates a lock for a specific metric name
+func acquireMetricLock(metricName string) *sync.RWMutex {
+	lockMutex.Lock()
+	defer lockMutex.Unlock()
+	lock, exists := metricLocks[metricName]
+	if !exists {
+		lock = &sync.RWMutex{}
+		metricLocks[metricName] = lock
+	}
+	return lock
+}
+
+// releaseMetricLock releases the lock for a specific metric name (not strictly necessary for map cleanup in this simple case, but good practice)
+// func releaseMetricLock(metricName string) {
+// 	lockMutex.Lock()
+// 	defer lockMutex.Unlock()
+// 	delete(metricLocks, metricName) // Optional cleanup
+// }
+
 func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64) {
 	if inc == 0 {
 		return
 	}
-	counter, ok := config.counterMetrics[metricName]
-	if !ok {
-		counter = proxywasm.DefineCounterMetric(metricName)
-		config.counterMetrics[metricName] = counter
+
+	// Acquire lock for this specific metric name to prevent race conditions during read-modify-write
+	lock := acquireMetricLock(metricName)
+	lock.Lock()
+	defer lock.Unlock()
+
+	// First, get the current value from Redis
+	var currentRedisValue uint64 = 0
+	if redisClient != nil {
+		ctx := context.Background()
+		// Try to get the current value from Redis
+		val, err := redisClient.Get(ctx, metricName).Result()
+		if err == nil {
+			parsedValue, parseErr := strconv.ParseUint(val, 10, 64)
+			if parseErr == nil {
+				currentRedisValue = parsedValue
+			}
+		}
 	}
-	counter.Increment(inc)
+
+	// Get the current local counter value (if it exists)
+	localCounter, ok := config.counterMetrics[metricName]
+	if !ok {
+		localCounter = proxywasm.DefineCounterMetric(metricName)
+		config.counterMetrics[metricName] = localCounter
+	}
+
+	baseValue := currentRedisValue // Default to Redis value
+	log.Errorf("it is not error. currentRedisValue=%d, localCounter=%d", currentRedisValue, localCounter.Value())
+	if currentRedisValue < localCounter.Value() {
+		baseValue = localCounter.Value() // Use local value as base if it's larger
+	}
+	finalValue := baseValue + inc
+	localCounter.Increment(finalValue - localCounter.Value())
+
+	// Update Redis (if client is available)
+	if redisClient != nil {
+		ctx := context.Background()
+		err := redisClient.Set(ctx, metricName, finalValue, 0).Err()
+		if err != nil {
+			log.Warnf("Failed to update Redis metric %s: %v", metricName, err)
+		}
+	}
 }
 
 func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
@@ -175,6 +243,27 @@ func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
 
 	// Parse openai usage config setting.
 	config.disableOpenaiUsage = configJson.Get("disable_openai_usage").Bool()
+
+	// Parse Redis address for persistence
+	config.redisAddr = configJson.Get("redis_address").String()
+	if config.redisAddr != "" {
+		// Initialize Redis client
+		redisClient = redis.NewClient(&redis.Options{
+			Addr: config.redisAddr,
+			// Add other options like password, DB, etc. if needed
+		})
+		// Test the connection
+		ctx := context.Background()
+		_, err := redisClient.Ping(ctx).Result()
+		if err != nil {
+			log.Errorf("Failed to connect to Redis: %v", err)
+			redisClient = nil // Disable Redis if connection fails
+		} else {
+			log.Infof("Successfully connected to Redis at %s", config.redisAddr)
+		}
+	} else {
+		log.Info("Redis address not configured, metrics will only be kept locally.")
+	}
 
 	return nil
 }
