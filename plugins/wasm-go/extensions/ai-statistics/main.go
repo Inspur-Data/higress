@@ -112,8 +112,6 @@ type AIStatisticsConfig struct {
 	shouldBufferStreamingBody bool
 	// If disableOpenaiUsage is true, model/input_token/output_token logs will be skipped
 	disableOpenaiUsage bool
-	// Redis address for persistent metrics
-	redisAddr string
 }
 
 func generateMetricName(route, cluster, model, consumer, sourceIP, metricName string) string {
@@ -257,7 +255,7 @@ func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
 		password := redisConfig.Get("password").String()
 		addr := redisConfig.Get("addr").String()
 		log.Errorf("it is not error. redisClient is not null. username=%s, password=%s, addr=%s", username, password, addr)
-		if config.redisAddr != "" {
+		if addr != "" {
 			// Initialize Redis client
 			redisClient = redis.NewClient(&redis.Options{
 				Addr:     addr,
@@ -271,7 +269,7 @@ func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
 				log.Errorf("Failed to connect to Redis: %v", err)
 				redisClient = nil // Disable Redis if connection fails
 			} else {
-				log.Infof("Successfully connected to Redis at %s", config.redisAddr)
+				log.Infof("Successfully connected to Redis at %s", addr)
 			}
 		} else {
 			log.Info("Redis address not configured, metrics will only be kept locally.")
