@@ -245,24 +245,30 @@ func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
 	config.disableOpenaiUsage = configJson.Get("disable_openai_usage").Bool()
 
 	// Parse Redis address for persistence
-	config.redisAddr = configJson.Get("redis_address").String()
-	if config.redisAddr != "" {
-		// Initialize Redis client
-		redisClient = redis.NewClient(&redis.Options{
-			Addr: config.redisAddr,
-			// Add other options like password, DB, etc. if needed
-		})
-		// Test the connection
-		ctx := context.Background()
-		_, err := redisClient.Ping(ctx).Result()
-		if err != nil {
-			log.Errorf("Failed to connect to Redis: %v", err)
-			redisClient = nil // Disable Redis if connection fails
+	redisConfig := configJson.Get("redis")
+	if redisConfig.Exists() {
+		username := redisConfig.Get("username").String()
+		password := redisConfig.Get("password").String()
+		addr := redisConfig.Get("addr").String()
+		if config.redisAddr != "" {
+			// Initialize Redis client
+			redisClient = redis.NewClient(&redis.Options{
+				Addr:     addr,
+				Username: username,
+				Password: password,
+			})
+			// Test the connection
+			ctx := context.Background()
+			_, err := redisClient.Ping(ctx).Result()
+			if err != nil {
+				log.Errorf("Failed to connect to Redis: %v", err)
+				redisClient = nil // Disable Redis if connection fails
+			} else {
+				log.Infof("Successfully connected to Redis at %s", config.redisAddr)
+			}
 		} else {
-			log.Infof("Successfully connected to Redis at %s", config.redisAddr)
+			log.Info("Redis address not configured, metrics will only be kept locally.")
 		}
-	} else {
-		log.Info("Redis address not configured, metrics will only be kept locally.")
 	}
 
 	return nil
