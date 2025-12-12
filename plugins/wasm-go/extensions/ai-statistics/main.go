@@ -2,30 +2,27 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/go-redis/redis/v8"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
 	"github.com/higress-group/wasm-go/pkg/log"
 	"github.com/higress-group/wasm-go/pkg/tokenusage"
 	"github.com/higress-group/wasm-go/pkg/wrapper"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/resp"
 )
 
 func main() {}
 
 var (
-	redisClient *redis.Client
 	metricLocks = make(map[string]*sync.RWMutex)
 	lockMutex   sync.Mutex // Protects metricLocks map access
 )
@@ -112,6 +109,7 @@ type AIStatisticsConfig struct {
 	shouldBufferStreamingBody bool
 	// If disableOpenaiUsage is true, model/input_token/output_token logs will be skipped
 	disableOpenaiUsage bool
+	RedisClient        wrapper.RedisClient
 }
 
 func generateMetricName(route, cluster, model, consumer, sourceIP, metricName string) string {
@@ -159,13 +157,6 @@ func acquireMetricLock(metricName string) *sync.RWMutex {
 	return lock
 }
 
-// releaseMetricLock releases the lock for a specific metric name (not strictly necessary for map cleanup in this simple case, but good practice)
-// func releaseMetricLock(metricName string) {
-// 	lockMutex.Lock()
-// 	defer lockMutex.Unlock()
-// 	delete(metricLocks, metricName) // Optional cleanup
-// }
-
 func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64) {
 	if inc == 0 {
 		return
@@ -178,16 +169,13 @@ func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64
 
 	// First, get the current value from Redis
 	var currentRedisValue uint64 = 0
-	if redisClient != nil {
-		ctx := context.Background()
-		// Try to get the current value from Redis
-		val, err := redisClient.Get(ctx, metricName).Result()
+	if config.RedisClient != nil {
 		log.Errorf("it is not error. redisClient is not null. now metricname is %s", metricName)
-		if err == nil {
-			parsedValue, parseErr := strconv.ParseUint(val, 10, 64)
-			if parseErr == nil {
-				currentRedisValue = parsedValue
-			}
+		err := config.RedisClient.Get(metricName, func(response resp.Value) {
+			currentRedisValue = uint64(response.Integer())
+		})
+		if err != nil {
+			log.Errorf("failed to get redis key %s,error is %v", metricName, err)
 		}
 	} else {
 		log.Errorf("it is not error. redisClient is null, so it can not get key")
@@ -200,7 +188,7 @@ func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64
 		config.counterMetrics[metricName] = localCounter
 	}
 
-	baseValue := currentRedisValue // Default to Redis value
+	baseValue := currentRedisValue
 	log.Errorf("it is not error. currentRedisValue=%d, localCounter=%d", currentRedisValue, localCounter.Value())
 	if currentRedisValue < localCounter.Value() {
 		baseValue = localCounter.Value() // Use local value as base if it's larger
@@ -209,9 +197,8 @@ func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64
 	localCounter.Increment(finalValue - localCounter.Value())
 
 	// Update Redis (if client is available)
-	if redisClient != nil {
-		ctx := context.Background()
-		err := redisClient.Set(ctx, metricName, finalValue, 0).Err()
+	if config.RedisClient != nil {
+		err := config.RedisClient.Set(metricName, finalValue, nil)
 		if err != nil {
 			log.Warnf("Failed to update Redis metric %s: %v", metricName, err)
 		}
@@ -251,34 +238,47 @@ func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
 	// Parse Redis address for persistence
 	redisConfig := configJson.Get("redis")
 	if redisConfig.Exists() {
-		username := redisConfig.Get("username").String()
-		password := redisConfig.Get("password").String()
-		addr := redisConfig.Get("addr").String()
-		log.Errorf("it is not error. redisClient is not null. username=%s, password=%s, addr=%s", username, password, addr)
-		if addr != "" {
-			// Initialize Redis client
-			redisClient = redis.NewClient(&redis.Options{
-				Addr:     addr,
-				Username: username,
-				Password: password,
-			})
-			// Test the connection
-			ctx := context.Background()
-			_, err := redisClient.Ping(ctx).Result()
-			if err != nil {
-				log.Errorf("Failed to connect to Redis: %v", err)
-				redisClient = nil // Disable Redis if connection fails
-			} else {
-				log.Infof("Successfully connected to Redis at %s", addr)
-			}
-		} else {
-			log.Info("Redis address not configured, metrics will only be kept locally.")
-		}
-	} else {
-		log.Errorf("it is not error. redisConfig is null")
+		_ = InitRedisClusterClient(redisConfig, config)
 	}
 
 	return nil
+}
+
+func InitRedisClusterClient(redisConfig gjson.Result, config *AIStatisticsConfig) error {
+	serviceName := redisConfig.Get("service_name").String()
+	if serviceName == "" {
+		return errors.New("redis service name must not be empty")
+	}
+
+	servicePort := int(redisConfig.Get("service_port").Int())
+	if servicePort == 0 {
+		if strings.HasSuffix(serviceName, ".static") {
+			// use default logic port which is 80 for static service
+			servicePort = 80
+		} else {
+			servicePort = 6379
+		}
+	}
+
+	username := redisConfig.Get("username").String()
+	password := redisConfig.Get("password").String()
+	timeout := int(redisConfig.Get("timeout").Int())
+	if timeout == 0 {
+		timeout = 1000
+	}
+
+	config.RedisClient = wrapper.NewRedisClusterClient(wrapper.FQDNCluster{
+		FQDN: serviceName,
+		Port: int64(servicePort),
+	})
+	database := int(redisConfig.Get("database").Int())
+	err := config.RedisClient.Init(username, password, int64(timeout), wrapper.WithDataBase(database))
+	if config.RedisClient.Ready() {
+		log.Info("redis init successfully")
+	} else {
+		log.Error("redis init failed, will try later")
+	}
+	return err
 }
 
 func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) types.Action {
