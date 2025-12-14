@@ -172,6 +172,7 @@ func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64
 	var currentRedisValue uint64 = 0
 	if config.RedisClient != nil {
 		log.Errorf("it is not error. redisClient is not null. now metricname is %s", metricName)
+		log.Errorf("it is not error. redisClient is not null. get start")
 		value, err := config.getUint64Value(metricName)
 		if err != nil {
 			log.Errorf("failed to get redis key %s,error is %v", metricName, err)
@@ -210,7 +211,10 @@ func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64
 func (config *AIStatisticsConfig) getUint64Value(key string) (uint64, error) {
 	var result uint64
 	var err error
+	log.Errorf("it is not error. redisClient is not null. get start")
 	err = config.RedisClient.Get(key, func(response resp.Value) {
+		log.Errorf("it is not error. response is %s", response.String())
+
 		if err := response.Error(); err != nil {
 			log.Errorf("Redis error for key '%s': %w", key, err)
 			return
@@ -220,7 +224,6 @@ func (config *AIStatisticsConfig) getUint64Value(key string) (uint64, error) {
 			log.Errorf("key '%s' does not exist or is null", key)
 			return
 		}
-		log.Errorf("it is not error. response is %s", response.String())
 
 		switch response.Type() {
 		case resp.BulkString:
