@@ -173,7 +173,7 @@ func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64
 	if config.RedisClient != nil {
 		log.Errorf("it is not error. redisClient is not null. now metricname is %s", metricName)
 		log.Errorf("it is not error. redisClient is not null. get start")
-		value, err := config.getUint64Value(metricName)
+		value, err := config.getUint64ValueWithChan(metricName)
 		if err != nil {
 			log.Errorf("failed to get redis key %s,error is %v", metricName, err)
 		} else {
@@ -208,49 +208,39 @@ func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64
 	}
 }
 
-func (config *AIStatisticsConfig) getUint64Value(key string) (uint64, error) {
-	var result uint64
-	var err error
-	log.Errorf("it is not error. redisClient is not null. get start")
-	err = config.RedisClient.Get(key, func(response resp.Value) {
-		log.Errorf("it is not error. response is %s", response.String())
+func (config *AIStatisticsConfig) getUint64ValueWithChan(key string) (uint64, error) {
+	type result struct {
+		value uint64
+		err   error
+	}
 
+	resultChan := make(chan result, 1)
+	log.Errorf("it is not error. redisClient is not null. func get already start")
+	getErr := config.RedisClient.Get(key, func(response resp.Value) {
 		if err := response.Error(); err != nil {
-			log.Errorf("Redis error for key '%s': %w", key, err)
+			log.Errorf("failed to execute Redis GET command, response error: %w", err)
+			resultChan <- result{err: err}
 			return
 		}
 
 		if response.IsNull() {
 			log.Errorf("key '%s' does not exist or is null", key)
+			resultChan <- result{err: errors.New("key not found")}
 			return
 		}
-
-		switch response.Type() {
-		case resp.BulkString:
-			strVal := response.String()
-			u64Val, parseErr := strconv.ParseUint(strVal, 10, 64)
-			if parseErr != nil {
-				log.Errorf("failed to parse string value '%s' as uint64 for key '%s': %w", strVal, key, parseErr)
-				return
-			}
-			result = u64Val
-		case resp.Integer:
-			intVal := response.Integer()
-			if intVal < 0 {
-				log.Errorf("unexpected negative integer value for key '%s': %d (may be overflow)", key, intVal)
-				return
-			}
-			result = uint64(intVal)
-		default:
-			log.Errorf("unexpected response type for key '%s': %s", key, response.Type())
-			return
-		}
+		log.Errorf("it is not error. redisClient is not null. response is %s", response.String())
+		val, err := strconv.ParseUint(response.String(), 10, 64)
+		resultChan <- result{value: val, err: err}
 	})
-	if err != nil {
-		log.Errorf("failed to execute Redis GET command: %w", err)
-		return 0, fmt.Errorf("failed to execute Redis GET command: %w", err)
+
+	if getErr != nil {
+		log.Errorf("failed to execute Redis GET command: %w", getErr)
+		return 0, getErr
 	}
-	return result, nil
+
+	res := <-resultChan
+	log.Errorf("it is not error. response value is %d", res.value)
+	return res.value, res.err
 }
 
 func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
