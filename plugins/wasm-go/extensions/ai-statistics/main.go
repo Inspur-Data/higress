@@ -163,84 +163,91 @@ func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64
 		return
 	}
 
+	// First, get the current value from Redis
+	if config.RedisClient != nil {
+		config.incrementWithRedis(metricName, inc)
+	} else {
+		config.incrementWithNoRedis(metricName, inc)
+	}
+}
+
+func (config *AIStatisticsConfig) incrementWithRedis(metricName string, inc uint64) {
+	log.Errorf("it is not error. redisClient is not null. get start")
 	// Acquire lock for this specific metric name to prevent race conditions during read-modify-write
 	lock := acquireMetricLock(metricName)
 	lock.Lock()
 	defer lock.Unlock()
 
-	// First, get the current value from Redis
-	var currentRedisValue uint64 = 0
-	if config.RedisClient != nil {
-		log.Errorf("it is not error. redisClient is not null. now metricname is %s", metricName)
-		log.Errorf("it is not error. redisClient is not null. get start")
-		value, err := config.getUint64ValueWithChan(metricName)
-		if err != nil {
-			log.Errorf("failed to get redis key %s,error is %v", metricName, err)
-		} else {
-			log.Errorf("it is not error,value is %d", value)
-			currentRedisValue = value
+	rediserr := config.RedisClient.Get(metricName, func(response resp.Value) {
+		log.Errorf("it is not error. response is %s", response.String())
+		var currentRedisValue uint64
+		currentRedisValue = 0
+		if err := response.Error(); err != nil {
+			log.Errorf("Redis error for key '%s': %w", metricName, err)
+			config.incrementWithNoRedis(metricName, inc)
+			return
 		}
-	} else {
-		log.Errorf("it is not error. redisClient is null, so it can not get key")
-	}
 
+		if response.IsNull() {
+			log.Errorf("it is not error. key '%s' does not exist or is null", metricName)
+		} else {
+			switch response.Type() {
+			case resp.BulkString:
+				strVal := response.String()
+				u64Val, parseErr := strconv.ParseUint(strVal, 10, 64)
+				if parseErr != nil {
+					log.Errorf("failed to parse string value '%s' as uint64 for key '%s': %w", strVal, metricName, parseErr)
+					u64Val = 0
+				}
+				currentRedisValue = u64Val
+			case resp.Integer:
+				intVal := response.Integer()
+				if intVal < 0 {
+					log.Errorf("unexpected negative integer value for key '%s': %d (may be overflow)", metricName, intVal)
+					intVal = 0
+				}
+				currentRedisValue = uint64(intVal)
+			default:
+				log.Errorf("unexpected response type for key '%s': %s", metricName, response.Type())
+			}
+		}
+
+		// Get the current local counter value (if it exists)
+		localCounter, ok := config.counterMetrics[metricName]
+		if !ok {
+			localCounter = proxywasm.DefineCounterMetric(metricName)
+			config.counterMetrics[metricName] = localCounter
+		}
+
+		baseValue := currentRedisValue
+		log.Errorf("it is not error. currentRedisValue=%d, localCounter=%d", currentRedisValue, localCounter.Value())
+		if currentRedisValue < localCounter.Value() {
+			baseValue = localCounter.Value() // Use local value as base if it's larger
+		}
+		finalValue := baseValue + inc
+		localCounter.Increment(finalValue - localCounter.Value())
+
+		// Update Redis (if client is available)
+		err := config.RedisClient.Set(metricName, finalValue, nil)
+		if err != nil {
+			log.Warnf("Failed to update Redis metric %s: %v", metricName, err)
+		}
+	})
+	if rediserr != nil {
+		log.Errorf("failed to execute Redis GET command: %w. incrementWithNoRedis.", rediserr)
+		config.incrementWithNoRedis(metricName, inc)
+	}
+}
+
+func (config *AIStatisticsConfig) incrementWithNoRedis(metricName string, inc uint64) {
 	// Get the current local counter value (if it exists)
+	log.Errorf("it is not error. redisclient is null or error, incrementWithNoRedis")
 	localCounter, ok := config.counterMetrics[metricName]
 	if !ok {
 		localCounter = proxywasm.DefineCounterMetric(metricName)
 		config.counterMetrics[metricName] = localCounter
 	}
-
-	baseValue := currentRedisValue
-	log.Errorf("it is not error. currentRedisValue=%d, localCounter=%d", currentRedisValue, localCounter.Value())
-	if currentRedisValue < localCounter.Value() {
-		baseValue = localCounter.Value() // Use local value as base if it's larger
-	}
-	finalValue := baseValue + inc
-	localCounter.Increment(finalValue - localCounter.Value())
-
-	// Update Redis (if client is available)
-	if config.RedisClient != nil {
-		err := config.RedisClient.Set(metricName, finalValue, nil)
-		if err != nil {
-			log.Warnf("Failed to update Redis metric %s: %v", metricName, err)
-		}
-	}
-}
-
-func (config *AIStatisticsConfig) getUint64ValueWithChan(key string) (uint64, error) {
-	type result struct {
-		value uint64
-		err   error
-	}
-
-	resultChan := make(chan result, 1)
-	log.Errorf("it is not error. redisClient is not null. func get already start")
-	getErr := config.RedisClient.Get(key, func(response resp.Value) {
-		if err := response.Error(); err != nil {
-			log.Errorf("failed to execute Redis GET command, response error: %w", err)
-			resultChan <- result{err: err}
-			return
-		}
-
-		if response.IsNull() {
-			log.Errorf("key '%s' does not exist or is null", key)
-			resultChan <- result{err: errors.New("key not found")}
-			return
-		}
-		log.Errorf("it is not error. redisClient is not null. response is %s", response.String())
-		val, err := strconv.ParseUint(response.String(), 10, 64)
-		resultChan <- result{value: val, err: err}
-	})
-
-	if getErr != nil {
-		log.Errorf("failed to execute Redis GET command: %w", getErr)
-		return 0, getErr
-	}
-
-	res := <-resultChan
-	log.Errorf("it is not error. response value is %d", res.value)
-	return res.value, res.err
+	localCounter.Increment(inc)
 }
 
 func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
