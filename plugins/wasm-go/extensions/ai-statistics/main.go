@@ -220,6 +220,7 @@ func (config *AIStatisticsConfig) getUint64Value(key string) (uint64, error) {
 			log.Errorf("key '%s' does not exist or is null", key)
 			return
 		}
+		log.Errorf("it is not error. response is %s", response.String())
 
 		switch response.Type() {
 		case resp.BulkString:
