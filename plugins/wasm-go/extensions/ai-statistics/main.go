@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -105,6 +106,7 @@ type AIStatisticsConfig struct {
 	disableOpenaiUsage bool
 	RedisClient        wrapper.RedisClient
 	metricsLoaded      atomic.Bool
+	counterValues      map[string]uint64
 }
 
 func generateMetricName(route, cluster, model, consumer, sourceIP, metricName string) string {
@@ -177,6 +179,7 @@ func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
 		config.counterMetrics = make(map[string]proxywasm.MetricCounter)
 	}
 	config.counterMetrics["gateway_model_metrics"] = counter1
+	config.counterValues = make(map[string]uint64)
 
 	// Parse openai usage config setting.
 	config.disableOpenaiUsage = configJson.Get("disable_openai_usage").Bool()
@@ -423,47 +426,87 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body
 	// Write log
 	ctx.WriteUserAttributeToLogWithKey(wrapper.AILogKey)
 
+	// load metrics from redis
+	log.Errorf("It is not error. start load metrics from redis")
 	if config.RedisClient != nil && config.RedisClient.Ready() && !config.metricsLoaded.Load() {
-		log.Errorf("It is not error. Start load metrics from redis")
-		prefix := "route."
-		var metricsKeys []string
-		keysErr := config.RedisClient.Command([]interface{}{"KEYS", prefix + "*"}, func(response resp.Value) {
-			log.Errorf("It is not erro. KEYS callback invoked! Response error: %v", response.Error())
+		log.Errorf("It is not error. Loading metrics from Redis")
+
+		// Lua脚本：一次性获取所有key和value
+		// KEYS[1]: pattern
+		// 返回: {{"key1", "key2", ...}, {"value1", "value2", ...}}
+		luaScript := `
+        local pattern = KEYS[1]
+        local keys = redis.call('KEYS', pattern)
+        local values = {}
+        for i = 1, #keys do
+            values[i] = redis.call('GET', keys[i]) or "0"
+        end
+        return {keys, values}
+        `
+
+		// 注意：Eval 方法签名：Eval(script string, numkeys int, keysAndArgs []interface{}, callback RedisResponseCallback)
+		returnErr := config.RedisClient.Eval(luaScript, 1, []interface{}{"route.*"}, nil, func(response resp.Value) {
 			if response.Error() != nil {
-				log.Errorf("Redis KEYS error: %v", response.Error())
+				log.Errorf("Failed to load metrics from Redis: %v", response.Error())
+				config.metricsLoaded.Store(true)
+				writeMetric(ctx, config)
 				proxywasm.ResumeHttpResponse()
 				return
 			}
 
-			// 解析返回的 keys
-			keys := response.Array()
+			arrays := response.Array()
+			if len(arrays) != 2 {
+				log.Errorf("Invalid response format from Redis")
+				config.metricsLoaded.Store(true)
+				writeMetric(ctx, config)
+				proxywasm.ResumeHttpResponse()
+				return
+			}
+
+			keys := arrays[0].Array()
+			values := arrays[1].Array()
+
 			log.Errorf("It is not error. Found %d metric keys in Redis", len(keys))
 
-			// 提取 key 名称
-			for _, keyValue := range keys {
-				metricName := keyValue.String()
-				if metricName != "" {
-					metricsKeys = append(metricsKeys, metricName)
-					log.Errorf("It is not error. key is %s", metricName)
+			// 初始化本地计数器
+			for i := 0; i < len(keys) && i < len(values); i++ {
+				metricName := keys[i].String()
+				valueStr := values[i].String()
+
+				// 创建本地计数器并设置初始值
+				counter := proxywasm.DefineCounterMetric(metricName)
+				config.counterMetrics[metricName] = counter
+
+				if val, err := strconv.ParseUint(valueStr, 10, 64); err == nil {
+					counter.Increment(val)
+					config.counterValues[metricName] = val
+					log.Debugf("Loaded metric %s with initial value %d from Redis", metricName, val)
+				} else {
+					config.counterValues[metricName] = 0
+					log.Warnf("Failed to parse value for metric %s: %s", metricName, valueStr)
 				}
 			}
-			// Write metrics
+
+			config.metricsLoaded.Store(true)
+			log.Errorf("It is not error. Successfully loaded %d metrics from Redis", len(keys))
+
+			// 继续处理当前请求的指标写入
 			writeMetric(ctx, config)
 			proxywasm.ResumeHttpResponse()
 		})
 
-		if keysErr != nil {
-			log.Errorf("Failed to execute KEYS command: %v", keysErr)
+		if returnErr != nil {
+			log.Errorf("Failed to execute Redis script: %v", returnErr)
+			config.metricsLoaded.Store(true)
 			writeMetric(ctx, config)
 			return types.ActionContinue
 		}
-	} else {
-		log.Errorf("It is not error. No Redis load")
-		writeMetric(ctx, config)
-		return types.ActionContinue
+
+		return types.DataStopIterationAndWatermark
 	}
 
-	return types.DataStopIterationAndWatermark
+	writeMetric(ctx, config)
+	return types.ActionContinue
 }
 
 // fetches the tracing span value from the specified source.
