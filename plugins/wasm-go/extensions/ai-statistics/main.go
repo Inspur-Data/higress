@@ -335,25 +335,7 @@ func loadMetricsFromRedis(config *AIStatisticsConfig) error {
 		return nil
 	}
 
-	// 新增诊断日志
-	log.Errorf("It is not erro. === Redis Diagnostics ===")
-	log.Errorf("It is not erro. Client Ready: %v", config.RedisClient.Ready())
-	log.Errorf("Redis Initialized: %v", config.redisInitialized.Load())
-
-	// 测试简单的 PING 命令
-	pingStatus := &redisOperationStatus{}
-	pingErr := config.RedisClient.Command([]interface{}{"PING"}, func(resp resp.Value) {
-		log.Errorf("It is not erro. PING response: %v", resp.String())
-		pingStatus.done.Store(true)
-		proxywasm.ResumeHttpResponse()
-	})
-	if pingErr != nil {
-		log.Errorf("PING failed immediately: %v", pingErr)
-		return pingErr
-	}
-	waitForRedisOperation(pingStatus, "PING", 100)
-
-	log.Errorf("It is not erro. Starting to load metrics from Redis. Client ready: %v, Initialized: %v",
+	log.Errorf("It is not error. Starting to load metrics from Redis. Client ready: %v, Initialized: %v",
 		config.RedisClient.Ready(), config.redisInitialized.Load())
 
 	prefix := "route."
@@ -500,12 +482,6 @@ func InitRedisClusterClient(redisConfig gjson.Result, config *AIStatisticsConfig
 		timeout = 1000
 	}
 
-	log.Errorf("Redis info serviceName is %s", serviceName)
-	log.Errorf("Redis info servicePort is %d", servicePort)
-	log.Errorf("Redis info username is %s", username)
-	log.Errorf("Redis info password is %s", password)
-	log.Errorf("Redis info timeout is %d", timeout)
-
 	config.RedisClient = wrapper.NewRedisClusterClient(wrapper.FQDNCluster{
 		FQDN: serviceName,
 		Port: int64(servicePort),
@@ -601,11 +577,19 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) t
 
 	setAttributeBySource(ctx, config, ResponseHeader, nil)
 
-	err := loadMetricsFromRedis(&config)
-	if err != nil {
-		log.Errorf("redis call failed: %v", err)
+	// 测试简单的 PING 命令
+	log.Errorf("PING test start")
+	pingStatus := &redisOperationStatus{}
+	pingErr := config.RedisClient.Command([]interface{}{"PING"}, func(resp resp.Value) {
+		log.Errorf("It is not erro. PING response: %v", resp.String())
+		pingStatus.done.Store(true)
+		proxywasm.ResumeHttpResponse()
+	})
+	if pingErr != nil {
+		log.Errorf("PING failed immediately: %v", pingErr)
 		return types.ActionContinue
 	}
+
 	return types.HeaderStopAllIterationAndWatermark
 }
 
@@ -698,9 +682,23 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body
 
 	ctx.WriteUserAttributeToLogWithKey(wrapper.AILogKey)
 
-	writeMetric(ctx, config)
+	// 测试简单的 PING 命令
+	log.Errorf("PING test start")
+	pingStatus := &redisOperationStatus{}
+	pingErr := config.RedisClient.Command([]interface{}{"PING"}, func(resp resp.Value) {
+		log.Errorf("It is not erro. PING response: %v", resp.String())
+		pingStatus.done.Store(true)
+		proxywasm.ResumeHttpResponse()
+	})
+	if pingErr != nil {
+		log.Errorf("PING failed immediately: %v", pingErr)
+		return types.ActionContinue
+	}
+	return types.DataStopIterationAndWatermark
 
-	return types.ActionContinue
+	// writeMetric(ctx, config)
+
+	// return types.ActionContinue
 }
 
 func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, source string, body []byte) {
