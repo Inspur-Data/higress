@@ -172,8 +172,10 @@ func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
 		}
 		config.attributes[i] = attribute
 	}
-	// Metric settings
 	counter1 := proxywasm.DefineCounterMetric("gateway_model_metrics")
+	if config.counterMetrics == nil {
+		config.counterMetrics = make(map[string]proxywasm.MetricCounter)
+	}
 	config.counterMetrics["gateway_model_metrics"] = counter1
 
 	// Parse openai usage config setting.
