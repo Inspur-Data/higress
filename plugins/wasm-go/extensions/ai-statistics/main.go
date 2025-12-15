@@ -335,7 +335,7 @@ func loadMetricsFromRedis(config *AIStatisticsConfig) {
 		return
 	}
 
-	log.Infof("Starting to load metrics from Redis. Client ready: %v, Initialized: %v",
+	log.Errorf("It is not erro. Starting to load metrics from Redis. Client ready: %v, Initialized: %v",
 		config.RedisClient.Ready(), config.redisInitialized.Load())
 
 	prefix := "route."
@@ -344,10 +344,10 @@ func loadMetricsFromRedis(config *AIStatisticsConfig) {
 	var callbackInvoked atomic.Bool
 
 	// 使用 Command 方法执行 KEYS 命令
-	log.Infof("Dispatching KEYS command with prefix: %s*", prefix)
+	log.Errorf("It is not erro. Dispatching KEYS command with prefix: %s*", prefix)
 	keysErr := config.RedisClient.Command([]interface{}{"KEYS", prefix + "*"}, func(response resp.Value) {
 		callbackInvoked.Store(true)
-		log.Infof("KEYS callback invoked! Response error: %v", response.Error())
+		log.Errorf("It is not erro. KEYS callback invoked! Response error: %v", response.Error())
 		defer opStatus.done.Store(true)
 
 		if response.Error() != nil {
@@ -357,13 +357,14 @@ func loadMetricsFromRedis(config *AIStatisticsConfig) {
 
 		// 解析返回的 keys
 		keys := response.Array()
-		log.Infof("Found %d metric keys in Redis", len(keys))
+		log.Errorf("It is not erro. Found %d metric keys in Redis", len(keys))
 
 		// 提取 key 名称
 		for _, keyValue := range keys {
 			metricName := keyValue.String()
 			if metricName != "" {
 				metricsKeys = append(metricsKeys, metricName)
+				log.Errorf("It is not erro. key is %s", metricName)
 			}
 		}
 	})
@@ -373,7 +374,7 @@ func loadMetricsFromRedis(config *AIStatisticsConfig) {
 		return
 	}
 
-	log.Infof("KEYS command dispatched successfully, waiting for callback...")
+	log.Errorf("It is not erro. KEYS command dispatched successfully, waiting for callback...")
 	waitForRedisOperation(opStatus, "KEYS", 200)
 
 	if !callbackInvoked.Load() {
@@ -381,21 +382,21 @@ func loadMetricsFromRedis(config *AIStatisticsConfig) {
 		return
 	}
 
-	log.Infof("Found %d keys to sync: %v", len(metricsKeys), metricsKeys)
+	log.Errorf("It is not erro. Found %d keys to sync: %v", len(metricsKeys), metricsKeys)
 
 	// 为每个 key 执行 GET 操作
 	for i, metricName := range metricsKeys {
-		log.Infof("Syncing metric %d/%d: %s", i+1, len(metricsKeys), metricName)
+		log.Errorf("It is not erro. Syncing metric %d/%d: %s", i+1, len(metricsKeys), metricName)
 		getOpStatus := &redisOperationStatus{}
 		var getCallbackInvoked atomic.Bool
 
 		getErr := config.RedisClient.Get(metricName, func(getResponse resp.Value) {
 			getCallbackInvoked.Store(true)
-			log.Infof("GET callback invoked for %s, error: %v", metricName, getResponse.Error())
+			log.Errorf("It is not erro. GET callback invoked for %s, error: %v", metricName, getResponse.Error())
 			defer getOpStatus.done.Store(true)
 
 			if getResponse.Error() != nil {
-				log.Warnf("Redis GET error for key %s: %v", metricName, getResponse.Error())
+				log.Errorf("It is not erro. Redis GET error for key %s: %v", metricName, getResponse.Error())
 				return
 			}
 
@@ -404,13 +405,13 @@ func loadMetricsFromRedis(config *AIStatisticsConfig) {
 			var value uint64
 			_, parseErr := fmt.Sscanf(valueStr, "%d", &value)
 			if parseErr != nil {
-				log.Warnf("Failed to parse value for key %s: %s", metricName, valueStr)
+				log.Errorf("It is not erro. Failed to parse value for key %s: %s", metricName, valueStr)
 				return
 			}
 
 			// 初始化本地计数器
 			localCounter := proxywasm.DefineCounterMetric(metricName)
-			log.Infof("Loading metric %s with value %d from Redis", metricName, value)
+			log.Errorf("It is not erro. Loading metric %s with value %d from Redis", metricName, value)
 			config.counterMetrics[metricName] = localCounter
 
 			// 重要：存储准确值到本地映射（以 Redis 为准）
@@ -418,7 +419,7 @@ func loadMetricsFromRedis(config *AIStatisticsConfig) {
 		})
 
 		if getErr != nil {
-			log.Warnf("Failed to execute GET for key %s: %v", metricName, getErr)
+			log.Errorf("It is not erro. Failed to execute GET for key %s: %v", metricName, getErr)
 			continue
 		}
 
@@ -430,22 +431,22 @@ func loadMetricsFromRedis(config *AIStatisticsConfig) {
 	}
 
 	config.metricsLoaded.Store(true)
-	log.Info("Redis metrics loading completed")
+	log.Errorf("It is not erro. Redis metrics loading completed")
 }
 
 // 改造：增加详细日志和状态检查
 func waitForRedisOperation(opStatus *redisOperationStatus, operationName string, maxRetries int) {
-	log.Infof("Waiting for Redis operation %s (max retries: %d)", operationName, maxRetries)
+	log.Errorf("It is not erro. Waiting for Redis operation %s (max retries: %d)", operationName, maxRetries)
 
 	for i := 0; i < maxRetries; i++ {
 		if opStatus.done.Load() {
-			log.Infof("Redis operation %s completed after %d attempts", operationName, i+1)
+			log.Errorf("It is not erro. Redis operation %s completed after %d attempts", operationName, i+1)
 			return
 		}
 
 		// 每 100 次打印一次日志
 		if i%100 == 0 {
-			log.Warnf("Still waiting for Redis operation %s, attempt %d/%d", operationName, i, maxRetries)
+			log.Errorf("It is not erro. Still waiting for Redis operation %s, attempt %d/%d", operationName, i, maxRetries)
 		}
 
 		time.Sleep(10 * time.Millisecond)
