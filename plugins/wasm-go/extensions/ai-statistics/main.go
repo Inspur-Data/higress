@@ -335,6 +335,23 @@ func loadMetricsFromRedis(config *AIStatisticsConfig) {
 		return
 	}
 
+	// 新增诊断日志
+	log.Errorf("It is not erro. === Redis Diagnostics ===")
+	log.Errorf("It is not erro. Client Ready: %v", config.RedisClient.Ready())
+	log.Errorf("Redis Initialized: %v", config.redisInitialized.Load())
+
+	// 测试简单的 PING 命令
+	pingStatus := &redisOperationStatus{}
+	pingErr := config.RedisClient.Command([]interface{}{"PING"}, func(resp resp.Value) {
+		log.Errorf("It is not erro. PING response: %v", resp.String())
+		pingStatus.done.Store(true)
+	})
+	if pingErr != nil {
+		log.Errorf("PING failed immediately: %v", pingErr)
+		return
+	}
+	waitForRedisOperation(pingStatus, "PING", 100)
+
 	log.Errorf("It is not erro. Starting to load metrics from Redis. Client ready: %v, Initialized: %v",
 		config.RedisClient.Ready(), config.redisInitialized.Load())
 
@@ -477,6 +494,12 @@ func InitRedisClusterClient(redisConfig gjson.Result, config *AIStatisticsConfig
 		timeout = 1000
 	}
 
+	log.Errorf("Redis info serviceName is %s", serviceName)
+	log.Errorf("Redis info servicePort is %d", servicePort)
+	log.Errorf("Redis info username is %s", username)
+	log.Errorf("Redis info password is %s", password)
+	log.Errorf("Redis info timeout is %d", timeout)
+
 	config.RedisClient = wrapper.NewRedisClusterClient(wrapper.FQDNCluster{
 		FQDN: serviceName,
 		Port: int64(servicePort),
@@ -485,10 +508,10 @@ func InitRedisClusterClient(redisConfig gjson.Result, config *AIStatisticsConfig
 	err := config.RedisClient.Init(username, password, int64(timeout), wrapper.WithDataBase(database))
 
 	if config.RedisClient.Ready() {
-		log.Info("Redis init successfully")
+		log.Errorf("Redis init successfully")
 		config.redisInitialized.Store(true)
 	} else {
-		log.Error("redis init failed, will try later")
+		log.Errorf("redis init failed, will try later")
 		config.redisInitialized.Store(false)
 	}
 
