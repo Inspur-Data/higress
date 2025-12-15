@@ -177,8 +177,8 @@ func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64
 
 	// 确保 metrics 已加载
 	if !config.metricsLoaded.Load() {
-		log.Warnf("Metrics not loaded yet, triggering load")
-		loadMetricsFromRedis(config)
+		log.Errorf("Metrics not loaded yet, triggering load")
+		_ = loadMetricsFromRedis(config)
 	}
 
 	if config.RedisClient != nil && config.RedisClient.Ready() && config.redisInitialized.Load() {
@@ -329,10 +329,10 @@ func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
 }
 
 // 改造：添加重试机制和更详细的日志
-func loadMetricsFromRedis(config *AIStatisticsConfig) {
+func loadMetricsFromRedis(config *AIStatisticsConfig) error {
 	if config.metricsLoaded.Load() {
-		log.Debugf("Metrics already loaded, skipping")
-		return
+		log.Errorf("Metrics already loaded, skipping")
+		return nil
 	}
 
 	// 新增诊断日志
@@ -345,10 +345,11 @@ func loadMetricsFromRedis(config *AIStatisticsConfig) {
 	pingErr := config.RedisClient.Command([]interface{}{"PING"}, func(resp resp.Value) {
 		log.Errorf("It is not erro. PING response: %v", resp.String())
 		pingStatus.done.Store(true)
+		proxywasm.ResumeHttpResponse()
 	})
 	if pingErr != nil {
 		log.Errorf("PING failed immediately: %v", pingErr)
-		return
+		return pingErr
 	}
 	waitForRedisOperation(pingStatus, "PING", 100)
 
@@ -369,6 +370,7 @@ func loadMetricsFromRedis(config *AIStatisticsConfig) {
 
 		if response.Error() != nil {
 			log.Errorf("Redis KEYS error: %v", response.Error())
+			proxywasm.ResumeHttpResponse()
 			return
 		}
 
@@ -384,11 +386,12 @@ func loadMetricsFromRedis(config *AIStatisticsConfig) {
 				log.Errorf("It is not erro. key is %s", metricName)
 			}
 		}
+		proxywasm.ResumeHttpResponse()
 	})
 
 	if keysErr != nil {
 		log.Errorf("Failed to execute KEYS command: %v", keysErr)
-		return
+		return keysErr
 	}
 
 	log.Errorf("It is not erro. KEYS command dispatched successfully, waiting for callback...")
@@ -396,7 +399,7 @@ func loadMetricsFromRedis(config *AIStatisticsConfig) {
 
 	if !callbackInvoked.Load() {
 		log.Errorf("CRITICAL: KEYS callback was never invoked!")
-		return
+		return nil
 	}
 
 	log.Errorf("It is not erro. Found %d keys to sync: %v", len(metricsKeys), metricsKeys)
@@ -414,6 +417,7 @@ func loadMetricsFromRedis(config *AIStatisticsConfig) {
 
 			if getResponse.Error() != nil {
 				log.Errorf("It is not erro. Redis GET error for key %s: %v", metricName, getResponse.Error())
+				proxywasm.ResumeHttpResponse()
 				return
 			}
 
@@ -423,6 +427,7 @@ func loadMetricsFromRedis(config *AIStatisticsConfig) {
 			_, parseErr := fmt.Sscanf(valueStr, "%d", &value)
 			if parseErr != nil {
 				log.Errorf("It is not erro. Failed to parse value for key %s: %s", metricName, valueStr)
+				proxywasm.ResumeHttpResponse()
 				return
 			}
 
@@ -449,6 +454,7 @@ func loadMetricsFromRedis(config *AIStatisticsConfig) {
 
 	config.metricsLoaded.Store(true)
 	log.Errorf("It is not erro. Redis metrics loading completed")
+	return nil
 }
 
 // 改造：增加详细日志和状态检查
@@ -595,7 +601,12 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) t
 
 	setAttributeBySource(ctx, config, ResponseHeader, nil)
 
-	return types.ActionContinue
+	err := loadMetricsFromRedis(&config)
+	if err != nil {
+		log.Errorf("redis call failed: %v", err)
+		return types.ActionContinue
+	}
+	return types.HeaderStopAllIterationAndWatermark
 }
 
 func onHttpStreamingBody(ctx wrapper.HttpContext, config AIStatisticsConfig, data []byte, endOfStream bool) []byte {
