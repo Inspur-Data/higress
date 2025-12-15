@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"net"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
@@ -22,11 +22,6 @@ import (
 )
 
 func main() {}
-
-var (
-	metricLocks = make(map[string]*sync.RWMutex)
-	lockMutex   sync.Mutex // Protects metricLocks map access
-)
 
 func init() {
 	fmt.Print("ai-statistics start")
@@ -87,7 +82,6 @@ const (
 	RuleAppend  = "append"
 )
 
-// TracingSpan is the tracing span configuration.
 type Attribute struct {
 	Key                string `json:"key"`
 	ValueSource        string `json:"value_source"`
@@ -102,8 +96,11 @@ type Attribute struct {
 
 type AIStatisticsConfig struct {
 	// Metrics
-	// TODO: add more metrics in Gauge and Histogram format
 	counterMetrics map[string]proxywasm.MetricCounter
+	// 新增：存储每个 metric 的准确值（以 Redis 为准）
+	counterValues map[string]uint64
+	// 新增：保护 counterValues 的互斥锁
+	counterMutex sync.RWMutex
 	// Attributes to be recorded in log & span
 	attributes []Attribute
 	// If there exist attributes extracted from streaming body, chunks should be buffered
@@ -111,6 +108,32 @@ type AIStatisticsConfig struct {
 	// If disableOpenaiUsage is true, model/input_token/output_token logs will be skipped
 	disableOpenaiUsage bool
 	RedisClient        wrapper.RedisClient
+	redisInitialized   atomic.Bool
+}
+
+type redisOperationStatus struct {
+	done atomic.Bool
+}
+
+func (config *AIStatisticsConfig) setCounterValue(metricName string, value uint64) {
+	config.counterMutex.Lock()
+	defer config.counterMutex.Unlock()
+	config.counterValues[metricName] = value
+}
+
+func (config *AIStatisticsConfig) getCounterValue(metricName string) (uint64, bool) {
+	config.counterMutex.RLock()
+	defer config.counterMutex.RUnlock()
+	val, ok := config.counterValues[metricName]
+	return val, ok
+}
+
+// 新增：供外部接口获取准确 metric 值的方法
+func (config *AIStatisticsConfig) GetMetricValue(metricName string) uint64 {
+	if val, ok := config.getCounterValue(metricName); ok {
+		return val
+	}
+	return 0
 }
 
 func generateMetricName(route, cluster, model, consumer, sourceIP, metricName string) string {
@@ -146,113 +169,74 @@ func getClusterName() (string, error) {
 	}
 }
 
-// acquireMetricLock gets or creates a lock for a specific metric name
-func acquireMetricLock(metricName string) *sync.RWMutex {
-	lockMutex.Lock()
-	defer lockMutex.Unlock()
-	lock, exists := metricLocks[metricName]
-	if !exists {
-		lock = &sync.RWMutex{}
-		metricLocks[metricName] = lock
-	}
-	return lock
-}
-
 func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64) {
 	if inc == 0 {
 		return
 	}
 
-	// First, get the current value from Redis
-	if config.RedisClient != nil {
-		config.incrementWithRedis(metricName, inc)
+	if config.RedisClient != nil && config.RedisClient.Ready() && config.redisInitialized.Load() {
+		log.Errorf("It is not error. start incrementWithRedisSmart for metric %s", metricName)
+		config.incrementWithRedisSmart(metricName, inc)
 	} else {
+		log.Errorf("It is not error. start incrementWithNoRedis for metric %s", metricName)
 		config.incrementWithNoRedis(metricName, inc)
 	}
 }
 
-func (config *AIStatisticsConfig) incrementWithRedis(metricName string, inc uint64) {
-	log.Errorf("it is not error. redisClient is not null. get start")
-	// Acquire lock for this specific metric name to prevent race conditions during read-modify-write
-	lock := acquireMetricLock(metricName)
-	lock.Lock()
-	defer lock.Unlock()
-
-	rediserr := config.RedisClient.Get(metricName, func(response resp.Value) {
-		log.Errorf("it is not error. response is %s", response.String())
-		var currentRedisValue uint64
-		currentRedisValue = 0
-		if err := response.Error(); err != nil {
-			log.Errorf("Redis error for key '%s': %w", metricName, err)
-			config.incrementWithNoRedis(metricName, inc)
-			return
-		}
-
-		if response.IsNull() {
-			log.Errorf("it is not error. key '%s' does not exist or is null", metricName)
-		} else {
-			switch response.Type() {
-			case resp.BulkString:
-				strVal := response.String()
-				u64Val, parseErr := strconv.ParseUint(strVal, 10, 64)
-				if parseErr != nil {
-					log.Errorf("failed to parse string value '%s' as uint64 for key '%s': %w", strVal, metricName, parseErr)
-					u64Val = 0
-				}
-				currentRedisValue = u64Val
-			case resp.Integer:
-				intVal := response.Integer()
-				if intVal < 0 {
-					log.Errorf("unexpected negative integer value for key '%s': %d (may be overflow)", metricName, intVal)
-					intVal = 0
-				}
-				currentRedisValue = uint64(intVal)
-			default:
-				log.Errorf("unexpected response type for key '%s': %s", metricName, response.Type())
-			}
-		}
-
-		// Get the current local counter value (if it exists)
-		localCounter, ok := config.counterMetrics[metricName]
-		if !ok {
-			localCounter = proxywasm.DefineCounterMetric(metricName)
-			config.counterMetrics[metricName] = localCounter
-		}
-
-		baseValue := currentRedisValue
-		log.Errorf("it is not error. currentRedisValue=%d, localCounter=%d", currentRedisValue, localCounter.Value())
-		if currentRedisValue < localCounter.Value() {
-			baseValue = localCounter.Value() // Use local value as base if it's larger
-		}
-		finalValue := baseValue + inc
-		localCounter.Increment(finalValue - localCounter.Value())
-
-		// Update Redis (if client is available)
-		err := config.RedisClient.Set(metricName, finalValue, nil)
-		if err != nil {
-			log.Warnf("Failed to update Redis metric %s: %v", metricName, err)
-		}
-	})
-	if rediserr != nil {
-		log.Errorf("failed to execute Redis GET command: %w. incrementWithNoRedis.", rediserr)
-		config.incrementWithNoRedis(metricName, inc)
-	}
-}
-
-func (config *AIStatisticsConfig) incrementWithNoRedis(metricName string, inc uint64) {
-	// Get the current local counter value (if it exists)
-	log.Errorf("it is not error. redisclient is null or error, incrementWithNoRedis")
-	localCounter, ok := config.counterMetrics[metricName]
-	if !ok {
+func (config *AIStatisticsConfig) incrementWithRedisSmart(metricName string, inc uint64) {
+	localCounter, exists := config.counterMetrics[metricName]
+	if !exists {
 		localCounter = proxywasm.DefineCounterMetric(metricName)
 		config.counterMetrics[metricName] = localCounter
 	}
-	localCounter.Increment(inc)
+
+	opStatus := &redisOperationStatus{}
+	opStatus.done.Store(false)
+
+	redisErr := config.RedisClient.IncrBy(metricName, int(inc), func(response resp.Value) {
+		log.Errorf("It is not error. incrementWithRedisSmart incrby callback for metric %s", metricName)
+		defer opStatus.done.Store(true)
+
+		if response.Error() != nil {
+			log.Warnf("Redis error in callback: %v", response.Error())
+			return
+		}
+
+		//从response获取最新值并更新本地准确值映射
+		newValue := response.Integer()
+		log.Debugf("Redis incremented %s to %d", metricName, newValue)
+		log.Errorf("It is not error. incrementWithRedisSmart value for metric is %d", newValue)
+		log.Errorf("It is not error. incrementWithRedisSmart local value for metric is %d", localCounter.Value())
+
+		//以Redis返回的值为权威，更新本地存储的准确值
+		config.setCounterValue(metricName, uint64(newValue))
+	})
+
+	if redisErr != nil {
+		log.Warnf("Redis unavailable, using local: %v", redisErr)
+		config.incrementWithNoRedis(metricName, inc)
+		return
+	}
+
+	// 等待 Redis 操作完成
+	waitForRedisOperation(opStatus, fmt.Sprintf("INCRBY %s", metricName))
+}
+
+func (config *AIStatisticsConfig) incrementWithNoRedis(metricName string, inc uint64) {
+	if inc == 0 {
+		return
+	}
+	counter, ok := config.counterMetrics[metricName]
+	if !ok {
+		counter = proxywasm.DefineCounterMetric(metricName)
+		config.counterMetrics[metricName] = counter
+	}
+	counter.Increment(inc)
 }
 
 func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
 	log.Debugf("ai-statistics start parseConfig")
-	// Parse tracing span attributes setting.
+
 	attributeConfigs := configJson.Get("attributes").Array()
 	config.attributes = make([]Attribute, len(attributeConfigs))
 	for i, attributeConfig := range attributeConfigs {
@@ -270,23 +254,123 @@ func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
 		}
 		config.attributes[i] = attribute
 	}
-	// Metric settings
-	counter1 := proxywasm.DefineCounterMetric("gateway_model_metrics")
+
 	if config.counterMetrics == nil {
 		config.counterMetrics = make(map[string]proxywasm.MetricCounter)
+		config.counterValues = make(map[string]uint64)
 	}
-	config.counterMetrics["gateway_model_metrics"] = counter1
 
-	// Parse openai usage config setting.
 	config.disableOpenaiUsage = configJson.Get("disable_openai_usage").Bool()
 
-	// Parse Redis address for persistence
 	redisConfig := configJson.Get("redis")
 	if redisConfig.Exists() {
-		_ = InitRedisClusterClient(redisConfig, config)
+		err := InitRedisClusterClient(redisConfig, config)
+		if err != nil {
+			log.Errorf("Failed to initialize Redis: %v", err)
+			return err
+		}
+
+		//Redis初始化成功后，加载所有指标
+		if config.RedisClient != nil && config.RedisClient.Ready() {
+			log.Info("Starting to load metrics from Redis...")
+			loadMetricsFromRedis(config)
+		}
 	}
 
 	return nil
+}
+
+// 从Redis加载所有metrics并初始化计数器
+func loadMetricsFromRedis(config *AIStatisticsConfig) {
+	log.Errorf("It is not error. start load metrics")
+	prefix := "route_"
+	opStatus := &redisOperationStatus{}
+	var metricsKeys []string
+
+	// 使用 Command 方法执行 KEYS 命令
+	keysErr := config.RedisClient.Command([]interface{}{"KEYS", prefix + "*"}, func(response resp.Value) {
+		defer opStatus.done.Store(true)
+		log.Errorf("It is not error. begin get all redis keys")
+		if response.Error() != nil {
+			log.Errorf("Redis KEYS error: %v", response.Error())
+			return
+		}
+
+		//解析返回的keys
+		keys := response.Array()
+		log.Infof("Found %d metric keys in Redis", len(keys))
+
+		//提取key名称
+		for _, keyValue := range keys {
+			metricName := keyValue.String()
+			if metricName != "" {
+				metricsKeys = append(metricsKeys, metricName)
+			}
+		}
+	})
+
+	if keysErr != nil {
+		log.Errorf("Failed to execute KEYS command: %v", keysErr)
+		return
+	}
+	// 等待 KEYS 操作完成
+	waitForRedisOperation(opStatus, "KEYS")
+
+	// 为每个 key 执行 GET 操作
+	for _, metricName := range metricsKeys {
+		log.Errorf("It is not error. begin sync value for every metric")
+		getOpStatus := &redisOperationStatus{}
+		getErr := config.RedisClient.Get(metricName, func(getResponse resp.Value) {
+			defer getOpStatus.done.Store(true)
+			log.Errorf("It is not error. begin sync metric %s", metricName)
+			if getResponse.Error() != nil {
+				log.Warnf("Redis GET error for key %s: %v", metricName, getResponse.Error())
+				return
+			}
+
+			// 获取值并转换为 uint64
+			valueStr := getResponse.String()
+			var value uint64
+			_, parseErr := fmt.Sscanf(valueStr, "%d", &value)
+			if parseErr != nil {
+				log.Warnf("Failed to parse value for key %s: %s", metricName, valueStr)
+				return
+			}
+
+			// 初始化本地计数器
+			localCounter := proxywasm.DefineCounterMetric(metricName)
+			log.Errorf("It is not error. Loading metric %s with value %d from Redis", metricName, value)
+			config.counterMetrics[metricName] = localCounter
+
+			// 重要：存储准确值到本地映射（以 Redis 为准）
+			config.setCounterValue(metricName, value)
+		})
+
+		if getErr != nil {
+			log.Warnf("Failed to execute GET for key %s: %v", metricName, getErr)
+			continue
+		}
+
+		// 等待 GET 操作完成
+		waitForRedisOperation(getOpStatus, fmt.Sprintf("GET %s", metricName))
+	}
+
+	config.redisInitialized.Store(true)
+	log.Info("Redis metrics loading completed")
+}
+
+// 等待Redis操作完成
+func waitForRedisOperation(opStatus *redisOperationStatus, operationName string) {
+	maxRetries := 200
+	for i := 0; i < maxRetries; i++ {
+		if opStatus.done.Load() {
+			log.Debugf("Redis operation %s completed", operationName)
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	log.Warnf("Redis operation %s timeout after %d attempts", operationName, maxRetries)
 }
 
 func InitRedisClusterClient(redisConfig gjson.Result, config *AIStatisticsConfig) error {
@@ -298,7 +382,6 @@ func InitRedisClusterClient(redisConfig gjson.Result, config *AIStatisticsConfig
 	servicePort := int(redisConfig.Get("service_port").Int())
 	if servicePort == 0 {
 		if strings.HasSuffix(serviceName, ".static") {
-			// use default logic port which is 80 for static service
 			servicePort = 80
 		} else {
 			servicePort = 6379
@@ -318,11 +401,15 @@ func InitRedisClusterClient(redisConfig gjson.Result, config *AIStatisticsConfig
 	})
 	database := int(redisConfig.Get("database").Int())
 	err := config.RedisClient.Init(username, password, int64(timeout), wrapper.WithDataBase(database))
+
 	if config.RedisClient.Ready() {
 		log.Info("redis init successfully")
+		config.redisInitialized.Store(true)
 	} else {
 		log.Error("redis init failed, will try later")
+		config.redisInitialized.Store(false)
 	}
+
 	return err
 }
 
@@ -348,30 +435,24 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) ty
 	ctx.SetRequestBodyBufferLimit(defaultMaxBodyBytes)
 
 	log.Debugf("ai-statistics start onHttpRequestHeaders/setAttributeBySource/SOURCEIP")
-	// 先设置 source_ip
 	setAttributeBySource(ctx, config, SourceIP, nil)
 	log.Debugf("ai-statistics end onHttpRequestHeaders/setAttributeBySource/SOURCEIP")
 
-	// Set user defined log & span attributes which type is fixed_value
 	setAttributeBySource(ctx, config, FixedValue, nil)
-	// Set user defined log & span attributes which type is request_header
 	setAttributeBySource(ctx, config, RequestHeader, nil)
-	// Set span attributes for ARMS.
 	setSpanAttribute(ArmsSpanKind, "LLM")
 
 	return types.ActionContinue
 }
 
 func onHttpRequestBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body []byte) types.Action {
-	// Set user defined log & span attributes.
 	setAttributeBySource(ctx, config, RequestBody, body)
-	// Set span attributes for ARMS.
 	requestModel := "UNKNOWN"
 	if model := gjson.GetBytes(body, "model"); model.Exists() {
 		requestModel = model.String()
 	} else {
 		requestPath := ctx.GetStringContext(RequestPath, "")
-		if strings.Contains(requestPath, "generateContent") || strings.Contains(requestPath, "streamGenerateContent") { // Google Gemini GenerateContent
+		if strings.Contains(requestPath, "generateContent") || strings.Contains(requestPath, "streamGenerateContent") {
 			reg := regexp.MustCompile(`^.*/(?P<api_version>[^/]+)/models/(?P<model>[^:]+):\w+Content$`)
 			matches := reg.FindStringSubmatch(requestPath)
 			if len(matches) == 3 {
@@ -380,7 +461,6 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body 
 		}
 	}
 	setSpanAttribute(ArmsRequestModel, requestModel)
-	// Set the number of conversation rounds
 
 	userPromptCount := 0
 	if messages := gjson.GetBytes(body, "messages"); messages.Exists() && messages.IsArray() {
@@ -389,7 +469,7 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body 
 				userPromptCount += 1
 			}
 		}
-	} else if contents := gjson.GetBytes(body, "contents"); contents.Exists() && contents.IsArray() { // Google Gemini GenerateContent
+	} else if contents := gjson.GetBytes(body, "contents"); contents.Exists() && contents.IsArray() {
 		for _, content := range contents.Array() {
 			if !content.Get("role").Exists() || content.Get("role").String() == "user" {
 				userPromptCount += 1
@@ -398,7 +478,6 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body 
 	}
 	ctx.SetUserAttribute(ChatRound, userPromptCount)
 
-	// Write log
 	ctx.WriteUserAttributeToLogWithKey(wrapper.AILogKey)
 	return types.ActionContinue
 }
@@ -409,14 +488,12 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) t
 		ctx.BufferResponseBody()
 	}
 
-	// Set user defined log & span attributes.
 	setAttributeBySource(ctx, config, ResponseHeader, nil)
 
 	return types.ActionContinue
 }
 
 func onHttpStreamingBody(ctx wrapper.HttpContext, config AIStatisticsConfig, data []byte, endOfStream bool) []byte {
-	// Buffer stream body for record log & span attributes
 	if config.shouldBufferStreamingBody {
 		streamingBodyBuffer, ok := ctx.GetContext(CtxStreamingBodyBuffer).([]byte)
 		if !ok {
@@ -431,42 +508,37 @@ func onHttpStreamingBody(ctx wrapper.HttpContext, config AIStatisticsConfig, dat
 	if chatID := wrapper.GetValueFromBody(data, []string{
 		"id",
 		"response.id",
-		"responseId", // Gemini generateContent
-		"message.id", // anthropic messages
+		"responseId",
+		"message.id",
 	}); chatID != nil {
 		ctx.SetUserAttribute(ChatID, chatID.String())
 	}
 
-	// Get requestStartTime from http context
 	requestStartTime, ok := ctx.GetContext(StatisticsRequestStartTime).(int64)
 	if !ok {
 		log.Error("failed to get requestStartTime from http context")
 		return data
 	}
 
-	// If this is the first chunk, record first token duration metric and span attribute
 	if ctx.GetContext(StatisticsFirstTokenTime) == nil {
 		firstTokenTime := time.Now().UnixMilli()
 		ctx.SetContext(StatisticsFirstTokenTime, firstTokenTime)
 		ctx.SetUserAttribute(LLMFirstTokenDuration, firstTokenTime-requestStartTime)
 	}
 
-	// Set information about this request
 	if !config.disableOpenaiUsage {
 		if usage := tokenusage.GetTokenUsage(ctx, data); usage.TotalToken > 0 {
-			// Set span attributes for ARMS.
 			setSpanAttribute(ArmsTotalToken, usage.TotalToken)
 			setSpanAttribute(ArmsModelName, usage.Model)
 			setSpanAttribute(ArmsInputToken, usage.InputToken)
 			setSpanAttribute(ArmsOutputToken, usage.OutputToken)
 		}
 	}
-	// If the end of the stream is reached, record metrics/logs/spans.
+
 	if endOfStream {
 		responseEndTime := time.Now().UnixMilli()
 		ctx.SetUserAttribute(LLMServiceDuration, responseEndTime-requestStartTime)
 
-		// Set user defined log & span attributes.
 		if config.shouldBufferStreamingBody {
 			streamingBodyBuffer, ok := ctx.GetContext(CtxStreamingBodyBuffer).([]byte)
 			if !ok {
@@ -475,17 +547,13 @@ func onHttpStreamingBody(ctx wrapper.HttpContext, config AIStatisticsConfig, dat
 			setAttributeBySource(ctx, config, ResponseStreamingBody, streamingBodyBuffer)
 		}
 
-		// Write log
 		ctx.WriteUserAttributeToLogWithKey(wrapper.AILogKey)
-
-		// Write metrics
 		writeMetric(ctx, config)
 	}
 	return data
 }
 
 func onHttpResponseBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body []byte) types.Action {
-	// Get requestStartTime from http context
 	requestStartTime, _ := ctx.GetContext(StatisticsRequestStartTime).(int64)
 
 	responseEndTime := time.Now().UnixMilli()
@@ -495,16 +563,14 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body
 	if chatID := wrapper.GetValueFromBody(body, []string{
 		"id",
 		"response.id",
-		"responseId", // Gemini generateContent
-		"message.id", // anthropic messages
+		"responseId",
+		"message.id",
 	}); chatID != nil {
 		ctx.SetUserAttribute(ChatID, chatID.String())
 	}
 
-	// Set information about this request
 	if !config.disableOpenaiUsage {
 		if usage := tokenusage.GetTokenUsage(ctx, body); usage.TotalToken > 0 {
-			// Set span attributes for ARMS.
 			setSpanAttribute(ArmsModelName, usage.Model)
 			setSpanAttribute(ArmsInputToken, usage.InputToken)
 			setSpanAttribute(ArmsOutputToken, usage.OutputToken)
@@ -512,19 +578,14 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body
 		}
 	}
 
-	// Set user defined log & span attributes.
 	setAttributeBySource(ctx, config, ResponseBody, body)
 
-	// Write log
 	ctx.WriteUserAttributeToLogWithKey(wrapper.AILogKey)
 
-	// Write metrics
 	writeMetric(ctx, config)
 
 	return types.ActionContinue
 }
-
-// fetches the tracing span value from the specified source.
 
 func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, source string, body []byte) {
 	for _, attribute := range config.attributes {
@@ -546,21 +607,15 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 			case ResponseBody:
 				value = gjson.GetBytes(body, attribute.Value).Value()
 			case SourceIP:
-				// 1. 先尝试从 X-Forwarded-For 获取
 				value = "unknown"
-				// 1. 优先从 source.address 获取 (eBPF PPv2 注入后的真实 IP)
 				if bs, err := proxywasm.GetProperty([]string{"source", "address"}); err == nil {
 					rawSource := string(bs)
 					sourceIP := parseIP(rawSource)
 					if isValidIP(sourceIP) {
 						value = sourceIP
-						// 打印 Info 级别日志验证 eBPF 是否生效
 						log.Infof("[Check-eBPF] Got Source IP from connection: %s (Raw: %s)", value, rawSource)
 					}
 				}
-
-				// 2. 如果上面的方式拿到的是内网 IP 或者是 unknown，尝试 XFF (可选，视你的信任策略而定)
-				// 注意：如果你确定 eBPF 正常工作，其实不需要 XFF 了，因为 source.address 是最可信的
 				if value == "unknown" {
 					if xff, err := proxywasm.GetHttpRequestHeader("X-Forwarded-For"); err == nil && xff != "" {
 						ips := strings.Split(xff, ",")
@@ -574,8 +629,6 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 						}
 					}
 				}
-
-				// 3. 兜底
 				if value == "" {
 					value = "unknown"
 				}
@@ -595,7 +648,6 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 					ctx.SetUserAttribute(key, value)
 				}
 			}
-			// for metrics
 			if key == tokenusage.CtxKeyModel || key == tokenusage.CtxKeyInputToken || key == tokenusage.CtxKeyOutputToken || key == tokenusage.CtxKeyTotalToken || key == SourceIP {
 				ctx.SetContext(key, value)
 			}
@@ -628,7 +680,6 @@ func extractStreamingBodyByJsonPath(data []byte, jsonPath string, rule string) i
 			}
 		}
 	} else if rule == RuleAppend {
-		// extract llm response
 		var strValue string
 		for _, chunk := range chunks {
 			jsonObj := gjson.GetBytes(chunk, jsonPath)
@@ -643,7 +694,6 @@ func extractStreamingBodyByJsonPath(data []byte, jsonPath string, rule string) i
 	return value
 }
 
-// Set the tracing span with value.
 func setSpanAttribute(key string, value interface{}) {
 	if value != "" {
 		traceSpanTag := wrapper.TraceSpanTagPrefix + key
@@ -656,18 +706,17 @@ func setSpanAttribute(key string, value interface{}) {
 }
 
 func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig) {
-	// Generate usage metrics
 	var ok bool
 	var route, cluster, model string
 	consumer := ctx.GetStringContext(ConsumerKey, "none")
 	route, ok = ctx.GetContext(RouteName).(string)
 	if !ok {
-		log.Warnf("RouteName typd assert failed, skip metric record")
+		log.Warnf("RouteName type assert failed, skip metric record")
 		return
 	}
 	cluster, ok = ctx.GetContext(ClusterName).(string)
 	if !ok {
-		log.Warnf("ClusterName typd assert failed, skip metric record")
+		log.Warnf("ClusterName type assert failed, skip metric record")
 		return
 	}
 
@@ -681,7 +730,7 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 	}
 	model, ok = ctx.GetUserAttribute(tokenusage.CtxKeyModel).(string)
 	if !ok {
-		log.Warnf("Model typd assert failed, skip metric record")
+		log.Warnf("Model type assert failed, skip metric record")
 		return
 	}
 	sourceIP := "unknown"
@@ -693,29 +742,28 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 		log.Debugf("sourceIP is %v", sourceIP)
 	}
 
+	// 使用准确值进行递增
 	if inputToken, ok := convertToUInt(ctx.GetUserAttribute(tokenusage.CtxKeyInputToken)); ok {
 		config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP, tokenusage.CtxKeyInputToken), inputToken)
 	} else {
-		log.Warnf("InputToken typd assert failed, skip metric record")
+		log.Warnf("InputToken type assert failed, skip metric record")
 	}
 	if outputToken, ok := convertToUInt(ctx.GetUserAttribute(tokenusage.CtxKeyOutputToken)); ok {
 		config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP, tokenusage.CtxKeyOutputToken), outputToken)
 	} else {
-		log.Warnf("OutputToken typd assert failed, skip metric record")
+		log.Warnf("OutputToken type assert failed, skip metric record")
 	}
 	if totalToken, ok := convertToUInt(ctx.GetUserAttribute(tokenusage.CtxKeyTotalToken)); ok {
 		config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP, tokenusage.CtxKeyTotalToken), totalToken)
 	} else {
-		log.Warnf("TotalToken typd assert failed, skip metric record")
+		log.Warnf("TotalToken type assert failed, skip metric record")
 	}
 
-	// Generate duration metrics
 	var llmFirstTokenDuration, llmServiceDuration uint64
-	// Is stream response
 	if ctx.GetUserAttribute(LLMFirstTokenDuration) != nil {
 		llmFirstTokenDuration, ok = convertToUInt(ctx.GetUserAttribute(LLMFirstTokenDuration))
 		if !ok {
-			log.Warnf("LLMFirstTokenDuration typd assert failed")
+			log.Warnf("LLMFirstTokenDuration type assert failed")
 			return
 		}
 		config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP, LLMFirstTokenDuration), llmFirstTokenDuration)
@@ -724,7 +772,7 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 	if ctx.GetUserAttribute(LLMServiceDuration) != nil {
 		llmServiceDuration, ok = convertToUInt(ctx.GetUserAttribute(LLMServiceDuration))
 		if !ok {
-			log.Warnf("LLMServiceDuration typd assert failed")
+			log.Warnf("LLMServiceDuration type assert failed")
 			return
 		}
 		config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP, LLMServiceDuration), llmServiceDuration)
@@ -750,12 +798,12 @@ func convertToUInt(val interface{}) (uint64, bool) {
 		return 0, false
 	}
 }
+
 func parseIP(source string) string {
 	if source == "" {
 		return "unknown"
 	}
 
-	// IPv4
 	if strings.Contains(source, ".") {
 		if idx := strings.LastIndex(source, ":"); idx != -1 {
 			return source[:idx]
@@ -763,7 +811,6 @@ func parseIP(source string) string {
 		return source
 	}
 
-	// IPv6
 	if strings.Contains(source, "[") && strings.Contains(source, "]") {
 		if start := strings.Index(source, "["); start != -1 {
 			if end := strings.Index(source, "]"); end != -1 {
@@ -772,7 +819,6 @@ func parseIP(source string) string {
 		}
 	}
 
-	// 可能是纯 IPv6 地址
 	if strings.Count(source, ":") >= 2 {
 		if idx := strings.LastIndex(source, ":"); idx != -1 {
 			return source[:idx]
@@ -780,6 +826,7 @@ func parseIP(source string) string {
 	}
 	return source
 }
+
 func isValidIP(ip string) bool {
 	return ip != "" && ip != "unknown" && net.ParseIP(ip) != nil
 }
