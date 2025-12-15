@@ -177,6 +177,7 @@ func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64
 	if config.RedisClient != nil && config.RedisClient.Ready() && config.redisInitialized.Load() {
 		log.Errorf("It is not error. start incrementWithRedisSmart for metric %s", metricName)
 		config.incrementWithRedisSmart(metricName, inc)
+		go config.incrementWithRedisSmart(metricName, inc)
 	} else {
 		log.Errorf("It is not error. start incrementWithNoRedis for metric %s", metricName)
 		config.incrementWithNoRedis(metricName, inc)
@@ -219,7 +220,7 @@ func (config *AIStatisticsConfig) incrementWithRedisSmart(metricName string, inc
 	}
 
 	// 等待 Redis 操作完成
-	waitForRedisOperation(opStatus, fmt.Sprintf("INCRBY %s", metricName))
+	waitForRedisOperation(opStatus, fmt.Sprintf("INCRBY %s", metricName), 10000)
 }
 
 func (config *AIStatisticsConfig) incrementWithNoRedis(metricName string, inc uint64) {
@@ -314,7 +315,7 @@ func loadMetricsFromRedis(config *AIStatisticsConfig) {
 		return
 	}
 	// 等待 KEYS 操作完成
-	waitForRedisOperation(opStatus, "KEYS")
+	waitForRedisOperation(opStatus, "KEYS", 10000)
 
 	// 为每个 key 执行 GET 操作
 	for _, metricName := range metricsKeys {
@@ -352,7 +353,7 @@ func loadMetricsFromRedis(config *AIStatisticsConfig) {
 		}
 
 		// 等待 GET 操作完成
-		waitForRedisOperation(getOpStatus, fmt.Sprintf("GET %s", metricName))
+		waitForRedisOperation(getOpStatus, fmt.Sprintf("GET %s", metricName), 10000)
 	}
 
 	config.redisInitialized.Store(true)
@@ -360,8 +361,11 @@ func loadMetricsFromRedis(config *AIStatisticsConfig) {
 }
 
 // 等待Redis操作完成
-func waitForRedisOperation(opStatus *redisOperationStatus, operationName string) {
-	maxRetries := 200
+func waitForRedisOperation(opStatus *redisOperationStatus, operationName string, retries int) {
+	maxRetries := retries
+	if retries == 0 {
+		maxRetries = 200
+	}
 	for i := 0; i < maxRetries; i++ {
 		if opStatus.done.Load() {
 			log.Debugf("Redis operation %s completed", operationName)
