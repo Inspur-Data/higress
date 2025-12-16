@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,7 +18,6 @@ import (
 	"github.com/higress-group/wasm-go/pkg/tokenusage"
 	"github.com/higress-group/wasm-go/pkg/wrapper"
 	"github.com/tidwall/gjson"
-	"github.com/tidwall/resp"
 )
 
 func main() {}
@@ -104,6 +105,7 @@ type AIStatisticsConfig struct {
 	// If disableOpenaiUsage is true, model/input_token/output_token logs will be skipped
 	disableOpenaiUsage bool
 	RedisClient        wrapper.RedisClient
+	metricShortID      string
 }
 
 func generateMetricName(route, cluster, model, consumer, sourceIP, metricName string) string {
@@ -149,44 +151,24 @@ func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64
 		config.counterMetrics[metricName] = counter
 	}
 
-	if config.RedisClient != nil && config.RedisClient.Ready() {
-		log.Errorf("It is not error. start to execute redis command")
-		// Lua脚本：原子性比较并更新
-		var luaScript = `
-		local key = KEYS[1]
-		local base_val = tonumber(ARGV[1])
-		local inc_val = tonumber(ARGV[2])
-		local redis_val = redis.call('GET', key)
-		if redis_val == false then
-			redis_val = 0
-		else
-			redis_val = tonumber(redis_val)
-		end
-		local final_base = math.max(redis_val, base_val)
-		local final_val = final_base + inc_val
-		redis.call('SET', key, tostring(final_val))
-		return final_val
-		`
-		keys := []interface{}{metricName}
-		args := []interface{}{counter.Value(), inc}
-		err := config.RedisClient.Eval(luaScript, 1, keys, args, func(response resp.Value) {
-			log.Errorf("success to execute redis command")
-		})
-		if err != nil {
-			log.Errorf("failed to execute redis command: %v", err)
-		}
+	counter.Increment(inc)
 
-		log.Errorf("It is not error. start to execute set command")
-		err = config.RedisClient.Set(metricName, counter.Value(), func(response resp.Value) {
-			log.Errorf("success to execute redis set command")
-		})
+	if config.RedisClient != nil && config.RedisClient.Ready() {
+		redisKeyPrefix := "modelcount."
+		pod_name, err := proxywasm.GetProperty([]string{"pod_name"})
+		if err != nil {
+			log.Errorf("ai-statistics failed to get pod_name: %v", err)
+		}
+		if err != nil || pod_name == nil || string(pod_name) == "" {
+			redisKeyPrefix = redisKeyPrefix + config.metricShortID + "."
+		} else {
+			redisKeyPrefix = redisKeyPrefix + string(pod_name) + "-" + config.metricShortID + "."
+		}
+		err = config.RedisClient.Set(redisKeyPrefix+metricName, counter.Value(), nil)
 		if err != nil {
 			log.Errorf("failed to execute redis set command: %v", err)
 		}
 	}
-
-	counter.Increment(inc)
-
 }
 
 func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
@@ -229,6 +211,8 @@ func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
 		if config.RedisClient != nil && config.RedisClient.Ready() {
 			log.Info("Redis initialized successfully, metrics will be loaded on first use")
 		}
+		config.metricShortID = generateShortID()
+		log.Infof("Redis metricShortID is %s", config.metricShortID)
 	}
 
 	return nil
@@ -725,4 +709,16 @@ func parseIP(source string) string {
 }
 func isValidIP(ip string) bool {
 	return ip != "" && ip != "unknown" && net.ParseIP(ip) != nil
+}
+
+func generateShortID() string {
+	timestamp := time.Now().UnixNano()
+	randBytes := make([]byte, 4)
+	_, _ = rand.Read(randBytes)
+	buf := make([]byte, 12)
+	for i := 0; i < 8; i++ {
+		buf[i] = byte(timestamp >> (8 * i))
+	}
+	copy(buf[8:], randBytes)
+	return base64.URLEncoding.EncodeToString(buf)[:8]
 }
