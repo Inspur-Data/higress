@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -149,7 +148,9 @@ func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64
 		config.counterMetrics[metricName] = counter
 	}
 
+	log.Infof("It is not error. Redis client: %+v, Ready: %v", config.RedisClient != nil, config.RedisClient.Ready())
 	if config.RedisClient != nil && config.RedisClient.Ready() {
+		log.Errorf("It is not error. start to execute redis command")
 		// Lua脚本：原子性比较并更新
 		const luaScript = `
 		local key = KEYS[1]
@@ -167,11 +168,16 @@ func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64
 		return final_val
 		`
 		keys := []interface{}{metricName}
-		args := []interface{}{
-			strconv.FormatUint(counter.Value(), 10),
-			strconv.FormatUint(inc, 10),
+		args := []interface{}{counter.Value(), inc}
+		log.Errorf("It is not error. metricName is %s", metricName)
+		log.Errorf("It is not error. inc is %d", inc)
+		log.Errorf("It is not error. counter.Value() is %d", counter.Value())
+		log.Errorf("It is not error. Redis eval - keys: %v, args: %v", keys, args)
+		log.Errorf("It is not error. Lua Script is %s", luaScript)
+		err := config.RedisClient.Eval(luaScript, 1, keys, args, nil)
+		if err != nil {
+			log.Errorf("failed to execute redis command: %v", err)
 		}
-		_ = config.RedisClient.Eval(luaScript, 1, keys, args, nil)
 	}
 
 	counter.Increment(inc)
