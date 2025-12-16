@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -155,16 +156,16 @@ func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64
 
 	if config.RedisClient != nil && config.RedisClient.Ready() {
 		redisKeyPrefix := "modelcount."
-		pod_name, err := proxywasm.GetProperty([]string{"pod_name"})
-		if err != nil {
-			log.Errorf("ai-statistics failed to get pod_name: %v", err)
-		}
-		if err != nil || pod_name == nil || string(pod_name) == "" {
-			redisKeyPrefix = redisKeyPrefix + config.metricShortID + "."
+		podName := os.Getenv("POD_NAME")
+		if podName == "" {
+			log.Errorf("failed to get pod name")
+			redisKeyPrefix = redisKeyPrefix + "."
 		} else {
-			redisKeyPrefix = redisKeyPrefix + string(pod_name) + "-" + config.metricShortID + "."
+			log.Errorf("podName is %s", podName)
+			redisKeyPrefix = redisKeyPrefix + podName + "."
 		}
-		err = config.RedisClient.Set(redisKeyPrefix+metricName, counter.Value(), nil)
+
+		err := config.RedisClient.Set(redisKeyPrefix+metricName, counter.Value(), nil)
 		if err != nil {
 			log.Errorf("failed to execute redis set command: %v", err)
 		}
@@ -172,7 +173,7 @@ func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64
 }
 
 func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
-	log.Debugf("ai-statistics start parseConfig")
+	log.Errorf("ai-statistics start parseConfig")
 	// Parse tracing span attributes setting.
 	attributeConfigs := configJson.Get("attributes").Array()
 	config.attributes = make([]Attribute, len(attributeConfigs))
