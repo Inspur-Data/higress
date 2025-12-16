@@ -16,6 +16,7 @@ import (
 	"github.com/higress-group/wasm-go/pkg/tokenusage"
 	"github.com/higress-group/wasm-go/pkg/wrapper"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/resp"
 )
 
 func main() {}
@@ -148,11 +149,10 @@ func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64
 		config.counterMetrics[metricName] = counter
 	}
 
-	log.Infof("It is not error. Redis client: %+v, Ready: %v", config.RedisClient != nil, config.RedisClient.Ready())
 	if config.RedisClient != nil && config.RedisClient.Ready() {
 		log.Errorf("It is not error. start to execute redis command")
 		// Lua脚本：原子性比较并更新
-		const luaScript = `
+		var luaScript = `
 		local key = KEYS[1]
 		local base_val = tonumber(ARGV[1])
 		local inc_val = tonumber(ARGV[2])
@@ -169,14 +169,19 @@ func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64
 		`
 		keys := []interface{}{metricName}
 		args := []interface{}{counter.Value(), inc}
-		log.Errorf("It is not error. metricName is %s", metricName)
-		log.Errorf("It is not error. inc is %d", inc)
-		log.Errorf("It is not error. counter.Value() is %d", counter.Value())
-		log.Errorf("It is not error. Redis eval - keys: %v, args: %v", keys, args)
-		log.Errorf("It is not error. Lua Script is %s", luaScript)
-		err := config.RedisClient.Eval(luaScript, 1, keys, args, nil)
+		err := config.RedisClient.Eval(luaScript, 1, keys, args, func(response resp.Value) {
+			log.Errorf("success to execute redis command")
+		})
 		if err != nil {
 			log.Errorf("failed to execute redis command: %v", err)
+		}
+
+		log.Errorf("It is not error. start to execute set command")
+		err = config.RedisClient.Set(metricName, counter.Value(), func(response resp.Value) {
+			log.Errorf("success to execute redis set command")
+		})
+		if err != nil {
+			log.Errorf("failed to execute redis set command: %v", err)
 		}
 	}
 
