@@ -429,11 +429,8 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body
 	// load metrics from redis
 	log.Errorf("It is not error. start load metrics from redis")
 	if config.RedisClient != nil && config.RedisClient.Ready() && !config.metricsLoaded.Load() {
-		log.Errorf("It is not error. Loading metrics from Redis")
+		log.Infof("Loading metrics from Redis")
 
-		// Lua脚本：一次性获取所有key和value
-		// KEYS[1]: pattern
-		// 返回: {{"key1", "key2", ...}, {"value1", "value2", ...}}
 		luaScript := `
         local pattern = KEYS[1]
         local keys = redis.call('KEYS', pattern)
@@ -444,69 +441,64 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body
         return {keys, values}
         `
 
-		// 注意：Eval 方法签名：Eval(script string, numkeys int, keysAndArgs []interface{}, callback RedisResponseCallback)
 		returnErr := config.RedisClient.Eval(luaScript, 1, []interface{}{"route.*"}, nil, func(response resp.Value) {
 			if response.Error() != nil {
 				log.Errorf("Failed to load metrics from Redis: %v", response.Error())
-				config.metricsLoaded.Store(true)
-				writeMetric(ctx, config)
-				proxywasm.ResumeHttpResponse()
-				return
-			}
+			} else {
+				arrays := response.Array()
+				if len(arrays) == 2 {
+					keys := arrays[0].Array()
+					values := arrays[1].Array()
 
-			arrays := response.Array()
-			if len(arrays) != 2 {
-				log.Errorf("Invalid response format from Redis")
-				config.metricsLoaded.Store(true)
-				writeMetric(ctx, config)
-				proxywasm.ResumeHttpResponse()
-				return
-			}
+					log.Infof("Found %d metric keys in Redis", len(keys))
 
-			keys := arrays[0].Array()
-			values := arrays[1].Array()
+					for i := 0; i < len(keys) && i < len(values); i++ {
+						metricName := keys[i].String()
+						valueStr := values[i].String()
 
-			log.Errorf("It is not error. Found %d metric keys in Redis", len(keys))
+						counter := proxywasm.DefineCounterMetric(metricName)
+						config.counterMetrics[metricName] = counter
 
-			// 初始化本地计数器
-			for i := 0; i < len(keys) && i < len(values); i++ {
-				metricName := keys[i].String()
-				valueStr := values[i].String()
-
-				// 创建本地计数器并设置初始值
-				counter := proxywasm.DefineCounterMetric(metricName)
-				config.counterMetrics[metricName] = counter
-
-				if val, err := strconv.ParseUint(valueStr, 10, 64); err == nil {
-					counter.Increment(val)
-					config.counterValues[metricName] = val
-					log.Debugf("Loaded metric %s with initial value %d from Redis", metricName, val)
-				} else {
-					config.counterValues[metricName] = 0
-					log.Warnf("Failed to parse value for metric %s: %s", metricName, valueStr)
+						if val, err := strconv.ParseUint(valueStr, 10, 64); err == nil {
+							counter.Increment(val)
+							config.counterValues[metricName] = val
+							log.Debugf("Loaded metric %s with initial value %d from Redis", metricName, val)
+						} else {
+							config.counterValues[metricName] = 0
+						}
+					}
+					log.Infof("Successfully loaded %d metrics from Redis", len(keys))
 				}
+				config.metricsLoaded.Store(true)
 			}
 
-			config.metricsLoaded.Store(true)
-			log.Errorf("It is not error. Successfully loaded %d metrics from Redis", len(keys))
-
-			// 继续处理当前请求的指标写入
-			writeMetric(ctx, config)
+			// 继续处理当前请求（关键改造）
+			if writeMetric(ctx, config) {
+				// writeMetric发起了异步操作，不需要额外操作
+				return
+			}
 			proxywasm.ResumeHttpResponse()
 		})
 
 		if returnErr != nil {
 			log.Errorf("Failed to execute Redis script: %v", returnErr)
 			config.metricsLoaded.Store(true)
-			writeMetric(ctx, config)
+
+			// 继续处理当前请求
+			if writeMetric(ctx, config) {
+				return types.DataStopIterationAndWatermark
+			}
 			return types.ActionContinue
 		}
 
 		return types.DataStopIterationAndWatermark
+	} else {
+		// 正常流程：处理指标写入
+		if writeMetric(ctx, config) {
+			return types.DataStopIterationAndWatermark
+		}
+		return types.ActionContinue
 	}
-
-	writeMetric(ctx, config)
-	return types.ActionContinue
 }
 
 // fetches the tracing span value from the specified source.
@@ -640,81 +632,198 @@ func setSpanAttribute(key string, value interface{}) {
 	}
 }
 
-func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig) {
-	// Generate usage metrics
+// writeMetric 返回是否发起了异步Redis操作（需要暂停HTTP流程）
+func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig) bool {
+	// 1. 生成需要更新的指标列表
 	var ok bool
 	var route, cluster, model string
 	consumer := ctx.GetStringContext(ConsumerKey, "none")
 	route, ok = ctx.GetContext(RouteName).(string)
 	if !ok {
-		log.Warnf("RouteName typd assert failed, skip metric record")
-		return
+		log.Warnf("RouteName type assert failed, skip metric record")
+		return false
 	}
 	cluster, ok = ctx.GetContext(ClusterName).(string)
 	if !ok {
-		log.Warnf("ClusterName typd assert failed, skip metric record")
-		return
+		log.Warnf("ClusterName type assert failed, skip metric record")
+		return false
 	}
 
 	if config.disableOpenaiUsage {
-		return
+		return false
 	}
 
 	if ctx.GetUserAttribute(tokenusage.CtxKeyModel) == nil || ctx.GetUserAttribute(tokenusage.CtxKeyInputToken) == nil || ctx.GetUserAttribute(tokenusage.CtxKeyOutputToken) == nil || ctx.GetUserAttribute(tokenusage.CtxKeyTotalToken) == nil {
 		log.Warnf("get usage information failed, skip metric record")
-		return
+		return false
 	}
 	model, ok = ctx.GetUserAttribute(tokenusage.CtxKeyModel).(string)
 	if !ok {
-		log.Warnf("Model typd assert failed, skip metric record")
-		return
+		log.Warnf("Model type assert failed, skip metric record")
+		return false
 	}
+
 	sourceIP := "unknown"
-	sourceIPByAttribute, ok := ctx.GetUserAttribute(SourceIP).(string)
-	if !ok {
-		log.Warnf("attribute 'sourceIP' does not exist or is not a string")
-	} else {
-		sourceIP = sourceIPByAttribute
-		log.Debugf("sourceIP is %v", sourceIP)
+	if sourceIPAttr, ok := ctx.GetUserAttribute(SourceIP).(string); ok {
+		sourceIP = sourceIPAttr
 	}
 
+	// 2. 收集所有需要更新的指标
+	type metricUpdate struct {
+		name   string
+		oldVal uint64 // 递增前的值
+		inc    uint64
+	}
+	updates := []metricUpdate{}
+
+	// Token metrics
 	if inputToken, ok := convertToUInt(ctx.GetUserAttribute(tokenusage.CtxKeyInputToken)); ok {
-		config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP, tokenusage.CtxKeyInputToken), inputToken)
+		metricName := generateMetricName(route, cluster, model, consumer, sourceIP, tokenusage.CtxKeyInputToken)
+		oldVal := config.counterValues[metricName] // 获取递增前的值
+		config.incrementCounter(metricName, inputToken)
+		updates = append(updates, metricUpdate{metricName, oldVal, inputToken})
 	} else {
-		log.Warnf("InputToken typd assert failed, skip metric record")
-	}
-	if outputToken, ok := convertToUInt(ctx.GetUserAttribute(tokenusage.CtxKeyOutputToken)); ok {
-		config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP, tokenusage.CtxKeyOutputToken), outputToken)
-	} else {
-		log.Warnf("OutputToken typd assert failed, skip metric record")
-	}
-	if totalToken, ok := convertToUInt(ctx.GetUserAttribute(tokenusage.CtxKeyTotalToken)); ok {
-		config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP, tokenusage.CtxKeyTotalToken), totalToken)
-	} else {
-		log.Warnf("TotalToken typd assert failed, skip metric record")
+		log.Warnf("InputToken type assert failed, skip metric record")
 	}
 
-	// Generate duration metrics
-	var llmFirstTokenDuration, llmServiceDuration uint64
-	// Is stream response
+	if outputToken, ok := convertToUInt(ctx.GetUserAttribute(tokenusage.CtxKeyOutputToken)); ok {
+		metricName := generateMetricName(route, cluster, model, consumer, sourceIP, tokenusage.CtxKeyOutputToken)
+		oldVal := config.counterValues[metricName]
+		config.incrementCounter(metricName, outputToken)
+		updates = append(updates, metricUpdate{metricName, oldVal, outputToken})
+	} else {
+		log.Warnf("OutputToken type assert failed, skip metric record")
+	}
+
+	if totalToken, ok := convertToUInt(ctx.GetUserAttribute(tokenusage.CtxKeyTotalToken)); ok {
+		metricName := generateMetricName(route, cluster, model, consumer, sourceIP, tokenusage.CtxKeyTotalToken)
+		oldVal := config.counterValues[metricName]
+		config.incrementCounter(metricName, totalToken)
+		updates = append(updates, metricUpdate{metricName, oldVal, totalToken})
+	} else {
+		log.Warnf("TotalToken type assert failed, skip metric record")
+	}
+
+	// 3. 处理耗时指标
 	if ctx.GetUserAttribute(LLMFirstTokenDuration) != nil {
-		llmFirstTokenDuration, ok = convertToUInt(ctx.GetUserAttribute(LLMFirstTokenDuration))
-		if !ok {
-			log.Warnf("LLMFirstTokenDuration typd assert failed")
-			return
+		if llmFirstTokenDuration, ok := convertToUInt(ctx.GetUserAttribute(LLMFirstTokenDuration)); ok {
+			metricName := generateMetricName(route, cluster, model, consumer, sourceIP, LLMFirstTokenDuration)
+			oldVal := config.counterValues[metricName]
+			config.incrementCounter(metricName, llmFirstTokenDuration)
+			updates = append(updates, metricUpdate{metricName, oldVal, llmFirstTokenDuration})
+
+			metricName2 := generateMetricName(route, cluster, model, consumer, sourceIP, LLMStreamDurationCount)
+			oldVal2 := config.counterValues[metricName2]
+			config.incrementCounter(metricName2, 1)
+			updates = append(updates, metricUpdate{metricName2, oldVal2, 1})
+		} else {
+			log.Warnf("LLMFirstTokenDuration type assert failed")
 		}
-		config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP, LLMFirstTokenDuration), llmFirstTokenDuration)
-		config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP, LLMStreamDurationCount), 1)
 	}
+
 	if ctx.GetUserAttribute(LLMServiceDuration) != nil {
-		llmServiceDuration, ok = convertToUInt(ctx.GetUserAttribute(LLMServiceDuration))
-		if !ok {
-			log.Warnf("LLMServiceDuration typd assert failed")
-			return
+		if llmServiceDuration, ok := convertToUInt(ctx.GetUserAttribute(LLMServiceDuration)); ok {
+			metricName := generateMetricName(route, cluster, model, consumer, sourceIP, LLMServiceDuration)
+			oldVal := config.counterValues[metricName]
+			config.incrementCounter(metricName, llmServiceDuration)
+			updates = append(updates, metricUpdate{metricName, oldVal, llmServiceDuration})
+
+			metricName2 := generateMetricName(route, cluster, model, consumer, sourceIP, LLMDurationCount)
+			oldVal2 := config.counterValues[metricName2]
+			config.incrementCounter(metricName2, 1)
+			updates = append(updates, metricUpdate{metricName2, oldVal2, 1})
+		} else {
+			log.Warnf("LLMServiceDuration type assert failed")
 		}
-		config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP, LLMServiceDuration), llmServiceDuration)
-		config.incrementCounter(generateMetricName(route, cluster, model, consumer, sourceIP, LLMDurationCount), 1)
 	}
+
+	// 4. 如果没有Redis或没有指标，直接返回
+	if config.RedisClient == nil || !config.RedisClient.Ready() || len(updates) == 0 {
+		return false
+	}
+
+	// 5. 批量Redis同步：Lua脚本在Redis端完成所有原子操作
+	// KEYS[1..N]: metric keys
+	// ARGV[1..N]: oldLocalValues (递增前的值)
+	// ARGV[N+1..2N]: inc values (递增量)
+	luaScript := `
+    local n = #KEYS
+    local results = {}
+    
+    for i = 1, n do
+        local key = KEYS[i]
+        local old_local = tonumber(ARGV[i])
+        local inc = tonumber(ARGV[n + i])
+        
+        -- 读取Redis当前值
+        local redis_val = redis.call('GET', key)
+        if not redis_val then
+            redis_val = 0
+        else
+            redis_val = tonumber(redis_val)
+        end
+        
+        -- 取较大值作为base，计算最终值
+        local final_base = math.max(redis_val, old_local)
+        local final_val = final_base + inc
+        
+        -- 更新Redis
+        redis.call('SET', key, final_val)
+        results[i] = final_val
+    end
+    
+    return results
+    `
+
+	// 准备参数
+	keys := make([]interface{}, len(updates))
+	oldLocalValues := make([]interface{}, len(updates))
+	incValues := make([]interface{}, len(updates))
+
+	for i, u := range updates {
+		keys[i] = u.name
+		oldLocalValues[i] = u.oldVal
+		incValues[i] = u.inc
+	}
+
+	allArgs := append(oldLocalValues, incValues...)
+
+	// 6. 发起异步调用（关键：必须暂停HTTP流程）
+	returnErr := config.RedisClient.Eval(luaScript, len(keys), keys, append(keys, allArgs...), func(response resp.Value) {
+		if response.Error() != nil {
+			log.Debugf("Failed to sync %d metrics to Redis: %v", len(keys), response.Error())
+		} else {
+			// 用Redis返回的最终值，通过补偿增量更新本地计数器
+			results := response.Array()
+			for i, u := range updates {
+				if i < len(results) {
+					if finalVal, err := strconv.ParseUint(results[i].String(), 10, 64); err == nil {
+						// 计算需要补偿的差值（Redis最终值 - 当前本地值）
+						currentLocalVal := config.counterValues[u.name]
+						if finalVal > currentLocalVal {
+							diff := finalVal - currentLocalVal
+							if counter, exists := config.counterMetrics[u.name]; exists {
+								counter.Increment(diff) // 补偿增量
+							}
+							config.counterValues[u.name] = finalVal
+						}
+					}
+				}
+			}
+			log.Debugf("Successfully synced %d metrics to Redis", len(keys))
+		}
+
+		//恢复HTTP流程
+		proxywasm.ResumeHttpResponse()
+	})
+
+	if returnErr != nil {
+		log.Debugf("Failed to execute Redis sync: %v", returnErr)
+		return false // 同步错误，不需要暂停
+	}
+
+	// 成功发起异步调用，需要暂停HTTP流程
+	return true
 }
 
 func convertToUInt(val interface{}) (uint64, bool) {
