@@ -2,8 +2,6 @@ package main
 
 import (
 	"bytes"
-	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -82,23 +80,6 @@ const (
 	RuleAppend  = "append"
 )
 
-type vmContext struct {
-	types.DefaultVMContext // 嵌入默认实现，满足接口要求
-}
-
-type pluginContext struct {
-	types.DefaultPluginContext
-}
-
-type httpContext struct {
-	types.DefaultHttpContext
-}
-
-// 全局变量（VM 级别共享）
-var (
-	instanceID string // 缓存的实例ID
-)
-
 // TracingSpan is the tracing span configuration.
 type Attribute struct {
 	Key                string `json:"key"`
@@ -123,32 +104,6 @@ type AIStatisticsConfig struct {
 	// If disableOpenaiUsage is true, model/input_token/output_token logs will be skipped
 	disableOpenaiUsage bool
 	RedisClient        wrapper.RedisClient
-	metricShortID      string
-}
-
-func (ctx *vmContext) OnVMStart(vmConfigurationSize int) types.OnVMStartStatus {
-	log.Errorf("start OnVMStart")
-	// 获取所有环境变量
-	envVars := os.Environ()
-	for _, env := range envVars {
-		fmt.Println(env)
-		proxywasm.LogErrorf("VM环境变量 - %s", env)
-		log.Errorf("VM环境变量 - %s", env)
-	}
-
-	shortID := generateShortID()
-	instanceID = os.Getenv("POD_NAME") + shortID
-	proxywasm.LogErrorf("VM初始化完成 - ID: %s", instanceID)
-	log.Errorf("VM初始化完成 - ID: %s", instanceID)
-	return types.OnVMStartStatusOK
-}
-
-func (ctx *vmContext) NewPluginContext(contextID uint32) types.PluginContext {
-	return &pluginContext{}
-}
-
-func (ctx *pluginContext) NewHttpContext(contextID uint32) types.HttpContext {
-	return &httpContext{}
 }
 
 func generateMetricName(route, cluster, model, consumer, sourceIP, metricName string) string {
@@ -193,30 +148,11 @@ func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64
 		counter = proxywasm.DefineCounterMetric(metricName)
 		config.counterMetrics[metricName] = counter
 	}
-
 	counter.Increment(inc)
-
+	// 更新redis中的统计信息
 	if config.RedisClient != nil && config.RedisClient.Ready() {
-		envVars := os.Environ()
-		for _, env := range envVars {
-			fmt.Println(env)
-			proxywasm.LogErrorf("wasm环境变量 - %s", env)
-			log.Errorf("wasm环境变量 - %s", env)
-		}
-
 		redisKeyPrefix := "modelcount."
-		podName := os.Getenv("POD_NAME")
-		if podName != "" {
-			log.Errorf("podName is %s", podName)
-			redisKeyPrefix = redisKeyPrefix + podName + "-"
-		}
-		log.Errorf("redisKeyPrefix is %s", redisKeyPrefix)
-		log.Errorf("instanceID is %s", instanceID)
-		log.Errorf("instanceID is %s", config.metricShortID)
-		if config.metricShortID != "" {
-			redisKeyPrefix = redisKeyPrefix + config.metricShortID + "."
-		}
-
+		redisKeyPrefix = redisKeyPrefix + os.Getenv("POD_NAME") + "."
 		err := config.RedisClient.Set(redisKeyPrefix+metricName, counter.Value(), nil)
 		if err != nil {
 			log.Errorf("failed to execute redis set command: %v", err)
@@ -225,7 +161,6 @@ func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64
 }
 
 func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
-	log.Errorf("ai-statistics start parseConfig")
 	// Parse tracing span attributes setting.
 	attributeConfigs := configJson.Get("attributes").Array()
 	config.attributes = make([]Attribute, len(attributeConfigs))
@@ -268,9 +203,6 @@ func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
 		log.Errorf("redisClient is not ready")
 		return errors.New("redisClient is not ready")
 	}
-	shortID := generateShortID()
-	config.metricShortID = shortID
-	log.Errorf("It is not error. Redis metricShortID is %s", config.metricShortID)
 
 	return nil
 }
@@ -766,16 +698,4 @@ func parseIP(source string) string {
 }
 func isValidIP(ip string) bool {
 	return ip != "" && ip != "unknown" && net.ParseIP(ip) != nil
-}
-
-func generateShortID() string {
-	timestamp := time.Now().UnixNano()
-	randBytes := make([]byte, 4)
-	_, _ = rand.Read(randBytes)
-	buf := make([]byte, 12)
-	for i := 0; i < 8; i++ {
-		buf[i] = byte(timestamp >> (8 * i))
-	}
-	copy(buf[8:], randBytes)
-	return base64.URLEncoding.EncodeToString(buf)[:8]
 }
