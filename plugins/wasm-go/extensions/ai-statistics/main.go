@@ -86,6 +86,14 @@ type vmContext struct {
 	types.DefaultVMContext // 嵌入默认实现，满足接口要求
 }
 
+type pluginContext struct {
+	types.DefaultPluginContext
+}
+
+type httpContext struct {
+	types.DefaultHttpContext
+}
+
 // 全局变量（VM 级别共享）
 var (
 	instanceID string // 缓存的实例ID
@@ -119,6 +127,7 @@ type AIStatisticsConfig struct {
 }
 
 func (ctx *vmContext) OnVMStart(vmConfigurationSize int) types.OnVMStartStatus {
+	log.Errorf("start OnVMStart")
 	// 获取所有环境变量
 	envVars := os.Environ()
 	for _, env := range envVars {
@@ -130,7 +139,16 @@ func (ctx *vmContext) OnVMStart(vmConfigurationSize int) types.OnVMStartStatus {
 	shortID := generateShortID()
 	instanceID = os.Getenv("POD_NAME") + shortID
 	proxywasm.LogErrorf("VM初始化完成 - ID: %s", instanceID)
+	log.Errorf("VM初始化完成 - ID: %s", instanceID)
 	return types.OnVMStartStatusOK
+}
+
+func (ctx *vmContext) NewPluginContext(contextID uint32) types.PluginContext {
+	return &pluginContext{}
+}
+
+func (ctx *pluginContext) NewHttpContext(contextID uint32) types.HttpContext {
+	return &httpContext{}
 }
 
 func generateMetricName(route, cluster, model, consumer, sourceIP, metricName string) string {
@@ -188,15 +206,16 @@ func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64
 
 		redisKeyPrefix := "modelcount."
 		podName := os.Getenv("POD_NAME")
-		if podName == "" {
-			log.Errorf("failed to get pod name")
-			redisKeyPrefix = redisKeyPrefix + "."
-		} else {
+		if podName != "" {
 			log.Errorf("podName is %s", podName)
-			redisKeyPrefix = redisKeyPrefix + podName + "."
+			redisKeyPrefix = redisKeyPrefix + podName + "-"
 		}
 		log.Errorf("redisKeyPrefix is %s", redisKeyPrefix)
 		log.Errorf("instanceID is %s", instanceID)
+		log.Errorf("instanceID is %s", config.metricShortID)
+		if config.metricShortID != "" {
+			redisKeyPrefix = redisKeyPrefix + config.metricShortID + "."
+		}
 
 		err := config.RedisClient.Set(redisKeyPrefix+metricName, counter.Value(), nil)
 		if err != nil {
@@ -236,18 +255,22 @@ func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
 	config.disableOpenaiUsage = configJson.Get("disable_openai_usage").Bool()
 
 	redisConfig := configJson.Get("redis")
-	if redisConfig.Exists() {
-		err := InitRedisClusterClient(redisConfig, config)
-		if err != nil {
-			log.Errorf("Failed to initialize Redis: %v", err)
-			return err
-		}
-		if config.RedisClient != nil && config.RedisClient.Ready() {
-			log.Info("Redis initialized successfully, metrics will be loaded on first use")
-		}
-		config.metricShortID = generateShortID()
-		log.Infof("Redis metricShortID is %s", config.metricShortID)
+	if !redisConfig.Exists() {
+		log.Errorf("redis config not exists error")
+		return errors.New("redis config not exists error")
 	}
+	err := InitRedisClusterClient(redisConfig, config)
+	if err != nil {
+		log.Errorf("Failed to initialize Redis: %v", err)
+		return err
+	}
+	if config.RedisClient == nil || !config.RedisClient.Ready() {
+		log.Errorf("redisClient is not ready")
+		return errors.New("redisClient is not ready")
+	}
+	shortID := generateShortID()
+	config.metricShortID = shortID
+	log.Errorf("It is not error. Redis metricShortID is %s", config.metricShortID)
 
 	return nil
 }
