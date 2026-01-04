@@ -6,9 +6,10 @@ import (
 	"strings"
 
 	"github.com/alibaba/higress/plugins/wasm-go/extensions/ai-cache/config"
-	"github.com/alibaba/higress/plugins/wasm-go/pkg/wrapper"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
+	"github.com/higress-group/wasm-go/pkg/log"
+	"github.com/higress-group/wasm-go/pkg/wrapper"
 	"github.com/tidwall/gjson"
 )
 
@@ -22,9 +23,13 @@ const (
 	STREAM_CONTEXT_KEY          = "stream"
 	SKIP_CACHE_HEADER           = "x-higress-skip-ai-cache"
 	ERROR_PARTIAL_MESSAGE_KEY   = "errorPartialMessage"
+
+	DEFAULT_MAX_BODY_BYTES uint32 = 100 * 1024 * 1024
 )
 
-func main() {
+func main() {}
+
+func init() {
 	// CreateClient()
 	wrapper.SetCtx(
 		PLUGIN_NAME,
@@ -36,7 +41,7 @@ func main() {
 	)
 }
 
-func parseConfig(json gjson.Result, c *config.PluginConfig, log wrapper.Log) error {
+func parseConfig(json gjson.Result, c *config.PluginConfig, log log.Log) error {
 	// config.EmbeddingProviderConfig.FromJson(json.Get("embeddingProvider"))
 	// config.VectorDatabaseProviderConfig.FromJson(json.Get("vectorBaseProvider"))
 	// config.RedisConfig.FromJson(json.Get("redis"))
@@ -52,7 +57,8 @@ func parseConfig(json gjson.Result, c *config.PluginConfig, log wrapper.Log) err
 	return nil
 }
 
-func onHttpRequestHeaders(ctx wrapper.HttpContext, c config.PluginConfig, log wrapper.Log) types.Action {
+func onHttpRequestHeaders(ctx wrapper.HttpContext, c config.PluginConfig, log log.Log) types.Action {
+	ctx.DisableReroute()
 	skipCache, _ := proxywasm.GetHttpRequestHeader(SKIP_CACHE_HEADER)
 	if skipCache == "on" {
 		ctx.SetContext(SKIP_CACHE_HEADER, struct{}{})
@@ -69,13 +75,14 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, c config.PluginConfig, log wr
 		ctx.DontReadRequestBody()
 		return types.ActionContinue
 	}
+	ctx.SetRequestBodyBufferLimit(DEFAULT_MAX_BODY_BYTES)
 	_ = proxywasm.RemoveHttpRequestHeader("Accept-Encoding")
 	// The request has a body and requires delaying the header transmission until a cache miss occurs,
 	// at which point the header should be sent.
 	return types.HeaderStopIteration
 }
 
-func onHttpRequestBody(ctx wrapper.HttpContext, c config.PluginConfig, body []byte, log wrapper.Log) types.Action {
+func onHttpRequestBody(ctx wrapper.HttpContext, c config.PluginConfig, body []byte, log log.Log) types.Action {
 
 	bodyJson := gjson.ParseBytes(body)
 	// TODO: It may be necessary to support stream mode determination for different LLM providers.
@@ -101,11 +108,11 @@ func onHttpRequestBody(ctx wrapper.HttpContext, c config.PluginConfig, body []by
 		key = strings.Join(userMessages, "\n")
 	} else if c.CacheKeyStrategy == config.CACHE_KEY_STRATEGY_DISABLED {
 		log.Info("[onHttpRequestBody] cache key strategy is disabled")
-		ctx.DontReadRequestBody()
+		ctx.DontReadResponseBody()
 		return types.ActionContinue
 	} else {
 		log.Warnf("[onHttpRequestBody] unknown cache key strategy: %s", c.CacheKeyStrategy)
-		ctx.DontReadRequestBody()
+		ctx.DontReadResponseBody()
 		return types.ActionContinue
 	}
 
@@ -125,30 +132,33 @@ func onHttpRequestBody(ctx wrapper.HttpContext, c config.PluginConfig, body []by
 	return types.ActionPause
 }
 
-func onHttpResponseHeaders(ctx wrapper.HttpContext, c config.PluginConfig, log wrapper.Log) types.Action {
+func onHttpResponseHeaders(ctx wrapper.HttpContext, c config.PluginConfig, log log.Log) types.Action {
 	skipCache := ctx.GetContext(SKIP_CACHE_HEADER)
 	if skipCache != nil {
+		ctx.SetUserAttribute("cache_status", "skip")
+		ctx.WriteUserAttributeToLogWithKey(wrapper.AILogKey)
 		ctx.DontReadResponseBody()
 		return types.ActionContinue
+	}
+	if ctx.GetContext(CACHE_KEY_CONTEXT_KEY) != nil {
+		ctx.SetUserAttribute("cache_status", "miss")
+		ctx.WriteUserAttributeToLogWithKey(wrapper.AILogKey)
 	}
 	contentType, _ := proxywasm.GetHttpResponseHeader("content-type")
 	if strings.Contains(contentType, "text/event-stream") {
 		ctx.SetContext(STREAM_CONTEXT_KEY, struct{}{})
-	}
-
-	if ctx.GetContext(ERROR_PARTIAL_MESSAGE_KEY) != nil {
-		ctx.DontReadResponseBody()
-		return types.ActionContinue
+	} else {
+		ctx.SetResponseBodyBufferLimit(DEFAULT_MAX_BODY_BYTES)
 	}
 
 	return types.ActionContinue
 }
 
-func onHttpResponseBody(ctx wrapper.HttpContext, c config.PluginConfig, chunk []byte, isLastChunk bool, log wrapper.Log) []byte {
+func onHttpResponseBody(ctx wrapper.HttpContext, c config.PluginConfig, chunk []byte, isLastChunk bool, log log.Log) []byte {
 	log.Debugf("[onHttpResponseBody] is last chunk: %v", isLastChunk)
 	log.Debugf("[onHttpResponseBody] chunk: %s", string(chunk))
 
-	if ctx.GetContext(TOOL_CALLS_CONTEXT_KEY) != nil {
+	if ctx.GetContext(TOOL_CALLS_CONTEXT_KEY) != nil || ctx.GetContext(ERROR_PARTIAL_MESSAGE_KEY) != nil {
 		return chunk
 	}
 
@@ -158,22 +168,26 @@ func onHttpResponseBody(ctx wrapper.HttpContext, c config.PluginConfig, chunk []
 		return chunk
 	}
 
+	stream := ctx.GetContext(STREAM_CONTEXT_KEY)
+	var err error
 	if !isLastChunk {
-		if err := handleNonLastChunk(ctx, c, chunk, log); err != nil {
+		if stream == nil {
+			err = handleNonStreamChunk(ctx, c, chunk, log)
+		} else {
+			err = handleStreamChunk(ctx, c, unifySSEChunk(chunk), log)
+		}
+		if err != nil {
 			log.Errorf("[onHttpResponseBody] handle non last chunk failed, error: %v", err)
 			// Set an empty struct in the context to indicate an error in processing the partial message
 			ctx.SetContext(ERROR_PARTIAL_MESSAGE_KEY, struct{}{})
 		}
 		return chunk
 	}
-
-	stream := ctx.GetContext(STREAM_CONTEXT_KEY)
 	var value string
-	var err error
 	if stream == nil {
 		value, err = processNonStreamLastChunk(ctx, c, chunk, log)
 	} else {
-		value, err = processStreamLastChunk(ctx, c, chunk, log)
+		value, err = processStreamLastChunk(ctx, c, unifySSEChunk(chunk), log)
 	}
 
 	if err != nil {

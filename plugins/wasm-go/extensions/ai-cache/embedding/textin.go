@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/alibaba/higress/plugins/wasm-go/pkg/wrapper"
+	"github.com/higress-group/wasm-go/pkg/log"
+	"github.com/higress-group/wasm-go/pkg/wrapper"
+	"github.com/tidwall/gjson"
 )
 
 const (
@@ -20,14 +22,34 @@ const (
 type textInProviderInitializer struct {
 }
 
-func (t *textInProviderInitializer) ValidateConfig(config ProviderConfig) error {
-	if config.textinAppId == "" {
-		return errors.New("embedding service TextIn App ID is required")
+var textInConfig textInProviderConfig
+
+type textInProviderConfig struct {
+	//@Title zh-CN TextIn x-ti-app-id
+	// @Description zh-CN 仅适用于 TextIn 服务。参考 https://www.textin.com/document/acge_text_embedding
+	textinAppId string
+	//@Title zh-CN TextIn x-ti-secret-code
+	// @Description zh-CN 仅适用于 TextIn 服务。参考 https://www.textin.com/document/acge_text_embedding
+	textinSecretCode string
+	//@Title zh-CN TextIn request matryoshka_dim
+	// @Description zh-CN 仅适用于 TextIn 服务, 指定返回的向量维度。参考 https://www.textin.com/document/acge_text_embedding
+	textinMatryoshkaDim int
+}
+
+func (c *textInProviderInitializer) InitConfig(json gjson.Result) {
+	textInConfig.textinAppId = json.Get("textinAppId").String()
+	textInConfig.textinSecretCode = json.Get("textinSecretCode").String()
+	textInConfig.textinMatryoshkaDim = int(json.Get("textinMatryoshkaDim").Int())
+}
+
+func (c *textInProviderInitializer) ValidateConfig() error {
+	if textInConfig.textinAppId == "" {
+		return errors.New("textinAppId is required")
 	}
-	if config.textinSecretCode == "" {
-		return errors.New("embedding service TextIn Secret Code is required")
+	if textInConfig.textinSecretCode == "" {
+		return errors.New("textinSecretCode is required")
 	}
-	if config.textinMatryoshkaDim == 0 {
+	if textInConfig.textinMatryoshkaDim == 0 {
 		return errors.New("embedding service TextIn Matryoshka Dim is required")
 	}
 	return nil
@@ -62,7 +84,7 @@ type TextInResponse struct {
 }
 
 type TextInResult struct {
-	Embeddings    [][]float64 `json:"embedding"` 
+	Embeddings    [][]float64 `json:"embedding"`
 	MatryoshkaDim int         `json:"matryoshka_dim"`
 }
 
@@ -76,11 +98,11 @@ type TIProvider struct {
 	client wrapper.HttpClient
 }
 
-func (t *TIProvider) constructParameters(texts []string, log wrapper.Log) (string, [][2]string, []byte, error) {
+func (t *TIProvider) constructParameters(texts []string) (string, [][2]string, []byte, error) {
 
 	data := TextInEmbeddingRequest{
 		Input:         texts,
-		MatryoshkaDim: t.config.textinMatryoshkaDim,
+		MatryoshkaDim: textInConfig.textinMatryoshkaDim,
 	}
 
 	requestBody, err := json.Marshal(data)
@@ -89,20 +111,20 @@ func (t *TIProvider) constructParameters(texts []string, log wrapper.Log) (strin
 		return "", nil, nil, err
 	}
 
-	if t.config.textinAppId == "" {
+	if textInConfig.textinAppId == "" {
 		err := errors.New("textinAppId is empty")
 		log.Errorf("failed to construct headers: %v", err)
 		return "", nil, nil, err
 	}
-	if t.config.textinSecretCode == "" {
+	if textInConfig.textinSecretCode == "" {
 		err := errors.New("textinSecretCode is empty")
 		log.Errorf("failed to construct headers: %v", err)
 		return "", nil, nil, err
 	}
 
 	headers := [][2]string{
-		{"x-ti-app-id", t.config.textinAppId},
-		{"x-ti-secret-code", t.config.textinSecretCode},
+		{"x-ti-app-id", textInConfig.textinAppId},
+		{"x-ti-secret-code", textInConfig.textinSecretCode},
 		{"Content-Type", "application/json"},
 	}
 
@@ -121,9 +143,8 @@ func (t *TIProvider) parseTextEmbedding(responseBody []byte) (*TextInResponse, e
 func (t *TIProvider) GetEmbedding(
 	queryString string,
 	ctx wrapper.HttpContext,
-	log wrapper.Log,
 	callback func(emb []float64, err error)) error {
-	embUrl, embHeaders, embRequestBody, err := t.constructParameters([]string{queryString}, log)
+	embUrl, embHeaders, embRequestBody, err := t.constructParameters([]string{queryString})
 	if err != nil {
 		log.Errorf("failed to construct parameters: %v", err)
 		return err

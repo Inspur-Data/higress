@@ -30,7 +30,7 @@ LLM 结果缓存插件，默认配置方式可以直接用于 openai 协议的�
 
 ## 配置说明
 
-本插件同时支持基于向量数据库的语义化缓存和基于字符串匹配的缓存方法，如果同时配置了向量数据库和缓存数据库，优先使用向量数据库。
+本插件同时支持基于向量数据库的语义化缓存和基于字符串匹配的缓存方法，如果同时配置了向量数据库和缓存数据库，优先使用缓存数据库，未命中场景下使用向量数据库能力。
 
 *Note*: 向量数据库(vector) 和 缓存数据库(cache) 不能同时为空，否则本插件无法提供缓存服务。
 
@@ -60,7 +60,7 @@ LLM 结果缓存插件，默认配置方式可以直接用于 openai 协议的�
 | vector.apiKey | string | optional | ""  | 向量存储服务 API Key |
 | vector.topK | int | optional | 1 | 返回TopK结果，默认为 1 |
 | vector.timeout | uint32 | optional | 10000 | 请求向量存储服务的超时时间，单位为毫秒。默认值是10000，即10秒 |
-| vector.collectionID | string | optional | "" |  dashvector 向量存储服务 Collection ID |
+| vector.collectionID | string | optional | "" | 向量存储服务 Collection ID |
 | vector.threshold | float64 | optional | 1000 | 向量相似度度量阈值 |
 | vector.thresholdRelation | string | optional | lt | 相似度度量方式有 `Cosine`, `DotProduct`, `Euclidean` 等，前两者值越大相似度越高，后者值越小相似度越高。对于 `Cosine` 和 `DotProduct` 选择 `gt`，对于 `Euclidean` 则选择 `lt`。默认为 `lt`，所有条件包括 `lt` (less than，小于)、`lte` (less than or equal to，小等于)、`gt` (greater than，大于)、`gte` (greater than or equal to，大等于) |
 
@@ -86,7 +86,8 @@ LLM 结果缓存插件，默认配置方式可以直接用于 openai 协议的�
 | cache.password | string | optional | "" | 缓存服务密码 |
 | cache.timeout | uint32 | optional | 10000 | 缓存服务的超时时间，单位为毫秒。默认值是10000，即10秒 |
 | cache.cacheTTL | int | optional | 0 | 缓存过期时间，单位为秒。默认值是 0，即 永不过期|
-| cacheKeyPrefix | string | optional | "higress-ai-cache:" | 缓存 Key 的前缀，默认值为 "higress-ai-cache:" |
+| cache.cacheKeyPrefix | string | optional | "higress-ai-cache:" | 缓存 Key 的前缀，默认值为 "higress-ai-cache:" |
+| cache.database | int | optional | 0 | 使用的数据库id，仅限redis，例如配置为1，对应`SELECT 1` |
 
 
 ## 其他配置
@@ -99,6 +100,103 @@ LLM 结果缓存插件，默认配置方式可以直接用于 openai 协议的�
 | responseTemplate | string | optional | `{"id":"ai-cache.hit","choices":[{"index":0,"message":{"role":"assistant","content":%s},"finish_reason":"stop"}],"model":"gpt-4o","object":"chat.completion","usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}` | 返回 HTTP 响应的模版，用 %s 标记需要被 cache value 替换的部分 |
 | streamResponseTemplate | string | optional | `data:{"id":"ai-cache.hit","choices":[{"index":0,"delta":{"role":"assistant","content":%s},"finish_reason":"stop"}],"model":"gpt-4o","object":"chat.completion","usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}\n\ndata:[DONE]\n\n` | 返回流式 HTTP 响应的模版，用 %s 标记需要被 cache value 替换的部分 |
 
+## 文本向量化提供商特有配置
+
+### Azure OpenAI
+
+Azure OpenAI 所对应的 `embedding.type` 为 `azure`。它需要提前创建[Azure OpenAI 账户](https://portal.azure.com/#view/Microsoft_Azure_ProjectOxford/CognitiveServicesHub/~/overview)，然后您需要在[Azure AI Foundry](https://ai.azure.com/resource/deployments)中挑选一个模型并将其部署，点击您部署好的模型，您可以在终结点中看到目标 URI 以及密钥。请将 URI 中的 host 填入`embedding.serviceHost`，密钥填入`apiKey`。
+
+一个完整的 URI 示例为 https://YOUR_RESOURCE_NAME.openai.azure.com/openai/deployments/YOUR_DEPLOYMENT_NAME/embeddings?api-version=2024-10-21，您需要将`YOUR_RESOURCE_NAME.openai.azure.com`填入`embedding.serviceHost`。
+
+它特有的配置字段如下：
+
+| 名称                   | 数据类型 | 填写要求 | 默认值 | 描述    | 填写值                       |
+| ---------------------- | -------- | -------- | ------ | ------- | ---------------------------- |
+| `embedding.apiVersion` | string   | 必填     | -      | api版本 | 获取到的URI中api-version的值 |
+
+需要注意的是您必须要指定`embedding.serviceHost`，如`YOUR_RESOURCE_NAME.openai.azure.com`。模型默认使用了`text-embedding-ada-002`，如需其他模型，请在`embedding.model`中进行指定。
+
+### Cohere
+
+Cohere 所对应的 `embedding.type` 为 `cohere`。它并无特有的配置字段。需要提前创建 [API Key](https://docs.cohere.com/reference/embed)，并将其填入`embedding.apiKey`。
+
+### OpenAI
+
+OpenAI 所对应的 `embedding.type` 为 `openai`。它并无特有的配置字段。需要提前创建 [API Key](https://platform.openai.com/settings/organization/api-keys)，并将其填入`embedding.apiKey`，一个 API Key 的示例为` sk-xxxxxxx`。
+
+### Ollama
+
+Ollama 所对应的 `embedding.type` 为 `ollama`。它并无特有的配置字段。
+
+### Hugging Face
+
+Hugging Face 所对应的 `embedding.type` 为 `huggingface`。它并无特有的配置字段。需要提前创建 [hf_token](https://huggingface.co/blog/getting-started-with-embeddings)，并将其填入`embedding.apiKey`，一个 hf_token 的示例为` hf_xxxxxxx`。
+
+`embedding.model`默认指定为`sentence-transformers/all-MiniLM-L6-v2`
+
+### Textln
+
+Textln 所对应的 `embedding.type` 为 `textln`。它需要提前获取[`app-id` 和`secret-code`](https://www.textin.com/document/acge_text_embedding)。
+
+它特有的配置字段如下：
+
+| 名称                            | 数据类型 | 填写要求 | 默认值 | 描述                 | 填写值             |
+| ------------------------------- | -------- | -------- | ------ | -------------------- | ------------------ |
+| `embedding.textinAppId`         | string   | 必填     | -      | 应用 ID              | 获取的 app-id      |
+| `embedding.textinSecretCode`    | string   | 必填     | -      | 调用 API 所需 Secret | 获取的 secret-code |
+| `embedding.textinMatryoshkaDim` | int      | 必填     | -      | 返回的单个向量长度   |                    |
+
+### 讯飞星火
+
+讯飞星火 所对应的 `embedding.type` 为 `xfyun`。它需要提前创建[应用](https://console.xfyun.cn/services/emb)，获取`APPID`  、`APISecret`和`APIKey`，并将`APIKey`填入`embedding.apiKey`中。
+
+它特有的配置字段如下：
+
+| 名称                  | 数据类型 | 填写要求 | 默认值 | 描述                 | 填写值           |
+| --------------------- | -------- | -------- | ------ | -------------------- | ---------------- |
+| `embedding.appId`     | string   | 必填     | -      | 应用 ID              | 获取的 APPID     |
+| `embedding.apiSecret` | string   | 必填     | -      | 调用 API 所需 Secret | 获取的 APISecret |
+
+## 向量数据库提供商特有配置
+
+### Chroma
+Chroma 所对应的 `vector.type` 为 `chroma`。它并无特有的配置字段。需要提前创建 Collection，并填写 Collection ID 至配置项 `vector.collectionID`，一个 Collection ID 的示例为 `52bbb8b3-724c-477b-a4ce-d5b578214612`。
+
+### DashVector
+DashVector 所对应的 `vector.type` 为 `dashvector`。它并无特有的配置字段。需要提前创建 Collection，并填写 `Collection 名称` 至配置项 `vector.collectionID`。
+
+### ElasticSearch
+ElasticSearch 所对应的 `vector.type` 为 `elasticsearch`。需要提前创建 Index 并填写 Index Name 至配置项 `vector.collectionID` 。
+
+当前依赖于 [KNN](https://www.elastic.co/guide/en/elasticsearch/reference/current/knn-search.html) 方法，请保证 ES 版本支持 `KNN`，当前已在 `8.16` 版本测试。
+
+它特有的配置字段如下：
+| 名称              | 数据类型 | 填写要求 | 默认值 | 描述                                                                          |
+|-------------------|----------|----------|--------|-------------------------------------------------------------------------------|
+| `vector.esUsername` | string   | 非必填   | -      | ElasticSearch 用户名 |
+| `vector.esPassword` | string | 非必填 | - | ElasticSearch 密码 |
+
+
+`vector.esUsername` 和 `vector.esPassword` 用于 Basic 认证。同时也支持 Api Key 认证，当填写了 `vector.apiKey` 时，则启用 Api Key 认证，如果使用 SaaS 版本需要填写 `encoded` 的值。
+
+### Milvus
+Milvus 所对应的 `vector.type` 为 `milvus`。它并无特有的配置字段。需要提前创建 Collection，并填写 Collection Name 至配置项 `vector.collectionID`。
+
+### Pinecone
+Pinecone 所对应的 `vector.type` 为 `pinecone`。它并无特有的配置字段。需要提前创建 Index，并填写 Index 访问域名至 `vector.serviceHost`。
+
+Pinecone 中的 `Namespace` 参数通过插件的 `vector.collectionID` 进行配置，如果不填写 `vector.collectionID`，则默认为 Default Namespace。
+
+### Qdrant
+Qdrant 所对应的 `vector.type` 为 `qdrant`。它并无特有的配置字段。需要提前创建 Collection，并填写 Collection Name 至配置项 `vector.collectionID`。
+
+### Weaviate
+Weaviate 所对应的 `vector.type` 为 `weaviate`。它并无特有的配置字段。
+需要提前创建 Collection，并填写 Collection Name 至配置项 `vector.collectionID`。
+
+需要注意的是 Weaviate 会设置首字母自动大写，在填写配置 `collectionID` 的时候需要将首字母设置为大写。
+
+如果使用 SaaS 需要填写 `vector.serviceHost` 参数。
 
 ## 配置示例
 ### 基础配置
@@ -129,6 +227,7 @@ redis:
   serviceName: my_redis.dns
   servicePort: 6379
   timeout: 100
+  database: 1
 ```
 
 ## 进阶用法

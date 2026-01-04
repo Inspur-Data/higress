@@ -6,7 +6,7 @@ import (
 	"github.com/alibaba/higress/plugins/wasm-go/extensions/ai-cache/cache"
 	"github.com/alibaba/higress/plugins/wasm-go/extensions/ai-cache/embedding"
 	"github.com/alibaba/higress/plugins/wasm-go/extensions/ai-cache/vector"
-	"github.com/alibaba/higress/plugins/wasm-go/pkg/wrapper"
+	"github.com/higress-group/wasm-go/pkg/log"
 	"github.com/tidwall/gjson"
 )
 
@@ -28,9 +28,9 @@ type PluginConfig struct {
 	embeddingProvider embedding.Provider
 	vectorProvider    vector.Provider
 
-	embeddingProviderConfig embedding.ProviderConfig
-	vectorProviderConfig    vector.ProviderConfig
-	cacheProviderConfig     cache.ProviderConfig
+	embeddingProviderConfig *embedding.ProviderConfig
+	vectorProviderConfig    *vector.ProviderConfig
+	cacheProviderConfig     *cache.ProviderConfig
 
 	CacheKeyFrom         string
 	CacheValueFrom       string
@@ -46,8 +46,10 @@ type PluginConfig struct {
 	CacheKeyStrategy string
 }
 
-func (c *PluginConfig) FromJson(json gjson.Result, log wrapper.Log) {
-
+func (c *PluginConfig) FromJson(json gjson.Result, log log.Log) {
+	c.embeddingProviderConfig = &embedding.ProviderConfig{}
+	c.vectorProviderConfig = &vector.ProviderConfig{}
+	c.cacheProviderConfig = &cache.ProviderConfig{}
 	c.vectorProviderConfig.FromJson(json.Get("vector"))
 	c.embeddingProviderConfig.FromJson(json.Get("embedding"))
 	c.cacheProviderConfig.FromJson(json.Get("cache"))
@@ -79,15 +81,17 @@ func (c *PluginConfig) FromJson(json gjson.Result, log wrapper.Log) {
 
 	c.StreamResponseTemplate = json.Get("streamResponseTemplate").String()
 	if c.StreamResponseTemplate == "" {
-		c.StreamResponseTemplate = `data:{"id":"from-cache","choices":[{"index":0,"delta":{"role":"assistant","content":"%s"},"finish_reason":"stop"}],"model":"gpt-4o","object":"chat.completion","usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}` + "\n\ndata:[DONE]\n\n"
+		c.StreamResponseTemplate = `data:{"id":"from-cache","choices":[{"index":0,"delta":{"role":"assistant","content":"%s"},"finish_reason":"stop"}],"model":"from-cache","object":"chat.completion","usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}` + "\n\ndata:[DONE]\n\n"
 	}
 	c.ResponseTemplate = json.Get("responseTemplate").String()
 	if c.ResponseTemplate == "" {
-		c.ResponseTemplate = `{"id":"from-cache","choices":[{"index":0,"message":{"role":"assistant","content":"%s"},"finish_reason":"stop"}],"model":"gpt-4o","object":"chat.completion","usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`
+		c.ResponseTemplate = `{"id":"from-cache","choices":[{"index":0,"message":{"role":"assistant","content":"%s"},"finish_reason":"stop"}],"model":"from-cache","object":"chat.completion","usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`
 	}
 
 	if json.Get("enableSemanticCache").Exists() {
 		c.EnableSemanticCache = json.Get("enableSemanticCache").Bool()
+	} else if c.GetVectorProvider() == nil {
+		c.EnableSemanticCache = false // set value to false when no vector provider
 	} else {
 		c.EnableSemanticCache = true // set default value to true
 	}
@@ -138,11 +142,11 @@ func (c *PluginConfig) Validate() error {
 	return nil
 }
 
-func (c *PluginConfig) Complete(log wrapper.Log) error {
+func (c *PluginConfig) Complete(log log.Log) error {
 	var err error
 	if c.embeddingProviderConfig.GetProviderType() != "" {
 		log.Debugf("embedding provider is set to %s", c.embeddingProviderConfig.GetProviderType())
-		c.embeddingProvider, err = embedding.CreateProvider(c.embeddingProviderConfig)
+		c.embeddingProvider, err = embedding.CreateProvider(*c.embeddingProviderConfig)
 		if err != nil {
 			return err
 		}
@@ -152,7 +156,7 @@ func (c *PluginConfig) Complete(log wrapper.Log) error {
 	}
 	if c.cacheProviderConfig.GetProviderType() != "" {
 		log.Debugf("cache provider is set to %s", c.cacheProviderConfig.GetProviderType())
-		c.cacheProvider, err = cache.CreateProvider(c.cacheProviderConfig)
+		c.cacheProvider, err = cache.CreateProvider(*c.cacheProviderConfig, log)
 		if err != nil {
 			return err
 		}
@@ -162,7 +166,7 @@ func (c *PluginConfig) Complete(log wrapper.Log) error {
 	}
 	if c.vectorProviderConfig.GetProviderType() != "" {
 		log.Debugf("vector provider is set to %s", c.vectorProviderConfig.GetProviderType())
-		c.vectorProvider, err = vector.CreateProvider(c.vectorProviderConfig)
+		c.vectorProvider, err = vector.CreateProvider(*c.vectorProviderConfig)
 		if err != nil {
 			return err
 		}
@@ -182,14 +186,14 @@ func (c *PluginConfig) GetVectorProvider() vector.Provider {
 }
 
 func (c *PluginConfig) GetVectorProviderConfig() vector.ProviderConfig {
-	return c.vectorProviderConfig
+	return *c.vectorProviderConfig
 }
 
 func (c *PluginConfig) GetCacheProvider() cache.Provider {
 	return c.cacheProvider
 }
 
-func convertLegacyMapFields(c *PluginConfig, json gjson.Result, log wrapper.Log) {
+func convertLegacyMapFields(c *PluginConfig, json gjson.Result, log log.Log) {
 	keyMap := map[string]string{
 		"cacheKeyFrom.requestBody":         "cacheKeyFrom",
 		"cacheValueFrom.requestBody":       "cacheValueFrom",
@@ -208,7 +212,7 @@ func convertLegacyMapFields(c *PluginConfig, json gjson.Result, log wrapper.Log)
 	}
 }
 
-func setField(c *PluginConfig, fieldName string, value string, log wrapper.Log) {
+func setField(c *PluginConfig, fieldName string, value string, log log.Log) {
 	switch fieldName {
 	case "cacheKeyFrom":
 		c.CacheKeyFrom = value

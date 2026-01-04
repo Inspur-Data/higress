@@ -3,13 +3,19 @@ package vector
 import (
 	"errors"
 
-	"github.com/alibaba/higress/plugins/wasm-go/pkg/wrapper"
+	"github.com/higress-group/wasm-go/pkg/log"
+	"github.com/higress-group/wasm-go/pkg/wrapper"
 	"github.com/tidwall/gjson"
 )
 
 const (
 	PROVIDER_TYPE_DASH_VECTOR = "dashvector"
 	PROVIDER_TYPE_CHROMA      = "chroma"
+	PROVIDER_TYPE_ES          = "elasticsearch"
+	PROVIDER_TYPE_WEAVIATE    = "weaviate"
+	PROVIDER_TYPE_PINECONE    = "pinecone"
+	PROVIDER_TYPE_QDRANT      = "qdrant"
+	PROVIDER_TYPE_MILVUS      = "milvus"
 )
 
 type providerInitializer interface {
@@ -20,7 +26,12 @@ type providerInitializer interface {
 var (
 	providerInitializers = map[string]providerInitializer{
 		PROVIDER_TYPE_DASH_VECTOR: &dashVectorProviderInitializer{},
-		// PROVIDER_TYPE_CHROMA:     &chromaProviderInitializer{},
+		PROVIDER_TYPE_CHROMA:      &chromaProviderInitializer{},
+		PROVIDER_TYPE_ES:          &esProviderInitializer{},
+		PROVIDER_TYPE_WEAVIATE:    &weaviateProviderInitializer{},
+		PROVIDER_TYPE_PINECONE:    &pineconeProviderInitializer{},
+		PROVIDER_TYPE_QDRANT:      &qdrantProviderInitializer{},
+		PROVIDER_TYPE_MILVUS:      &milvusProviderInitializer{},
 	}
 )
 
@@ -40,8 +51,8 @@ type EmbeddingQuerier interface {
 	QueryEmbedding(
 		emb []float64,
 		ctx wrapper.HttpContext,
-		log wrapper.Log,
-		callback func(results []QueryResult, ctx wrapper.HttpContext, log wrapper.Log, err error)) error
+		log log.Log,
+		callback func(results []QueryResult, ctx wrapper.HttpContext, log log.Log, err error)) error
 }
 
 type EmbeddingUploader interface {
@@ -49,8 +60,8 @@ type EmbeddingUploader interface {
 		queryString string,
 		queryEmb []float64,
 		ctx wrapper.HttpContext,
-		log wrapper.Log,
-		callback func(ctx wrapper.HttpContext, log wrapper.Log, err error)) error
+		log log.Log,
+		callback func(ctx wrapper.HttpContext, log log.Log, err error)) error
 }
 
 type AnswerAndEmbeddingUploader interface {
@@ -59,20 +70,16 @@ type AnswerAndEmbeddingUploader interface {
 		queryEmb []float64,
 		answer string,
 		ctx wrapper.HttpContext,
-		log wrapper.Log,
-		callback func(ctx wrapper.HttpContext, log wrapper.Log, err error)) error
+		log log.Log,
+		callback func(ctx wrapper.HttpContext, log log.Log, err error)) error
 }
 
 type StringQuerier interface {
 	QueryString(
 		queryString string,
 		ctx wrapper.HttpContext,
-		log wrapper.Log,
-		callback func(results []QueryResult, ctx wrapper.HttpContext, log wrapper.Log, err error)) error
-}
-
-type SimilarityThresholdProvider interface {
-	GetSimilarityThreshold() float64
+		log log.Log,
+		callback func(results []QueryResult, ctx wrapper.HttpContext, log log.Log, err error)) error
 }
 
 type ProviderConfig struct {
@@ -97,8 +104,8 @@ type ProviderConfig struct {
 	// @Title zh-CN 请求超时
 	// @Description zh-CN 请求向量存储服务的超时时间，单位为毫秒。默认值是10000，即10秒
 	timeout uint32
-	// @Title zh-CN DashVector 向量存储服务 Collection ID
-	// @Description zh-CN DashVector 向量存储服务 Collection ID
+	// @Title zh-CN 向量存储服务 Collection ID
+	// @Description zh-CN 向量存储服务的 Collection ID
 	collectionID string
 	// @Title zh-CN 相似度度量阈值
 	// @Description zh-CN 默认相似度度量阈值，默认为 1000。
@@ -109,6 +116,14 @@ type ProviderConfig struct {
 	// 所以需要允许自定义比较方式，对于 Cosine 和 DotProduct 选择 gt，对于 Euclidean 则选择 lt。
 	// 默认为 lt，所有条件包括 lt (less than，小于)、lte (less than or equal to，小等于)、gt (greater than，大于)、gte (greater than or equal to，大等于)
 	ThresholdRelation string
+
+	// ES 配置
+	// @Title zh-CN ES 用户名
+	// @Description zh-CN ES 用户名
+	esUsername string
+	// @Title zh-CN ES 密码
+	// @Description zh-CN ES 密码
+	esPassword string
 }
 
 func (c *ProviderConfig) GetProviderType() string {
@@ -117,7 +132,6 @@ func (c *ProviderConfig) GetProviderType() string {
 
 func (c *ProviderConfig) FromJson(json gjson.Result) {
 	c.typ = json.Get("type").String()
-	// DashVector
 	c.serviceName = json.Get("serviceName").String()
 	c.serviceHost = json.Get("serviceHost").String()
 	c.servicePort = int64(json.Get("servicePort").Int())
@@ -142,6 +156,10 @@ func (c *ProviderConfig) FromJson(json gjson.Result) {
 	if c.ThresholdRelation == "" {
 		c.ThresholdRelation = "lt"
 	}
+
+	// ES
+	c.esUsername = json.Get("esUsername").String()
+	c.esPassword = json.Get("esPassword").String()
 }
 
 func (c *ProviderConfig) Validate() error {
@@ -151,6 +169,9 @@ func (c *ProviderConfig) Validate() error {
 	initializer, has := providerInitializers[c.typ]
 	if !has {
 		return errors.New("unknown vector database service provider type: " + c.typ)
+	}
+	if !isRelationValid(c.ThresholdRelation) {
+		return errors.New("invalid thresholdRelation: " + c.ThresholdRelation)
 	}
 	if err := initializer.ValidateConfig(*c); err != nil {
 		return err
@@ -164,4 +185,13 @@ func CreateProvider(pc ProviderConfig) (Provider, error) {
 		return nil, errors.New("unknown provider type: " + pc.typ)
 	}
 	return initializer.CreateProvider(pc)
+}
+
+func isRelationValid(relation string) bool {
+	for _, r := range []string{"lt", "lte", "gt", "gte"} {
+		if r == relation {
+			return true
+		}
+	}
+	return false
 }

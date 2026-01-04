@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/alibaba/higress/plugins/wasm-go/pkg/wrapper"
+	"github.com/higress-group/wasm-go/pkg/log"
+	"github.com/higress-group/wasm-go/pkg/wrapper"
+	"github.com/tidwall/gjson"
 )
 
 const (
@@ -17,11 +19,22 @@ const (
 	DASHSCOPE_ENDPOINT           = "/api/v1/services/embeddings/text-embedding/text-embedding"
 )
 
+var dashScopeConfig dashScopeProviderConfig
+
 type dashScopeProviderInitializer struct {
 }
+type dashScopeProviderConfig struct {
+	// @Title zh-CN 文本特征提取服务 API Key
+	// @Description zh-CN 文本特征提取服务 API Key
+	apiKey string
+}
 
-func (d *dashScopeProviderInitializer) ValidateConfig(config ProviderConfig) error {
-	if config.apiKey == "" {
+func (c *dashScopeProviderInitializer) InitConfig(json gjson.Result) {
+	dashScopeConfig.apiKey = json.Get("apiKey").String()
+}
+
+func (c *dashScopeProviderInitializer) ValidateConfig() error {
+	if dashScopeConfig.apiKey == "" {
 		return errors.New("[DashScope] apiKey is required")
 	}
 	return nil
@@ -91,7 +104,7 @@ type DSProvider struct {
 	client wrapper.HttpClient
 }
 
-func (d *DSProvider) constructParameters(texts []string, log wrapper.Log) (string, [][2]string, []byte, error) {
+func (d *DSProvider) constructParameters(texts []string) (string, [][2]string, []byte, error) {
 
 	model := d.config.model
 
@@ -114,14 +127,14 @@ func (d *DSProvider) constructParameters(texts []string, log wrapper.Log) (strin
 		return "", nil, nil, err
 	}
 
-	if d.config.apiKey == "" {
+	if dashScopeConfig.apiKey == "" {
 		err := errors.New("dashScopeKey is empty")
 		log.Errorf("failed to construct headers: %v", err)
 		return "", nil, nil, err
 	}
 
 	headers := [][2]string{
-		{"Authorization", "Bearer " + d.config.apiKey},
+		{"Authorization", "Bearer " + dashScopeConfig.apiKey},
 		{"Content-Type", "application/json"},
 	}
 
@@ -147,9 +160,8 @@ func (d *DSProvider) parseTextEmbedding(responseBody []byte) (*Response, error) 
 func (d *DSProvider) GetEmbedding(
 	queryString string,
 	ctx wrapper.HttpContext,
-	log wrapper.Log,
 	callback func(emb []float64, err error)) error {
-	embUrl, embHeaders, embRequestBody, err := d.constructParameters([]string{queryString}, log)
+	embUrl, embHeaders, embRequestBody, err := d.constructParameters([]string{queryString})
 	if err != nil {
 		log.Errorf("failed to construct parameters: %v", err)
 		return err

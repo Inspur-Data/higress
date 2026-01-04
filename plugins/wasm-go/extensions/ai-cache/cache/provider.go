@@ -2,8 +2,10 @@ package cache
 
 import (
 	"errors"
+	"strings"
 
-	"github.com/alibaba/higress/plugins/wasm-go/pkg/wrapper"
+	"github.com/higress-group/wasm-go/pkg/log"
+	"github.com/higress-group/wasm-go/pkg/wrapper"
 	"github.com/tidwall/gjson"
 )
 
@@ -14,7 +16,7 @@ const (
 
 type providerInitializer interface {
 	ValidateConfig(ProviderConfig) error
-	CreateProvider(ProviderConfig) (Provider, error)
+	CreateProvider(ProviderConfig, log.Log) (Provider, error)
 }
 
 var (
@@ -51,6 +53,9 @@ type ProviderConfig struct {
 	// @Title 缓存 Key 前缀
 	// @Description 缓存 Key 的前缀，默认值为 "higressAiCache:"
 	cacheKeyPrefix string
+	// @Title redis database
+	// @Description 指定 redis 的 database，默认使用0
+	database int
 }
 
 func (c *ProviderConfig) GetProviderType() string {
@@ -62,7 +67,12 @@ func (c *ProviderConfig) FromJson(json gjson.Result) {
 	c.serviceName = json.Get("serviceName").String()
 	c.servicePort = int(json.Get("servicePort").Int())
 	if !json.Get("servicePort").Exists() {
-		c.servicePort = 6379
+		if strings.HasSuffix(c.serviceName, ".static") {
+			// use default logic port which is 80 for static service
+			c.servicePort = 80
+		} else {
+			c.servicePort = 6379
+		}
 	}
 	c.serviceHost = json.Get("serviceHost").String()
 	c.username = json.Get("username").String()
@@ -73,6 +83,7 @@ func (c *ProviderConfig) FromJson(json gjson.Result) {
 	if !json.Get("password").Exists() {
 		c.password = ""
 	}
+	c.database = int(json.Get("database").Int())
 	c.timeout = uint32(json.Get("timeout").Int())
 	if !json.Get("timeout").Exists() {
 		c.timeout = 10000
@@ -118,12 +129,12 @@ func (c *ProviderConfig) Validate() error {
 	return nil
 }
 
-func CreateProvider(pc ProviderConfig) (Provider, error) {
+func CreateProvider(pc ProviderConfig, log log.Log) (Provider, error) {
 	initializer, has := providerInitializers[pc.typ]
 	if !has {
 		return nil, errors.New("unknown provider type: " + pc.typ)
 	}
-	return initializer.CreateProvider(pc)
+	return initializer.CreateProvider(pc, log)
 }
 
 type Provider interface {
