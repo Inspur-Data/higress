@@ -301,7 +301,8 @@ func loadRulesFromAPI() error {
 
 	proxywasm.LogDebug("[Rules] Dispatching HTTP call to rules API...")
 	_, err := proxywasm.DispatchHttpCall(
-		clusterName,  // ← 使用正确的 Cluster 名称
+		//clusterName,  // ← 使用正确的 Cluster 名称
+		domain,
 		headers,
 		nil,
 		nil,
