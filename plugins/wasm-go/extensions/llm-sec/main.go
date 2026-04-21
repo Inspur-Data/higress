@@ -9,10 +9,10 @@ import (
 	"sync"
 	"time"
 
-	logs "github.com/higress-group/wasm-go/pkg/log"
-	"github.com/higress-group/wasm-go/pkg/wrapper"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
+	logs "github.com/higress-group/wasm-go/pkg/log"
+	"github.com/higress-group/wasm-go/pkg/wrapper"
 	"github.com/tidwall/gjson"
 )
 
@@ -38,7 +38,7 @@ type RedlineRule struct {
 	Answer       string    `json:"answer"`
 	Threshold    float64   `json:"threshold"`
 	Enabled      bool      `json:"enabled"`
-	Vector       []float64 `json:"vector,omitempty"`       // 预计算的向量
+	Vector       []float64 `json:"vector,omitempty"`        // 预计算的向量
 	UseEmbedding bool      `json:"use_embedding,omitempty"` // 是否使用嵌入模型
 }
 
@@ -104,24 +104,24 @@ type PluginConfig struct {
 	RuleAPIServicePath   string `json:"rule_api_service_path,omitempty"`
 
 	// 嵌入服务配置（兼容旧格式）
-	EmbeddingEnabled  bool   `json:"embedding_enabled,omitempty"`
-	EmbeddingDomain   string `json:"embedding_domain,omitempty"`
-	EmbeddingPort     int    `json:"embedding_port,omitempty"`
-	EmbeddingAPIPath  string `json:"embedding_api_path,omitempty"`
-	EmbeddingModel    string `json:"embedding_model,omitempty"`
-	EmbeddingTimeout  int    `json:"embedding_timeout,omitempty"`
+	EmbeddingEnabled bool   `json:"embedding_enabled,omitempty"`
+	EmbeddingDomain  string `json:"embedding_domain,omitempty"`
+	EmbeddingPort    int    `json:"embedding_port,omitempty"`
+	EmbeddingAPIPath string `json:"embedding_api_path,omitempty"`
+	EmbeddingModel   string `json:"embedding_model,omitempty"`
+	EmbeddingTimeout int    `json:"embedding_timeout,omitempty"`
 }
 
 // ============ 全局变量 ============
 
 var (
-	config        PluginConfig
-	rulesCache    *RulesCache
-	cacheMutex    sync.RWMutex
-	regexCache    map[string]*regexp.Regexp
-	regexMutex    sync.RWMutex
-	vectorCache   map[string][]float64 // 向量缓存：文本 -> 向量
-	vectorMutex   sync.RWMutex
+	config      PluginConfig
+	rulesCache  *RulesCache
+	cacheMutex  sync.RWMutex
+	regexCache  map[string]*regexp.Regexp
+	regexMutex  sync.RWMutex
+	vectorCache map[string][]float64 // 向量缓存：文本 -> 向量
+	vectorMutex sync.RWMutex
 )
 
 // ============ 配置辅助方法 ============
@@ -268,7 +268,7 @@ func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
 		config.SimilarityMode = "hybrid"
 	}
 
-	log.Infof("Plugin config loaded: check_request=%v, similarity_mode=%s", 
+	log.Infof("Plugin config loaded: check_request=%v, similarity_mode=%s",
 		config.CheckRequest, config.SimilarityMode)
 
 	return nil
@@ -279,33 +279,37 @@ func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
 // loadRulesFromAPI 从外部 API 加载规则
 func loadRulesFromAPI() error {
 	proxywasm.LogInfo("[Rules] Starting to load rules from API...")
-	
+
 	// 获取规则服务配置
 	domain := config.getRuleServiceDomain()
 	port := config.getRuleServicePort()
 	path := config.getRuleServicePath()
-	
+
 	proxywasm.LogInfof("[Rules] API endpoint: %s:%d%s", domain, port, path)
-	
-	cacheMutex.Lock()
-	defer cacheMutex.Unlock()
+
+	// 构造 Envoy Cluster 名称 (格式: outbound|<Port>||<FQDN>)
+	clusterName := fmt.Sprintf("outbound|%d||%s.dns", port, domain)
+	proxywasm.LogInfof("[Rules] Cluster name: %s", clusterName)
 
 	// 使用 proxywasm 进行 HTTP 调用
 	headers := [][2]string{
+		{":method", "GET"},
+		{":path", path},
+		{":authority", domain},
 		{"Content-Type", "application/json"},
 	}
 
 	proxywasm.LogDebug("[Rules] Dispatching HTTP call to rules API...")
 	_, err := proxywasm.DispatchHttpCall(
-		domain,
+		clusterName,  // ← 使用正确的 Cluster 名称
 		headers,
 		nil,
 		nil,
 		APICallTimeout,
 		func(numHeaders, bodySize, numTrailers int) {
-			proxywasm.LogDebugf("[Rules] HTTP call completed: headers=%d, body=%d, trailers=%d", 
+			proxywasm.LogDebugf("[Rules] HTTP call completed: headers=%d, body=%d, trailers=%d",
 				numHeaders, bodySize, numTrailers)
-			
+
 			respBody, getErr := proxywasm.GetHttpCallResponseBody(0, bodySize)
 			if getErr != nil {
 				proxywasm.LogErrorf("[Rules] Failed to get response body: %v", getErr)
@@ -313,7 +317,7 @@ func loadRulesFromAPI() error {
 			}
 
 			proxywasm.LogDebugf("[Rules] Response body size: %d bytes", len(respBody))
-			
+
 			// 解析响应
 			if err := json.Unmarshal(respBody, rulesCache); err != nil {
 				proxywasm.LogErrorf("[Rules] Failed to parse API response: %v", err)
@@ -322,7 +326,7 @@ func loadRulesFromAPI() error {
 			}
 
 			proxywasm.LogInfof("[Rules] Successfully parsed rules: redline=%d, vocabularies=%d, attacks=%d, masking=%d",
-				len(rulesCache.Redline), len(rulesCache.Vocabularies), 
+				len(rulesCache.Redline), len(rulesCache.Vocabularies),
 				len(rulesCache.Attacks), len(rulesCache.Masking))
 
 			// 如果启用了嵌入服务，预计算所有规则的向量
@@ -332,7 +336,7 @@ func loadRulesFromAPI() error {
 			}
 
 			rulesCache.ExpiresAt = time.Now().Add(rulesCache.TTL)
-			proxywasm.LogInfof("[Rules] Rules cache updated successfully, expires at: %s", 
+			proxywasm.LogInfof("[Rules] Rules cache updated successfully, expires at: %s",
 				rulesCache.ExpiresAt.Format("2006-01-02 15:04:05"))
 		},
 	)
@@ -367,7 +371,7 @@ func isCacheValid() bool {
 	if rulesCache == nil {
 		return false
 	}
-	
+
 	return len(rulesCache.Redline) > 0 && time.Now().Before(rulesCache.ExpiresAt)
 }
 
@@ -676,6 +680,10 @@ func getEmbedding(text string) ([]float64, error) {
 
 	proxywasm.LogInfof("[Embedding] Calling embedding service: %s:%d%s", domain, port, path)
 
+	// 构造 Envoy Cluster 名称 (格式: outbound|<Port>||<FQDN>)
+	clusterName := fmt.Sprintf("outbound|%d||%s", port, domain)
+	proxywasm.LogInfof("[Embedding] Cluster name: %s", clusterName)
+
 	var resultVector []float64
 	var callErr error
 
@@ -683,14 +691,14 @@ func getEmbedding(text string) ([]float64, error) {
 	done := make(chan bool, 1)
 
 	_, err = proxywasm.DispatchHttpCall(
-		domain,
+		clusterName,  // ← 使用正确的 Cluster 名称
 		headers,
 		bodyBytes,
 		nil,
 		uint32(timeout),
 		func(numHeaders, bodySize, numTrailers int) {
 			proxywasm.LogDebugf("[Embedding] HTTP call completed: headers=%d, body=%d", numHeaders, bodySize)
-			
+
 			respBody, getErr := proxywasm.GetHttpCallResponseBody(0, bodySize)
 			if getErr != nil {
 				callErr = fmt.Errorf("failed to get response body: %v", getErr)
@@ -919,4 +927,3 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config PluginConfig, body []byt
 
 	return types.ActionContinue
 }
-
