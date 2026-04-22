@@ -222,6 +222,32 @@ func init() {
 	)
 }
 
+// OnPluginStart 插件启动时的钩子（由 wasm-go wrapper 自动调用）
+func OnPluginStart(contextID uint32) types.OnPluginStartStatus {
+	proxywasm.LogInfo("[Init] Plugin starting...")
+
+	// 初始化缓存结构
+	if rulesCache == nil {
+		rulesCache = &RulesCache{
+			TTL: time.Duration(config.CacheTTL) * time.Second,
+		}
+		regexCache = make(map[string]*regexp.Regexp)
+		vectorCache = make(map[string][]float64)
+		proxywasm.LogInfo("[Init] Cache structures initialized")
+	}
+
+	// 在插件启动时立即尝试加载规则（异步，不阻塞）
+	// 注意：DispatchHttpCall 是异步的，会在后台执行
+	if err := loadRulesFromAPI(); err != nil {
+		proxywasm.LogErrorf("[Init] Failed to start loading rules: %v", err)
+		proxywasm.LogWarn("[Init] Rules will be loaded on first request")
+	} else {
+		proxywasm.LogInfo("[Init] Rules loading started in background")
+	}
+
+	return types.OnPluginStartStatusOK
+}
+
 // parseConfig 解析插件配置
 func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
 	// 解析基础配置
@@ -288,7 +314,7 @@ func loadRulesFromAPI() error {
 	proxywasm.LogInfof("[Rules] API endpoint: %s:%d%s", domain, port, path)
 
 	// 构造 Envoy Cluster 名称 (格式: outbound|<Port>||<FQDN>)
-	clusterName := fmt.Sprintf("outbound|%d||%s.dns", port, domain)
+	clusterName := fmt.Sprintf("outbound|%d||%s", port, domain)
 	proxywasm.LogInfof("[Rules] Cluster name: %s", clusterName)
 
 	// 使用 proxywasm 进行 HTTP 调用
@@ -301,7 +327,7 @@ func loadRulesFromAPI() error {
 
 	proxywasm.LogDebug("[Rules] Dispatching HTTP call to rules API...")
 	_, err := proxywasm.DispatchHttpCall(
-		clusterName,  // ← 使用正确的 Cluster 名称
+		clusterName, // ← 使用正确的 Cluster 名称
 		headers,
 		nil,
 		nil,
@@ -377,32 +403,21 @@ func isCacheValid() bool {
 
 // refreshCacheIfNeeded 如果需要则刷新缓存
 func refreshCacheIfNeeded() {
-	// 懒初始化：如果缓存未初始化，先初始化
-	cacheMutex.Lock()
+	// 如果缓存未初始化，先初始化（正常情况下 OnPluginStart 已初始化）
 	if rulesCache == nil {
 		rulesCache = &RulesCache{
 			TTL: time.Duration(config.CacheTTL) * time.Second,
 		}
 		regexCache = make(map[string]*regexp.Regexp)
 		vectorCache = make(map[string][]float64)
-		proxywasm.LogInfo("[Init] Cache structures initialized")
+		proxywasm.LogInfo("[Request] Cache structures initialized")
 	}
-	cacheMutex.Unlock()
 
-	if !isCacheValid() {
-		// 异步加载规则
-		go func() {
-			cacheMutex.Lock()
-			// 双重检查，避免重复加载
-			if len(rulesCache.Redline) == 0 {
-				cacheMutex.Unlock()
-				if err := loadRulesFromAPI(); err != nil {
-					proxywasm.LogErrorf("Failed to load rules cache: %v", err)
-				}
-			} else {
-				cacheMutex.Unlock()
-			}
-		}()
+	// 如果缓存无效且尚未加载，尝试加载规则
+	if !isCacheValid() && len(rulesCache.Redline) == 0 {
+		if err := loadRulesFromAPI(); err != nil {
+			proxywasm.LogErrorf("[Request] Failed to load rules cache: %v", err)
+		}
 	}
 }
 
@@ -691,7 +706,7 @@ func getEmbedding(text string) ([]float64, error) {
 	done := make(chan bool, 1)
 
 	_, err = proxywasm.DispatchHttpCall(
-		clusterName,  // ← 使用正确的 Cluster 名称
+		clusterName, // ← 使用正确的 Cluster 名称
 		headers,
 		bodyBytes,
 		nil,
