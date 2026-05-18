@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -204,6 +205,12 @@ func getDefaultAttributes() []Attribute {
 			Key:        BuiltinOutputTokenDetails,
 			ApplyToLog: true,
 		},
+		// FIX: add source_ip to default attributes
+		{
+			Key:         SourceIP,
+			ValueSource: SourceIP,
+			ApplyToLog:  true,
+		},
 	}
 }
 
@@ -231,6 +238,12 @@ func getDefaultResponseAttributes() []Attribute {
 		{
 			Key:        BuiltinOutputTokenDetails,
 			ApplyToLog: true,
+		},
+		// FIX: add source_ip to lightweight default attributes
+		{
+			Key:         SourceIP,
+			ValueSource: SourceIP,
+			ApplyToLog:  true,
 		},
 	}
 }
@@ -464,7 +477,7 @@ type AIStatisticsConfig struct {
 	enableContentTypes []string
 	// Session ID header name (if configured, takes priority over default headers)
 	sessionIdHeader string
-	RedisClient        wrapper.RedisClient
+	RedisClient     wrapper.RedisClient
 }
 
 func generateMetricName(route, cluster, model, consumer, sourceIP, metricName string) string {
@@ -510,7 +523,7 @@ func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64
 		config.counterMetrics[metricName] = counter
 	}
 	counter.Increment(inc)
-        // 更新redis中的统计信息
+	// update redis data
 	if config.RedisClient != nil && config.RedisClient.Ready() {
 		redisKeyPrefix := "modelcount."
 		redisKeyPrefix = redisKeyPrefix + os.Getenv("POD_NAME") + "."
@@ -673,7 +686,7 @@ func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
 	if sessionIdHeader := configJson.Get("session_id_header"); sessionIdHeader.Exists() {
 		config.sessionIdHeader = sessionIdHeader.String()
 	}
-	
+
 	// Metric settings
 	counter1 := proxywasm.DefineCounterMetric("gateway_model_metrics")
 	if config.counterMetrics == nil {
@@ -780,7 +793,7 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) ty
 	// Set span attributes for ARMS.
 	setSpanAttribute(ArmsSpanKind, "LLM")
 	log.Debugf("ai-statistics start onHttpRequestHeaders/setAttributeBySource/SOURCEIP")
-	// 先设置 source_ip
+	// set source_ip
 	setAttributeBySource(ctx, config, SourceIP, nil)
 	log.Debugf("ai-statistics end onHttpRequestHeaders/setAttributeBySource/SOURCEIP")
 	// Set user defined log & span attributes which type is fixed_value
@@ -1042,21 +1055,21 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 			case ResponseBody:
 				value = gjson.GetBytes(body, attribute.Value).Value()
 			case SourceIP:
-				// 1. 先尝试从 X-Forwarded-For 获取
+				//try get from X-Forwarded-For
 				value = "unknown"
-				// 1. 优先从 source.address 获取 (eBPF PPv2 注入后的真实 IP)
+				// get from source.address
 				if bs, err := proxywasm.GetProperty([]string{"source", "address"}); err == nil {
 					rawSource := string(bs)
 					sourceIP := parseIP(rawSource)
 					if isValidIP(sourceIP) {
 						value = sourceIP
-						// 打印 Info 级别日志验证 eBPF 是否生效
+						// print log
 						log.Infof("[Check-eBPF] Got Source IP from connection: %s (Raw: %s)", value, rawSource)
 					}
 				}
 
-				// 2. 如果上面的方式拿到的是内网 IP 或者是 unknown，尝试 XFF (可选，视你的信任策略而定)
-				// 注意：如果你确定 eBPF 正常工作，其实不需要 XFF 了，因为 source.address 是最可信的
+				// if inner IP or unknown, try xff
+				// if eBPF right，no need XFF
 				if value == "unknown" {
 					if xff, err := proxywasm.GetHttpRequestHeader("X-Forwarded-For"); err == nil && xff != "" {
 						ips := strings.Split(xff, ",")
@@ -1071,7 +1084,7 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 					}
 				}
 
-				// 3. 兜底
+				// last
 				if value == "" {
 					value = "unknown"
 				}
@@ -1128,7 +1141,7 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 			}
 		}
 		// for metrics
-					if key == tokenusage.CtxKeyModel || key == tokenusage.CtxKeyInputToken || key == tokenusage.CtxKeyOutputToken || key == tokenusage.CtxKeyTotalToken || key == SourceIP {
+		if key == tokenusage.CtxKeyModel || key == tokenusage.CtxKeyInputToken || key == tokenusage.CtxKeyOutputToken || key == tokenusage.CtxKeyTotalToken || key == SourceIP {
 			ctx.SetContext(key, value)
 		}
 		if attribute.ApplyToSpan {
@@ -1516,6 +1529,8 @@ func convertToUInt(val interface{}) (uint64, bool) {
 		return uint64(v), true
 	case float64:
 		return uint64(v), true
+	case int:
+		return uint64(v), true
 	case int32:
 		return uint64(v), true
 	case int64:
@@ -1551,14 +1566,20 @@ func parseIP(source string) string {
 		}
 	}
 
-	// 可能是纯 IPv6 地址
+	// for ipv6 only
 	if strings.Count(source, ":") >= 2 {
 		if idx := strings.LastIndex(source, ":"); idx != -1 {
-			return source[:idx]
+			after := source[idx+1:]
+			// only strip if after last colon is a port number
+			if _, err := strconv.Atoi(after); err == nil {
+				return source[:idx]
+			}
 		}
+		return source
 	}
 	return source
 }
+
 func isValidIP(ip string) bool {
 	return ip != "" && ip != "unknown" && net.ParseIP(ip) != nil
 }
