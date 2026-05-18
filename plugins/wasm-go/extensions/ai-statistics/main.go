@@ -1069,7 +1069,7 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 				}
 
 				// if inner IP or unknown, try xff
-				// if eBPF right£¬no need XFF
+				// if eBPF right, no need XFF
 				if value == "unknown" {
 					if xff, err := proxywasm.GetHttpRequestHeader("X-Forwarded-For"); err == nil && xff != "" {
 						ips := strings.Split(xff, ",")
