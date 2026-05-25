@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -153,56 +152,21 @@ const (
 	// Context key for streaming tool calls buffer
 	CtxStreamingToolCallsBuffer = "streamingToolCallsBuffer"
 
-	// ====== ES Persistence Constants ======
-	ResponseStatusCode      = "ai-statistics-response-status-code"
-	ESFailedLogQueueMetaKey = "ai_stats_failed_log_meta"
-	ESFailedLogQueuePrefix  = "ai_stats_failed_log_"
-	ESMaxFailedLogQueueSize = 500
+	// ====== AI Log Output Constants ======
+	CtxAILogOutput           = "ai_log_already_output"
+	CtxRequestStartTimeSaved = "ai_statistics_request_start_time_saved"
 
-	// ====== Failure Reason & Backend Tracking Constants ======
-	CtxFailureCodeDetails       = "failure_code_details"
-	CtxUpstreamTransportFailure = "upstream_transport_failure"
-	CtxBackendUpstreamAddress   = "backend_upstream_address"
-	CtxFailureReason            = "failure_reason"
+	// Response and failure tracking constants
+	ResponseStatusCode          = "ai_statistics_response_status_code"
+	CtxFailureCodeDetails       = "ai_statistics_failure_code_details"
+	CtxUpstreamTransportFailure = "ai_statistics_upstream_transport_failure"
+	CtxBackendUpstreamAddress   = "ai_statistics_backend_upstream_address"
+	CtxFailureReason            = "ai_statistics_failure_reason"
+
+	// Log output size limits (prevent oversized logs for large LLM contexts)
+	DefaultMaxLogBodyBytes   = 2 * 1024 * 1024 // 2MB per log record
+	DefaultMaxAttributeBytes = 100 * 1024      // 100KB per attribute
 )
-
-// ====== ES Config & Record Types ======
-
-type ESConfig struct {
-	ServiceName string `json:"service_name"`
-	ServicePort int    `json:"service_port"`
-	IndexPrefix string `json:"index_prefix"`
-	Username    string `json:"username"`
-	Password    string `json:"password"`
-	Timeout     int    `json:"timeout"` // ms
-}
-
-type ESLogRecord struct {
-	Timestamp             string                 `json:"@timestamp"`
-	RequestSuccess        bool                   `json:"request_success"`
-	StatusCode            int                    `json:"status_code"`
-	Route                 string                 `json:"route"`
-	Cluster               string                 `json:"cluster"`
-	Model                 string                 `json:"model"`
-	Consumer              string                 `json:"consumer"`
-	SourceIP              string                 `json:"source_ip"`
-	SessionID             string                 `json:"session_id,omitempty"`
-	ResponseType          string                 `json:"response_type,omitempty"`
-	LLMServiceDuration    int64                  `json:"llm_service_duration,omitempty"`
-	LLMFirstTokenDuration int64                  `json:"llm_first_token_duration,omitempty"`
-	Attributes            map[string]interface{} `json:"attributes"`
-	// ====== Gateway & Backend Tracking ======
-	PodName                string `json:"gateway_pod_name"`
-	BackendModelCluster    string `json:"backend_model_cluster"`
-	BackendUpstreamAddress string `json:"backend_upstream_address,omitempty"`
-	FailureReason          string `json:"failure_reason,omitempty"`
-}
-
-type FailedLogMeta struct {
-	Head  uint32 `json:"head"`
-	Tail  uint32 `json:"tail"`
-	Count uint32 `json:"count"`
-}
 
 // getDefaultAttributes returns the default attributes configuration for empty config
 // This includes all attributes but may consume significant memory for large conversations
@@ -256,12 +220,6 @@ func getDefaultAttributes() []Attribute {
 			Key:        BuiltinOutputTokenDetails,
 			ApplyToLog: true,
 		},
-		// FIX: add source_ip to default attributes
-		{
-			Key:         SourceIP,
-			ValueSource: SourceIP,
-			ApplyToLog:  true,
-		},
 	}
 }
 
@@ -289,12 +247,6 @@ func getDefaultResponseAttributes() []Attribute {
 		{
 			Key:        BuiltinOutputTokenDetails,
 			ApplyToLog: true,
-		},
-		// FIX: add source_ip to lightweight default attributes
-		{
-			Key:         SourceIP,
-			ValueSource: SourceIP,
-			ApplyToLog:  true,
 		},
 	}
 }
@@ -497,6 +449,34 @@ func getToolCallsFromBuffer(buffer *StreamingToolCallsBuffer) []ToolCall {
 }
 
 // TracingSpan is the tracing span configuration.
+// AILogRecord is the structured AI log record output to stdout via [AILOG] prefix.
+// log-pilot (DaemonSet on each node) collects container stdout, detects lines
+// prefixed with [AILOG], parses the JSON, and forwards to ES.
+type AILogRecord struct {
+	Timestamp             string `json:"@timestamp"`
+	RequestID             string `json:"request_id,omitempty"`
+	RequestSuccess        bool   `json:"request_success"`
+	StatusCode            int    `json:"status_code"`
+	Route                 string `json:"route"`
+	Cluster               string `json:"cluster"`
+	Model                 string `json:"model"`
+	Consumer              string `json:"consumer"`
+	SourceIP              string `json:"source_ip"`
+	SessionID             string `json:"session_id,omitempty"`
+	ResponseType          string `json:"response_type,omitempty"`
+	LLMServiceDuration    int64  `json:"llm_service_duration,omitempty"`
+	LLMFirstTokenDuration int64  `json:"llm_first_token_duration,omitempty"`
+	RequestMethod         string `json:"request_method,omitempty"`
+	RequestPath           string `json:"request_path,omitempty"`
+	// ai_log contains all AI-specific attributes (question, answer, tokens, etc.)
+	AILog map[string]interface{} `json:"ai_log,omitempty"`
+	// Gateway & Backend Tracking
+	PodName                string `json:"gateway_pod_name"`
+	BackendModelCluster    string `json:"backend_model_cluster"`
+	BackendUpstreamAddress string `json:"backend_upstream_address,omitempty"`
+	FailureReason          string `json:"failure_reason,omitempty"`
+}
+
 type Attribute struct {
 	Key                string `json:"key"`
 	ValueSource        string `json:"value_source"`
@@ -529,8 +509,9 @@ type AIStatisticsConfig struct {
 	// Session ID header name (if configured, takes priority over default headers)
 	sessionIdHeader string
 	RedisClient     wrapper.RedisClient
-	// ====== ES Persistence ======
-	ESConfig *ESConfig `json:"es_config,omitempty"`
+	// Log output size limits (prevent OOM on large LLM contexts)
+	maxLogBodyBytes   int // max bytes per log record JSON
+	maxAttributeBytes int // max bytes per individual attribute
 }
 
 func generateMetricName(route, cluster, model, consumer, sourceIP, metricName string) string {
@@ -576,13 +557,10 @@ func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64
 		config.counterMetrics[metricName] = counter
 	}
 	counter.Increment(inc)
-	// update redis data using runtime pod name (dynamic env var, not cached)
+	// 更新redis中的统计信息
 	if config.RedisClient != nil && config.RedisClient.Ready() {
-		podName := os.Getenv("POD_NAME")
-		if podName == "" {
-			podName = "unknown"
-		}
-		redisKeyPrefix := "modelcount." + podName + "."
+		redisKeyPrefix := "modelcount."
+		redisKeyPrefix = redisKeyPrefix + os.Getenv("POD_NAME") + "."
 		err := config.RedisClient.Set(redisKeyPrefix+metricName, counter.Value(), nil)
 		if err != nil {
 			log.Errorf("failed to execute redis set command: %v", err)
@@ -768,28 +746,16 @@ func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
 		return errors.New("redisClient is not ready")
 	}
 
-	// ====== Parse ES Config ======
-	if esConfigJson := configJson.Get("es_config"); esConfigJson.Exists() {
-		var esConfig ESConfig
-		if err := json.Unmarshal([]byte(esConfigJson.Raw), &esConfig); err != nil {
-			log.Errorf("parse es_config failed: %v", err)
-			return fmt.Errorf("parse es_config failed: %w", err)
-		}
-		if esConfig.ServiceName == "" {
-			log.Errorf("es_config.service_name must not be empty")
-			return errors.New("es_config.service_name must not be empty")
-		}
-		if esConfig.ServicePort == 0 {
-			esConfig.ServicePort = 9200
-		}
-		if esConfig.IndexPrefix == "" {
-			esConfig.IndexPrefix = "ai-gateway-logs"
-		}
-		if esConfig.Timeout == 0 {
-			esConfig.Timeout = 5000
-		}
-		config.ESConfig = &esConfig
-		log.Infof("ES persistence enabled: service=%s, index_prefix=%s", esConfig.ServiceName, esConfig.IndexPrefix)
+	// Set size limits for log output (prevent OOM on large LLM contexts)
+	if configJson.Get("max_log_body_bytes").Exists() {
+		config.maxLogBodyBytes = int(configJson.Get("max_log_body_bytes").Int())
+	} else {
+		config.maxLogBodyBytes = DefaultMaxLogBodyBytes
+	}
+	if configJson.Get("max_attribute_bytes").Exists() {
+		config.maxAttributeBytes = int(configJson.Get("max_attribute_bytes").Int())
+	} else {
+		config.maxAttributeBytes = DefaultMaxAttributeBytes
 	}
 
 	return nil
@@ -852,23 +818,22 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) ty
 	ctx.SetContext(RouteName, route)
 	ctx.SetContext(ClusterName, cluster)
 	ctx.SetUserAttribute(APIName, api)
-
-	// Record gateway pod name (runtime env, not cached config) and backend cluster
-	// so they're available even for failed requests
-	podName := os.Getenv("POD_NAME")
-	if podName == "" {
-		podName = "unknown"
-	}
-	ctx.SetUserAttribute("gateway_pod_name", podName)
-	ctx.SetUserAttribute("backend_model_cluster", cluster)
-
 	ctx.SetContext(StatisticsRequestStartTime, time.Now().UnixMilli())
-	if requestPath, _ := proxywasm.GetHttpRequestHeader(":path"); requestPath != "" {
-		ctx.SetContext(RequestPath, requestPath)
-		ctx.SetUserAttribute("request_path", requestPath)
-	}
+
+	// Record request method and path as user attributes for log output
 	if requestMethod, _ := proxywasm.GetHttpRequestHeader(":method"); requestMethod != "" {
 		ctx.SetUserAttribute("request_method", requestMethod)
+		log.Debugf("[AI-LOG] request method recorded: %s", requestMethod)
+	}
+	if requestPath, _ := proxywasm.GetHttpRequestHeader(":path"); requestPath != "" {
+		ctx.SetUserAttribute("request_path", requestPath)
+		log.Debugf("[AI-LOG] request path recorded: %s", requestPath)
+	}
+	// Mark that request has been tracked (for duplicate prevention)
+	ctx.SetContext(CtxRequestStartTimeSaved, true)
+	log.Debugf("[AI-LOG] request start tracked: route=%s cluster=%s", route, cluster)
+	if requestPath, _ := proxywasm.GetHttpRequestHeader(":path"); requestPath != "" {
+		ctx.SetContext(RequestPath, requestPath)
 	}
 	if consumer, _ := proxywasm.GetHttpRequestHeader(ConsumerKey); consumer != "" {
 		ctx.SetContext(ConsumerKey, consumer)
@@ -887,7 +852,7 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) ty
 	// Set span attributes for ARMS.
 	setSpanAttribute(ArmsSpanKind, "LLM")
 	log.Debugf("ai-statistics start onHttpRequestHeaders/setAttributeBySource/SOURCEIP")
-	// set source_ip
+	// 先设置 source_ip
 	setAttributeBySource(ctx, config, SourceIP, nil)
 	log.Debugf("ai-statistics end onHttpRequestHeaders/setAttributeBySource/SOURCEIP")
 	// Set user defined log & span attributes which type is fixed_value
@@ -981,7 +946,6 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) t
 
 	// ====== Capture Envoy Failure Diagnostics ======
 	var codeDetails, transportFailure string
-
 	if cd, err := proxywasm.GetProperty([]string{"response", "code_details"}); err == nil && len(cd) > 0 {
 		codeDetails = string(cd)
 		ctx.SetContext(CtxFailureCodeDetails, codeDetails)
@@ -999,7 +963,6 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) t
 		upstreamAddress = string(ua)
 	}
 	if upstreamAddress == "" {
-		// Fallback: try response header (if configured in Envoy)
 		upstreamAddress, _ = proxywasm.GetHttpResponseHeader("x-envoy-upstream-remote-address")
 	}
 	if upstreamAddress != "" {
@@ -1017,12 +980,24 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) t
 			statusCode, failureReason, codeDetails, transportFailure)
 	}
 
+	// ====== Output AI log for FAILED requests immediately ======
+	// Failed requests (4xx/5xx) may not reach body processing.
+	// Output the log here so failed requests are always captured.
+	if statusCode != "" {
+		code, _ := strconv.Atoi(statusCode)
+		if code >= 400 {
+			log.Infof("[AI-LOG] FAILED request detected: status=%d, reason=%s, outputting failure log", code, failureReason)
+			outputAILogFailure(ctx, config)
+			ctx.SetContext(CtxAILogOutput, true) // mark: log already output
+			log.Debugf("[AI-LOG] failure log output complete, marked CtxAILogOutput=true")
+		}
+	}
+
 	// Set user defined log & span attributes which type is response_header
 	setAttributeBySource(ctx, config, ResponseHeader, nil)
 
 	return types.ActionContinue
 }
-
 func onHttpStreamingBody(ctx wrapper.HttpContext, config AIStatisticsConfig, data []byte, endOfStream bool) []byte {
 	// Check if processing should be skipped
 	if ctx.GetBoolContext(SkipProcessing, false) {
@@ -1106,9 +1081,13 @@ func onHttpStreamingBody(ctx wrapper.HttpContext, config AIStatisticsConfig, dat
 		// Write metrics
 		writeMetric(ctx, config)
 
-		// ====== ES Persistence: Send ai_log to ES ======
-		if config.ESConfig != nil {
-			sendLogToES(ctx, config)
+		// ====== Output structured AI log to stdout (log-pilot collects) ======
+		// Skip if already output for failed request in onHttpResponseHeaders
+		if !ctx.GetBoolContext(CtxAILogOutput, false) {
+			log.Debugf("[AI-LOG] streaming body end, outputting success log")
+			outputAILog(ctx, config)
+		} else {
+			log.Debugf("[AI-LOG] streaming body end, skipping duplicate log (already output for failure)")
 		}
 	}
 	return data
@@ -1165,419 +1144,16 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body
 	// Write metrics
 	writeMetric(ctx, config)
 
-	// ====== ES Persistence: Send ai_log to ES ======
-	if config.ESConfig != nil {
-		sendLogToES(ctx, config)
+	// ====== Output structured AI log to stdout (log-pilot collects) ======
+	// Skip if already output for failed request in onHttpResponseHeaders
+	if !ctx.GetBoolContext(CtxAILogOutput, false) {
+		log.Debugf("[AI-LOG] response body processed, outputting success log")
+		outputAILog(ctx, config)
+	} else {
+		log.Debugf("[AI-LOG] response body processed, skipping duplicate log (already output for failure)")
 	}
 
 	return types.ActionContinue
-}
-
-// ====== Failure Classification ======
-
-// classifyFailure determines the root cause of a failed request based on
-// Envoy's response code details and upstream transport failure reason.
-// It returns an empty string for successful requests (2xx/3xx).
-func classifyFailure(statusCode, codeDetails, transportFailure string) string {
-	code, _ := strconv.Atoi(statusCode)
-
-	// Success range - no failure
-	if code >= 200 && code < 400 {
-		return ""
-	}
-
-	lowerDetails := strings.ToLower(codeDetails)
-	lowerTransport := strings.ToLower(transportFailure)
-
-	// ====== Transport-level failures (could not reach upstream at all) ======
-	if transportFailure != "" {
-		switch {
-		case strings.Contains(lowerTransport, "connection refused"):
-			return "upstream_connection_refused"
-		case strings.Contains(lowerTransport, "no healthy host"):
-			return "upstream_no_healthy_host"
-		case strings.Contains(lowerTransport, "timeout") || strings.Contains(lowerTransport, "timed out"):
-			if strings.Contains(lowerTransport, "connect") {
-				return "upstream_connect_timeout"
-			}
-			return "upstream_response_timeout"
-		case strings.Contains(lowerTransport, "tls") || strings.Contains(lowerTransport, "certificate") || strings.Contains(lowerTransport, "ssl"):
-			return "upstream_tls_failure"
-		default:
-			return "upstream_transport_failure: " + transportFailure
-		}
-	}
-
-	// ====== Auth & Permission failures ======
-	switch {
-	case code == 401:
-		if strings.Contains(lowerDetails, "jwt") {
-			return "auth_jwt_invalid"
-		}
-		if strings.Contains(lowerDetails, "ext_authz") || strings.Contains(lowerDetails, "auth") {
-			return "auth_api_key_invalid"
-		}
-		return "auth_unauthorized"
-
-	case code == 403:
-		if strings.Contains(lowerDetails, "ext_authz") || strings.Contains(lowerDetails, "auth") {
-			return "auth_forbidden"
-		}
-		if strings.Contains(lowerDetails, "ratelimit") || strings.Contains(lowerDetails, "rate_limit") {
-			return "rate_limited"
-		}
-		if strings.Contains(lowerDetails, "rbac") {
-			return "rbac_denied"
-		}
-		return "forbidden"
-
-	case code == 429:
-		return "rate_limited"
-	}
-
-	// ====== Routing failures ======
-	if code == 404 {
-		if strings.Contains(lowerDetails, "no_route") || strings.Contains(lowerDetails, "no cluster") {
-			return "gateway_no_route"
-		}
-		return "not_found"
-	}
-
-	if code == 408 {
-		return "request_timeout"
-	}
-
-	// ====== Upstream errors (reached upstream but it returned 5xx or connection broke) ======
-	if code >= 500 && code < 600 {
-		// Response came from upstream (upstream returned 5xx)
-		if strings.Contains(lowerDetails, "via_upstream") {
-			return "upstream_service_error"
-		}
-
-		// Connection timeout
-		if strings.Contains(lowerDetails, "connect_timeout") || strings.Contains(lowerDetails, "connect timeout") {
-			return "upstream_connect_timeout"
-		}
-
-		// Generic connection failure
-		if strings.Contains(lowerDetails, "connection_failure") || strings.Contains(lowerDetails, "connection failure") {
-			return "upstream_connection_failure"
-		}
-
-		// Upstream reset / disconnect variants
-		if strings.Contains(lowerDetails, "upstream_reset") || strings.Contains(lowerDetails, "upstream reset") {
-			if strings.Contains(lowerDetails, "connection_termination") || strings.Contains(lowerDetails, "connection termination") {
-				return "upstream_connection_terminated"
-			}
-			if strings.Contains(lowerDetails, "remote_reset") || strings.Contains(lowerDetails, "remote reset") {
-				return "upstream_remote_reset"
-			}
-			if strings.Contains(lowerDetails, "local_reset") || strings.Contains(lowerDetails, "local reset") {
-				return "gateway_local_reset"
-			}
-			return "upstream_reset"
-		}
-
-		if strings.Contains(lowerDetails, "remote_disconnect") || strings.Contains(lowerDetails, "remote disconnect") {
-			return "upstream_remote_disconnect"
-		}
-
-		// Gateway-local errors
-		if strings.Contains(lowerDetails, "no_route") || strings.Contains(lowerDetails, "no cluster") {
-			return "gateway_no_route"
-		}
-		if strings.Contains(lowerDetails, "overload") {
-			return "gateway_overload"
-		}
-		if strings.Contains(lowerDetails, "local_reply") || strings.Contains(lowerDetails, "local reply") {
-			return "gateway_local_error"
-		}
-
-		return fmt.Sprintf("server_error_%d", code)
-	}
-
-	// ====== Client errors (4xx not handled above) ======
-	if code >= 400 && code < 500 {
-		return fmt.Sprintf("client_error_%d", code)
-	}
-
-	// ====== Catch-all ======
-	if code == 0 {
-		return "unknown"
-	}
-	return fmt.Sprintf("error_status_%d", code)
-}
-
-// ====== ES Persistence Functions ======
-
-// buildESLogRecord collects all ai_log attributes and builds a structured record
-func buildESLogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *ESLogRecord {
-	record := &ESLogRecord{
-		Timestamp:  time.Now().Format(time.RFC3339Nano),
-		Attributes: make(map[string]interface{}),
-		PodName:    os.Getenv("POD_NAME"),
-	}
-
-	// ====== Basic routing & backend info ======
-	record.Route = ctx.GetStringContext(RouteName, "-")
-	record.BackendModelCluster = ctx.GetStringContext(ClusterName, "-")
-	record.BackendUpstreamAddress = ctx.GetStringContext(CtxBackendUpstreamAddress, "")
-
-	// ====== Model info (may be UNKNOWN if request body was not parsed) ======
-	if model := ctx.GetUserAttribute(tokenusage.CtxKeyModel); model != nil {
-		record.Model = fmt.Sprint(model)
-	}
-
-	// ====== Consumer & source info ======
-	record.Consumer = ctx.GetStringContext(ConsumerKey, "none")
-	if sourceIP := ctx.GetUserAttribute(SourceIP); sourceIP != nil {
-		record.SourceIP = fmt.Sprint(sourceIP)
-	}
-	if sessionId := ctx.GetUserAttribute(SessionID); sessionId != nil {
-		record.SessionID = fmt.Sprint(sessionId)
-	}
-
-	// ====== Response metadata ======
-	if responseType := ctx.GetUserAttribute(ResponseType); responseType != nil {
-		record.ResponseType = fmt.Sprint(responseType)
-	}
-	if duration := ctx.GetUserAttribute(LLMServiceDuration); duration != nil {
-		if d, ok := convertToUInt(duration); ok {
-			record.LLMServiceDuration = int64(d)
-		}
-	}
-	if ftd := ctx.GetUserAttribute(LLMFirstTokenDuration); ftd != nil {
-		if d, ok := convertToUInt(ftd); ok {
-			record.LLMFirstTokenDuration = int64(d)
-		}
-	}
-
-	// ====== Status code, success flag & failure reason ======
-	statusCodeStr := ctx.GetStringContext(ResponseStatusCode, "0")
-	statusCode, _ := strconv.Atoi(statusCodeStr)
-	record.StatusCode = statusCode
-	record.RequestSuccess = statusCode >= 200 && statusCode < 400
-	record.FailureReason = ctx.GetStringContext(CtxFailureReason, "")
-
-	// ====== Collect all user attributes that go into ai_log ======
-	collectUserAttribute := func(key string) {
-		if v := ctx.GetUserAttribute(key); v != nil {
-			record.Attributes[key] = v
-		}
-	}
-
-	collectUserAttribute("question")
-	collectUserAttribute("system")
-	collectUserAttribute("answer")
-	collectUserAttribute("reasoning")
-	collectUserAttribute("tool_calls")
-	collectUserAttribute("messages")
-	collectUserAttribute("session_id")
-	collectUserAttribute("chat_id")
-	collectUserAttribute("chat_round")
-	collectUserAttribute("input_token")
-	collectUserAttribute("output_token")
-	collectUserAttribute("total_token")
-	collectUserAttribute("reasoning_tokens")
-	collectUserAttribute("cached_tokens")
-	collectUserAttribute("input_token_details")
-	collectUserAttribute("output_token_details")
-	// Basic request info available even for failed requests
-	collectUserAttribute("request_path")
-	collectUserAttribute("request_method")
-
-	return record
-}
-
-// sendLogToES attempts to send the ai_log record to ES; on failure, enqueues to local shared-data queue.
-// Also performs request-level compensation: after sending current log, tries to flush queued backlog.
-func sendLogToES(ctx wrapper.HttpContext, config AIStatisticsConfig) {
-	record := buildESLogRecord(ctx, config)
-	recordBytes, err := json.Marshal(record)
-	if err != nil {
-		log.Errorf("failed to marshal ES log record: %v", err)
-		return
-	}
-
-	// Also emit to standard proxy log as local fallback (can be collected by host agents like Filebeat)
-	log.Infof("[AI_LOG_PERSISTENCE] %s", string(recordBytes))
-
-	// Attempt direct ES dispatch for current request
-	if err := dispatchToES(config, recordBytes, false); err != nil {
-		log.Warnf("direct ES dispatch failed, enqueuing for retry: %v", err)
-		// Enqueue to local WASM shared-data queue
-		if qErr := enqueueFailedLog(recordBytes); qErr != nil {
-			log.Errorf("failed to enqueue failed log: %v", qErr)
-		}
-	}
-
-	// Request-level compensation: attempt to flush queued backlog (best-effort, non-blocking)
-	flushQueuedLogs(config)
-}
-
-// flushQueuedLogs attempts to send queued failed logs via ES _bulk.
-// This is called after each request completes, providing natural retry without OnTick.
-func flushQueuedLogs(config AIStatisticsConfig) {
-	logs, err := dequeueAllFailedLogs()
-	if err != nil {
-		log.Errorf("failed to dequeue failed logs: %v", err)
-		return
-	}
-	if len(logs) == 0 {
-		return
-	}
-
-	log.Infof("flushing %d queued logs to ES (request-level compensation)", len(logs))
-
-	// Build bulk request
-	var bulkBody bytes.Buffer
-	indexDate := time.Now().Format("2006.01.02")
-	indexName := fmt.Sprintf("%s-%s", config.ESConfig.IndexPrefix, indexDate)
-	for _, logData := range logs {
-		action := fmt.Sprintf(`{ "index" : { "_index" : "%s" } }%s`, indexName, "\n")
-		bulkBody.WriteString(action)
-		bulkBody.Write(logData)
-		bulkBody.WriteByte('\n')
-	}
-
-	if err := dispatchToES(config, bulkBody.Bytes(), true); err != nil {
-		log.Warnf("bulk dispatch to ES failed, re-enqueueing %d logs: %v", len(logs), err)
-		// Re-enqueue logs for next request's compensation
-		for _, logData := range logs {
-			if qErr := enqueueFailedLog(logData); qErr != nil {
-				log.Errorf("failed to re-enqueue log: %v", qErr)
-			}
-		}
-		return
-	}
-
-	log.Infof("successfully flushed %d queued logs to ES", len(logs))
-}
-
-// dispatchToES sends a single document to ES _doc endpoint.
-// If bulk=true, the body is expected to be a bulk-formatted payload.
-func dispatchToES(config AIStatisticsConfig, body []byte, isBulk bool) error {
-	if config.ESConfig == nil {
-		return errors.New("es config is nil")
-	}
-
-	es := config.ESConfig
-	indexDate := time.Now().Format("2006.01.02")
-	indexName := fmt.Sprintf("%s-%s", es.IndexPrefix, indexDate)
-
-	var path string
-	if isBulk {
-		path = fmt.Sprintf("/%s/_bulk", indexName)
-	} else {
-		path = fmt.Sprintf("/%s/_doc", indexName)
-	}
-
-	headers := [][2]string{
-		{":method", "POST"},
-		{":path", path},
-		{":authority", es.ServiceName},
-		{"content-type", "application/json"},
-	}
-	if es.Username != "" && es.Password != "" {
-		auth := base64.StdEncoding.EncodeToString([]byte(es.Username + ":" + es.Password))
-		headers = append(headers, [2]string{"authorization", "Basic " + auth})
-	}
-
-	timeout := uint32(es.Timeout)
-	if timeout == 0 {
-		timeout = 5000
-	}
-
-	// DispatchHttpCall is asynchronous. Synchronous error means the cluster is not available.
-	// The 6th parameter is a callback invoked when the response arrives.
-	_, err := proxywasm.DispatchHttpCall(es.ServiceName, headers, body, nil, timeout,
-		func(numHeaders, bodySize, numTrailers int) {
-			// Async response callback - log ES response status for debugging
-			if numHeaders == 0 && bodySize == 0 && numTrailers == 0 {
-				log.Warnf("ES dispatch got empty response (possible connection error)")
-				return
-			}
-			respHeaders, _ := proxywasm.GetHttpCallResponseHeaders()
-			for _, h := range respHeaders {
-				if h[0] == ":status" {
-					if h[1] != "200" && h[1] != "201" {
-						log.Warnf("ES returned non-2xx status: %s", h[1])
-					} else {
-						log.Debugf("ES dispatch success, status: %s", h[1])
-					}
-					break
-				}
-			}
-		})
-	if err != nil {
-		return fmt.Errorf("dispatch http call failed: %w", err)
-	}
-	return nil
-}
-
-// enqueueFailedLog pushes a log record into the WASM shared-data circular queue
-func enqueueFailedLog(logData []byte) error {
-	metaBytes, _, err := proxywasm.GetSharedData(ESFailedLogQueueMetaKey)
-	var meta FailedLogMeta
-	if err != nil || len(metaBytes) == 0 {
-		meta = FailedLogMeta{}
-	} else {
-		if err := json.Unmarshal(metaBytes, &meta); err != nil {
-			meta = FailedLogMeta{}
-		}
-	}
-
-	// If queue is full, overwrite oldest (advance tail)
-	if meta.Count >= ESMaxFailedLogQueueSize {
-		meta.Tail = (meta.Tail + 1) % ESMaxFailedLogQueueSize
-		meta.Count--
-	}
-
-	key := fmt.Sprintf("%s%d", ESFailedLogQueuePrefix, meta.Head)
-	if err := proxywasm.SetSharedData(key, logData, 0); err != nil {
-		return err
-	}
-
-	meta.Head = (meta.Head + 1) % ESMaxFailedLogQueueSize
-	meta.Count++
-
-	newMetaBytes, _ := json.Marshal(meta)
-	return proxywasm.SetSharedData(ESFailedLogQueueMetaKey, newMetaBytes, 0)
-}
-
-// dequeueAllFailedLogs reads all pending logs from the queue and clears it
-func dequeueAllFailedLogs() ([][]byte, error) {
-	metaBytes, _, err := proxywasm.GetSharedData(ESFailedLogQueueMetaKey)
-	if err != nil || len(metaBytes) == 0 {
-		return nil, nil
-	}
-	var meta FailedLogMeta
-	if err := json.Unmarshal(metaBytes, &meta); err != nil {
-		return nil, err
-	}
-	if meta.Count == 0 {
-		return nil, nil
-	}
-
-	var logs [][]byte
-	idx := meta.Tail
-	for i := uint32(0); i < meta.Count; i++ {
-		key := fmt.Sprintf("%s%d", ESFailedLogQueuePrefix, idx)
-		data, _, err := proxywasm.GetSharedData(key)
-		if err == nil && len(data) > 0 {
-			logs = append(logs, data)
-		}
-		// Clear the slot
-		_ = proxywasm.SetSharedData(key, []byte{}, 0)
-		idx = (idx + 1) % ESMaxFailedLogQueueSize
-	}
-
-	// Reset meta
-	newMeta := FailedLogMeta{}
-	newMetaBytes, _ := json.Marshal(newMeta)
-	_ = proxywasm.SetSharedData(ESFailedLogQueueMetaKey, newMetaBytes, 0)
-
-	return logs, nil
 }
 
 // fetches the tracing span value from the specified source.
@@ -1610,21 +1186,21 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 			case ResponseBody:
 				value = gjson.GetBytes(body, attribute.Value).Value()
 			case SourceIP:
-				//try get from X-Forwarded-For
+				// 1. 先尝试从 X-Forwarded-For 获取
 				value = "unknown"
-				// get from source.address
+				// 1. 优先从 source.address 获取 (eBPF PPv2 注入后的真实 IP)
 				if bs, err := proxywasm.GetProperty([]string{"source", "address"}); err == nil {
 					rawSource := string(bs)
 					sourceIP := parseIP(rawSource)
 					if isValidIP(sourceIP) {
 						value = sourceIP
-						// print log
+						// 打印 Info 级别日志验证 eBPF 是否生效
 						log.Infof("[Check-eBPF] Got Source IP from connection: %s (Raw: %s)", value, rawSource)
 					}
 				}
 
-				// if inner IP or unknown, try xff
-				// if eBPF right, no need XFF
+				// 2. 如果上面的方式拿到的是内网 IP 或者是 unknown，尝试 XFF (可选，视你的信任策略而定)
+				// 注意：如果你确定 eBPF 正常工作，其实不需要 XFF 了，因为 source.address 是最可信的
 				if value == "unknown" {
 					if xff, err := proxywasm.GetHttpRequestHeader("X-Forwarded-For"); err == nil && xff != "" {
 						ips := strings.Split(xff, ",")
@@ -1639,7 +1215,7 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 					}
 				}
 
-				// last
+				// 3. 兜底
 				if value == "" {
 					value = "unknown"
 				}
@@ -2078,13 +1654,377 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 	}
 }
 
+// ====== Failure Classification ======
+
+// classifyFailure determines the root cause of a failed request based on
+// Envoy's response code details and upstream transport failure reason.
+// Returns empty string for successful requests (2xx/3xx).
+func classifyFailure(statusCode, codeDetails, transportFailure string) string {
+	code, _ := strconv.Atoi(statusCode)
+
+	// Success range — no failure
+	if code >= 200 && code < 400 {
+		return ""
+	}
+
+	lowerDetails := strings.ToLower(codeDetails)
+	lowerTransport := strings.ToLower(transportFailure)
+
+	// Transport-level failures (could not reach upstream at all)
+	if transportFailure != "" {
+		switch {
+		case strings.Contains(lowerTransport, "connection refused"):
+			return "upstream_connection_refused"
+		case strings.Contains(lowerTransport, "no healthy host"):
+			return "upstream_no_healthy_host"
+		case strings.Contains(lowerTransport, "timeout") || strings.Contains(lowerTransport, "timed out"):
+			if strings.Contains(lowerTransport, "connect") {
+				return "upstream_connect_timeout"
+			}
+			return "upstream_response_timeout"
+		case strings.Contains(lowerTransport, "tls") || strings.Contains(lowerTransport, "certificate") || strings.Contains(lowerTransport, "ssl"):
+			return "upstream_tls_failure"
+		default:
+			return "upstream_transport_failure: " + transportFailure
+		}
+	}
+
+	// Auth & Permission failures
+	switch {
+	case code == 401:
+		if strings.Contains(lowerDetails, "jwt") {
+			return "auth_jwt_invalid"
+		}
+		if strings.Contains(lowerDetails, "ext_authz") || strings.Contains(lowerDetails, "auth") {
+			return "auth_api_key_invalid"
+		}
+		return "auth_unauthorized"
+	case code == 403:
+		if strings.Contains(lowerDetails, "ext_authz") || strings.Contains(lowerDetails, "auth") {
+			return "auth_forbidden"
+		}
+		if strings.Contains(lowerDetails, "ratelimit") || strings.Contains(lowerDetails, "rate_limit") {
+			return "rate_limited"
+		}
+		if strings.Contains(lowerDetails, "rbac") {
+			return "rbac_denied"
+		}
+		return "forbidden"
+	case code == 429:
+		return "rate_limited"
+	}
+
+	// Routing failures
+	if code == 404 {
+		if strings.Contains(lowerDetails, "no_route") || strings.Contains(lowerDetails, "no cluster") {
+			return "gateway_no_route"
+		}
+		return "not_found"
+	}
+
+	if code == 408 {
+		return "request_timeout"
+	}
+
+	// Upstream errors (reached upstream but it returned 5xx or connection broke)
+	if code >= 500 && code < 600 {
+		if strings.Contains(lowerDetails, "via_upstream") {
+			return "upstream_service_error"
+		}
+		if strings.Contains(lowerDetails, "connect_timeout") || strings.Contains(lowerDetails, "connect timeout") {
+			return "upstream_connect_timeout"
+		}
+		if strings.Contains(lowerDetails, "connection_failure") || strings.Contains(lowerDetails, "connection failure") {
+			return "upstream_connection_failure"
+		}
+		if strings.Contains(lowerDetails, "upstream_reset") || strings.Contains(lowerDetails, "upstream reset") {
+			return "upstream_reset"
+		}
+		if strings.Contains(lowerDetails, "remote_disconnect") || strings.Contains(lowerDetails, "remote disconnect") {
+			return "upstream_remote_disconnect"
+		}
+		if strings.Contains(lowerDetails, "no_route") || strings.Contains(lowerDetails, "no cluster") {
+			return "gateway_no_route"
+		}
+		if strings.Contains(lowerDetails, "overload") {
+			return "gateway_overload"
+		}
+		if strings.Contains(lowerDetails, "local_reply") || strings.Contains(lowerDetails, "local reply") {
+			return "gateway_local_error"
+		}
+		return fmt.Sprintf("server_error_%d", code)
+	}
+
+	// Client errors (4xx not handled above)
+	if code >= 400 && code < 500 {
+		return fmt.Sprintf("client_error_%d", code)
+	}
+
+	// Catch-all
+	if code == 0 {
+		return "unknown"
+	}
+	return fmt.Sprintf("error_status_%d", code)
+}
+
+// ====== Log Output Functions ======
+
+// outputAILog outputs a structured JSON log line to container stdout.
+// log-pilot (DaemonSet on each node) collects container stdout, detects lines
+// prefixed with [AILOG], parses the JSON, and forwards to ES.
+
+// buildAILogRecord collects all request info and AI attributes into a structured record.
+func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILogRecord {
+	record := &AILogRecord{
+		Timestamp:           time.Now().Format(time.RFC3339Nano),
+		PodName:             os.Getenv("POD_NAME"),
+		Route:               ctx.GetStringContext(RouteName, "-"),
+		Cluster:             ctx.GetStringContext(ClusterName, "-"),
+		BackendModelCluster: ctx.GetStringContext(ClusterName, "-"),
+		Consumer:            ctx.GetStringContext(ConsumerKey, "none"),
+	}
+	if record.PodName == "" {
+		record.PodName = "unknown"
+	}
+
+	// Status code and success flag
+	statusCodeStr := ctx.GetStringContext(ResponseStatusCode, "0")
+	record.StatusCode, _ = strconv.Atoi(statusCodeStr)
+	record.RequestSuccess = record.StatusCode >= 200 && record.StatusCode < 400
+
+	// Model
+	if model := ctx.GetUserAttribute("model"); model != nil {
+		record.Model = fmt.Sprint(model)
+	}
+
+	// Source IP
+	if sourceIP := ctx.GetUserAttribute(SourceIP); sourceIP != nil {
+		record.SourceIP = fmt.Sprint(sourceIP)
+	}
+
+	// Session ID
+	if sessionId := ctx.GetUserAttribute(SessionID); sessionId != nil {
+		record.SessionID = fmt.Sprint(sessionId)
+	}
+
+	// Response type and durations
+	if respType := ctx.GetUserAttribute(ResponseType); respType != nil {
+		record.ResponseType = fmt.Sprint(respType)
+	}
+	if duration := ctx.GetUserAttribute(LLMServiceDuration); duration != nil {
+		if d, ok := convertToUInt(duration); ok {
+			record.LLMServiceDuration = int64(d)
+		}
+	}
+	if ftd := ctx.GetUserAttribute(LLMFirstTokenDuration); ftd != nil {
+		if d, ok := convertToUInt(ftd); ok {
+			record.LLMFirstTokenDuration = int64(d)
+		}
+	}
+
+	// Backend upstream address
+	record.BackendUpstreamAddress = ctx.GetStringContext(CtxBackendUpstreamAddress, "")
+
+	// Failure reason
+	record.FailureReason = ctx.GetStringContext(CtxFailureReason, "")
+
+	// Request method and path
+	record.RequestMethod = ""
+	if rm := ctx.GetUserAttribute("request_method"); rm != nil {
+		record.RequestMethod = fmt.Sprint(rm)
+	}
+	record.RequestPath = ""
+	if rp := ctx.GetUserAttribute("request_path"); rp != nil {
+		record.RequestPath = fmt.Sprint(rp)
+	}
+
+	// ====== Collect AI-specific attributes as ai_log ======
+	aiLog := make(map[string]interface{})
+	collectAIAttr := func(key string) {
+		if v := ctx.GetUserAttribute(key); v != nil {
+			aiLog[key] = v
+		}
+	}
+	collectAIAttr("question")
+	collectAIAttr("system")
+	collectAIAttr("answer")
+	collectAIAttr("reasoning")
+	collectAIAttr("tool_calls")
+	collectAIAttr("messages")
+	collectAIAttr("session_id")
+	collectAIAttr("chat_id")
+	collectAIAttr("chat_round")
+	collectAIAttr("input_token")
+	collectAIAttr("output_token")
+	collectAIAttr("total_token")
+	collectAIAttr("reasoning_tokens")
+	collectAIAttr("cached_tokens")
+	collectAIAttr("input_token_details")
+	collectAIAttr("output_token_details")
+
+	// Summarize large attributes to prevent oversized logs
+	for key, val := range aiLog {
+		switch key {
+		case "messages":
+			aiLog[key] = summarizeMessages(val, config.maxAttributeBytes)
+		case "question", "answer", "reasoning", "tool_calls":
+			aiLog[key] = summarizeAttribute(key, val, config.maxAttributeBytes)
+		}
+	}
+
+	record.AILog = aiLog
+
+	// Enforce total log body size cap
+	enforceSizeCap(record, config.maxLogBodyBytes)
+
+	return record
+}
+
+// summarizeAttribute truncates a single large attribute to maxBytes while preserving
+// the head and tail. It adds metadata so downstream knows truncation happened.
+func summarizeAttribute(key string, value interface{}, maxBytes int) interface{} {
+	str := fmt.Sprint(value)
+	if len(str) <= maxBytes {
+		return value // small enough, keep as-is
+	}
+	half := maxBytes / 2
+	return str[:half] + " [..." + strconv.Itoa(len(str)-maxBytes) + " bytes truncated...] " + str[len(str)-half:]
+}
+
+// summarizeMessages handles conversation messages specially: when they exceed the byte
+// limit we keep the first 2 rounds and last 2 rounds with a summary marker in between.
+func summarizeMessages(value interface{}, maxBytes int) interface{} {
+	str := fmt.Sprint(value)
+	if len(str) <= maxBytes {
+		return value
+	}
+	raw, ok := value.(string)
+	if !ok {
+		return summarizeAttribute("messages", value, maxBytes)
+	}
+	result := gjson.Parse(raw)
+	if !result.IsArray() {
+		return summarizeAttribute("messages", value, maxBytes)
+	}
+	arr := result.Array()
+	if len(arr) <= 4 {
+		return summarizeAttribute("messages", value, maxBytes)
+	}
+	var buf bytes.Buffer
+	buf.WriteString("[")
+	for i := 0; i < 2 && i < len(arr); i++ {
+		if i > 0 {
+			buf.WriteString(",")
+		}
+		buf.WriteString(arr[i].Raw)
+	}
+	truncatedCount := len(arr) - 4
+	buf.WriteString(fmt.Sprintf(`,"[ ... %d conversation rounds truncated (original %d rounds, %d bytes) ... ]"`, truncatedCount, len(arr), len(str)))
+	for i := len(arr) - 2; i < len(arr); i++ {
+		if i >= 0 {
+			buf.WriteString(",")
+			buf.WriteString(arr[i].Raw)
+		}
+	}
+	buf.WriteString("]")
+	return buf.String()
+}
+
+// enforceSizeCap ensures the final JSON does not exceed maxBytes.
+// If it does, large fields are progressively removed.
+func enforceSizeCap(record *AILogRecord, maxBytes int) {
+	if maxBytes <= 0 || record.AILog == nil {
+		return
+	}
+	dropCandidates := []string{"messages", "answer", "reasoning", "tool_calls", "question", "system"}
+	dropped := []string{}
+	for _, key := range dropCandidates {
+		trial, _ := json.Marshal(record)
+		if len(trial) <= maxBytes {
+			break
+		}
+		if _, exists := record.AILog[key]; exists {
+			delete(record.AILog, key)
+			dropped = append(dropped, key)
+		}
+	}
+	if len(dropped) > 0 {
+		record.AILog["_dropped_fields"] = fmt.Sprintf("removed %v to stay under %dKB limit", dropped, maxBytes/1024)
+	}
+}
+func outputAILog(ctx wrapper.HttpContext, config AIStatisticsConfig) {
+	log.Debugf("[AI-LOG] building success log record...")
+	record := buildAILogRecord(ctx, config)
+	log.Debugf("[AI-LOG] record built: status=%d model=%s success=%v", record.StatusCode, record.Model, record.RequestSuccess)
+	recordBytes, err := json.Marshal(record)
+	if err != nil {
+		log.Errorf("[AI-LOG] failed to marshal AI log: %v", err)
+		return
+	}
+	log.Infof("[AILOG] %s", string(recordBytes))
+	log.Debugf("[AI-LOG] success log output complete, size=%d bytes", len(recordBytes))
+}
+
+// outputAILogFailure outputs a minimal log for requests that fail before
+// response body processing (e.g., 401/403/5xx with no body read).
+func outputAILogFailure(ctx wrapper.HttpContext, config AIStatisticsConfig) {
+	log.Debugf("[AI-LOG] building failure log record...")
+	record := &AILogRecord{
+		Timestamp:           time.Now().Format(time.RFC3339Nano),
+		PodName:             os.Getenv("POD_NAME"),
+		Route:               ctx.GetStringContext(RouteName, "-"),
+		Cluster:             ctx.GetStringContext(ClusterName, "-"),
+		Consumer:            ctx.GetStringContext(ConsumerKey, "none"),
+		BackendModelCluster: ctx.GetStringContext(ClusterName, "-"),
+	}
+	if record.PodName == "" {
+		record.PodName = "unknown"
+	}
+	log.Debugf("[AI-LOG] failure record base: route=%s cluster=%s pod=%s", record.Route, record.Cluster, record.PodName)
+
+	// Status code and success flag
+	statusCodeStr := ctx.GetStringContext(ResponseStatusCode, "0")
+	record.StatusCode, _ = strconv.Atoi(statusCodeStr)
+	record.RequestSuccess = record.StatusCode >= 200 && record.StatusCode < 400
+
+	// Failure reason
+	record.FailureReason = ctx.GetStringContext(CtxFailureReason, "")
+
+	// Backend upstream address
+	record.BackendUpstreamAddress = ctx.GetStringContext(CtxBackendUpstreamAddress, "")
+
+	// Source IP
+	if sourceIP := ctx.GetUserAttribute(SourceIP); sourceIP != nil {
+		record.SourceIP = fmt.Sprint(sourceIP)
+	}
+
+	// Session ID
+	if sessionId := ctx.GetUserAttribute(SessionID); sessionId != nil {
+		record.SessionID = fmt.Sprint(sessionId)
+	}
+
+	// Request path and method (recorded in onHttpRequestHeaders)
+	record.Attributes = make(map[string]interface{})
+	if rp := ctx.GetUserAttribute("request_path"); rp != nil {
+		record.Attributes["request_path"] = rp
+	}
+	if rm := ctx.GetUserAttribute("request_method"); rm != nil {
+		record.Attributes["request_method"] = rm
+	}
+
+	// Output
+	if recordBytes, err := json.Marshal(record); err == nil {
+		log.Infof("[AILOG] %s", string(recordBytes))
+		log.Debugf("[AI-LOG] failure log output complete: status=%d reason=%s size=%d bytes", record.StatusCode, record.FailureReason, len(recordBytes))
+	} else {
+		log.Errorf("[AI-LOG] failed to marshal failure log: %v", err)
+	}
+}
 func convertToUInt(val interface{}) (uint64, bool) {
 	switch v := val.(type) {
 	case float32:
 		return uint64(v), true
 	case float64:
-		return uint64(v), true
-	case int:
 		return uint64(v), true
 	case int32:
 		return uint64(v), true
@@ -2121,20 +2061,14 @@ func parseIP(source string) string {
 		}
 	}
 
-	// for ipv6 only
+	// 可能是纯 IPv6 地址
 	if strings.Count(source, ":") >= 2 {
 		if idx := strings.LastIndex(source, ":"); idx != -1 {
-			after := source[idx+1:]
-			// only strip if after last colon is a port number
-			if _, err := strconv.Atoi(after); err == nil {
-				return source[:idx]
-			}
+			return source[:idx]
 		}
-		return source
 	}
 	return source
 }
-
 func isValidIP(ip string) bool {
 	return ip != "" && ip != "unknown" && net.ParseIP(ip) != nil
 }
