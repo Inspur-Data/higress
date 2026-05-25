@@ -2004,12 +2004,12 @@ func outputAILogFailure(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 	}
 
 	// Request path and method (recorded in onHttpRequestHeaders)
-	record.Attributes = make(map[string]interface{})
+	record.AILog = make(map[string]interface{})
 	if rp := ctx.GetUserAttribute("request_path"); rp != nil {
-		record.Attributes["request_path"] = rp
+		record.AILog["request_path"] = rp
 	}
 	if rm := ctx.GetUserAttribute("request_method"); rm != nil {
-		record.Attributes["request_method"] = rm
+		record.AILog["request_method"] = rm
 	}
 
 	// Output
