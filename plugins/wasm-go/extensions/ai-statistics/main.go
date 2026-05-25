@@ -557,7 +557,7 @@ func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64
 		config.counterMetrics[metricName] = counter
 	}
 	counter.Increment(inc)
-	// 更新redis中的统计信息
+	// Update Redis counter stats
 	if config.RedisClient != nil && config.RedisClient.Ready() {
 		redisKeyPrefix := "modelcount."
 		redisKeyPrefix = redisKeyPrefix + os.Getenv("POD_NAME") + "."
@@ -852,7 +852,7 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) ty
 	// Set span attributes for ARMS.
 	setSpanAttribute(ArmsSpanKind, "LLM")
 	log.Debugf("ai-statistics start onHttpRequestHeaders/setAttributeBySource/SOURCEIP")
-	// 先设置 source_ip
+	// Set source_ip first
 	setAttributeBySource(ctx, config, SourceIP, nil)
 	log.Debugf("ai-statistics end onHttpRequestHeaders/setAttributeBySource/SOURCEIP")
 	// Set user defined log & span attributes which type is fixed_value
@@ -1186,21 +1186,21 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 			case ResponseBody:
 				value = gjson.GetBytes(body, attribute.Value).Value()
 			case SourceIP:
-				// 1. 先尝试从 X-Forwarded-For 获取
+				// 1. Try X-Forwarded-For first
 				value = "unknown"
-				// 1. 优先从 source.address 获取 (eBPF PPv2 注入后的真实 IP)
+				// 1. Prefer source.address (real IP from eBPF PPv2)
 				if bs, err := proxywasm.GetProperty([]string{"source", "address"}); err == nil {
 					rawSource := string(bs)
 					sourceIP := parseIP(rawSource)
 					if isValidIP(sourceIP) {
 						value = sourceIP
-						// 打印 Info 级别日志验证 eBPF 是否生效
+						// Log at Info level to verify eBPF is working
 						log.Infof("[Check-eBPF] Got Source IP from connection: %s (Raw: %s)", value, rawSource)
 					}
 				}
 
-				// 2. 如果上面的方式拿到的是内网 IP 或者是 unknown，尝试 XFF (可选，视你的信任策略而定)
-				// 注意：如果你确定 eBPF 正常工作，其实不需要 XFF 了，因为 source.address 是最可信的
+				// 2. If internal IP or unknown, try XFF (optional based on trust policy)
+				// Note: if eBPF works, XFF is not needed since source.address is most trustworthy
 				if value == "unknown" {
 					if xff, err := proxywasm.GetHttpRequestHeader("X-Forwarded-For"); err == nil && xff != "" {
 						ips := strings.Split(xff, ",")
@@ -1215,7 +1215,7 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 					}
 				}
 
-				// 3. 兜底
+				// 3. Fallback
 				if value == "" {
 					value = "unknown"
 				}
@@ -1662,7 +1662,7 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 func classifyFailure(statusCode, codeDetails, transportFailure string) string {
 	code, _ := strconv.Atoi(statusCode)
 
-	// Success range — no failure
+	// Success range - no failure
 	if code >= 200 && code < 400 {
 		return ""
 	}
@@ -2061,7 +2061,7 @@ func parseIP(source string) string {
 		}
 	}
 
-	// 可能是纯 IPv6 地址
+	// May be pure IPv6 address
 	if strings.Count(source, ":") >= 2 {
 		if idx := strings.LastIndex(source, ":"); idx != -1 {
 			return source[:idx]
