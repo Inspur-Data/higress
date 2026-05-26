@@ -40,6 +40,9 @@ description: AI 代理插件配置参考
 | 名称       | 数据类型 | 填写要求 | 默认值 | 描述                         |
 | ---------- | -------- | -------- | ------ | ---------------------------- |
 | `provider` | object   | 必填     | -      | 配置目标 AI 服务提供商的信息 |
+| `providers` | array of object | 非必填 | - | 配置多个 AI 服务提供商，用于智能路由场景 |
+| `intentRouting` | map of string | 非必填 | - | 意图路由配置，根据意图类别动态选择 provider。key 为意图类别，value 为 provider 的 id。**支持前缀和包含匹配** |
+| `activeProviderId` | string | 非必填 | - | 指定默认激活的 provider id（当配置了多个 provider 时） |
 
 `provider`的配置字段说明如下：
 
@@ -2736,3 +2739,136 @@ curl "http://localhost:10000/v1/chat/completions"  -H "Content-Type: application
   ]
 }'
 ```
+
+## 智能路由示例
+
+### 与 ai-intent 插件配合实现基于意图的智能路由
+
+**场景说明**：
+- 用户请求先经过 `ai-intent` 插件识别意图（金融、法律、技术等）
+- `ai-proxy` 根据识别的意图动态选择不同的 AI 服务提供商
+- 不同业务领域使用不同的模型，优化成本和效果
+
+**配置示例**：
+
+```yaml
+# 配置多个 provider
+providers:
+  # 通义千问 - 用于金融场景
+  - id: "qwen-finance"
+    type: "qwen"
+    apiTokens:
+      - "YOUR_QWEN_API_TOKEN"
+    modelMapping:
+      "*": "qwen-turbo"
+    
+  # GPT-4 - 用于法律咨询（高精度）
+  - id: "gpt-legal"
+    type: "openai"
+    apiTokens:
+      - "YOUR_OPENAI_API_TOKEN"
+    modelMapping:
+      "*": "gpt-4"
+      
+  # Claude - 用于技术分析（长上下文）
+  - id: "claude-tech"
+    type: "claude"
+    apiTokens:
+      - "YOUR_CLAUDE_API_TOKEN"
+    modelMapping:
+      "*": "claude-3-sonnet-20240229"
+
+# 默认 provider（当没有匹配到意图时使用）
+activeProviderId: "qwen-finance"
+
+# 意图路由配置：意图类别 -> provider id
+intentRouting:
+  "金融": "qwen-finance"
+  "法律": "gpt-legal"
+  "技术": "claude-tech"
+```
+
+**工作流程**：
+
+1. **ai-intent 插件执行**（优先级 700）
+   ```
+   用户问题：“请帮我分析这份合同的法律风险”
+   ↓
+   ai-intent 识别意图为“法律”
+   ↓
+   设置 Property: intent_category = "法律"
+   ```
+
+2. **ai-proxy 插件执行**（优先级 100）
+   ```
+   读取 intent_category = "法律"
+   ↓
+   查找 intentRouting 配置，匹配到 "法律" -> "gpt-legal"
+   ↓
+   动态选择 GPT-4 provider
+   ↓
+   转发请求到 OpenAI API
+   ```
+
+**日志输出示例**：
+```
+[onHttpRequestHeader] detected intent_category: 法律
+[onHttpRequestHeader] routed to provider 'gpt-legal' based on intent '法律'
+[onHttpRequestHeader] provider=openai
+```
+
+**优势**：
+- ✅ **成本优化**：简单问题使用低成本模型，复杂问题使用高精度模型
+- ✅ **性能提升**：不同领域使用专业优化的模型
+- ✅ **灵活扩展**：可随时添加新的意图类别和对应的 provider
+- ✅ **降级保护**：未匹配到意图时使用默认 provider
+- ✅ **智能匹配**：支持前缀和包含匹配，无需精确匹配
+
+### 意图匹配规则
+
+ai-proxy 采用**三级匹配策略**：
+
+1. **精确匹配**（优先级最高）
+   - 意图类别与配置完全一致
+   - 例如：`"法律"` → `"法律"`
+
+2. **前缀匹配**（次优先）
+   - 意图类别以配置的 key 开头
+   - 例如：`"法律咨询"` → 匹配 `"法律"`
+   - 例如：`"金融服务"` → 匹配 `"金融"`
+
+3. **包含匹配**（最后尝试）
+   - 意图类别包含配置的 key
+   - 例如：`"关于法律的问题"` → 匹配 `"法律"`
+   - 例如：`"我需要金融方面的帮助"` → 匹配 `"金融"`
+
+4. **默认 Provider**
+   - 当以上三种匹配都失败时使用
+   - 由 `activeProviderId` 指定
+
+**注意**：匹配按优先级进行，一旦匹配成功即停止后续匹配。
+- ✅ **智能匹配**：支持相似度匹配（80% 阈值），无需精确匹配
+
+### 意图匹配规则
+
+ai-proxy 采用**三级匹配策略**：
+
+1. **精确匹配**（优先级最高）
+   - 意图类别与配置完全一致
+   - 例如：`"法律"` → `"法律"`
+
+2. **相似度匹配**（阈值 80%）
+   - 基于编辑距离算法计算字符串相似度
+   - 相似度 ≥ 80% 时认为匹配成功
+   - 选择相似度最高的配置
+   - 例如：
+     - `"法律咨询"` vs `"法律"` → 相似度 66.7% (低于 80%，不匹配)
+     - `"法律问题咨询"` vs `"法律"` → 相似度 50% (低于 80%，不匹配)
+     - `"金融"` vs `"金融"` → 相似度 100% (精确匹配)
+   - **提示**：如果希望支持更宽松的匹配，建议调整 ai-intent 的 Prompt，让 LLM 输出标准化的意图类别
+
+3. **默认 Provider**
+   - 当以上两种匹配都失败时使用
+   - 由 `activeProviderId` 指定
+
+**注意**：如果需要更宽松的匹配，可以调整 ai-intent 的 Prompt，让 LLM 输出更标准化的意图类别。

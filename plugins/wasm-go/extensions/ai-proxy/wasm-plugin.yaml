@@ -1,0 +1,184 @@
+# AI Proxy 智能代理插件配置（支持意图路由）
+# 用于将用户请求智能路由到不同的 AI 服务提供商
+apiVersion: extensions.higress.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: ai-proxy
+  namespace: higress-system
+  labels:
+    app.kubernetes.io/name: ai-proxy
+    app.kubernetes.io/version: "0.1.0"
+spec:
+  # 选择要应用插件的 Gateway
+  selector:
+    matchLabels:
+      higress: higress-system-higress-gateway
+  
+  # 插件执行阶段和优先级
+  phase: UNSPECIFIED_PHASE  # 默认阶段
+  priority: 100  # 较低优先级，在 ai-intent 之后执行
+  
+  # 插件镜像地址（需要根据实际构建情况修改）
+  url: oci://registry.cn-hangzhou.aliyuncs.com/higress/wasmplugins/ai-proxy:0.1.0
+  
+  # 插件配置
+  pluginConfig:
+    # ===== 多 Provider 配置（支持智能路由）=====
+    providers:
+      # Provider 1: 通义千问 - 用于金融场景
+      - id: "qwen-finance"
+        type: "qwen"
+        apiTokens:
+          - "YOUR_QWEN_API_TOKEN"  # 替换为你的通义千问 API Token
+        modelMapping:
+          "*": "qwen-turbo"  # 所有模型请求都映射为 qwen-turbo
+        timeout: 120000
+        protocol: "openai"  # 使用 OpenAI 兼容协议
+      
+      # Provider 2: OpenAI GPT-4 - 用于法律咨询（高精度）
+      - id: "gpt-legal"
+        type: "openai"
+        apiTokens:
+          - "YOUR_OPENAI_API_TOKEN"  # 替换为你的 OpenAI API Token
+        modelMapping:
+          "*": "gpt-4"  # 所有模型请求都映射为 gpt-4
+        timeout: 120000
+        protocol: "openai"
+      
+      # Provider 3: Claude - 用于技术分析（长上下文）
+      - id: "claude-tech"
+        type: "claude"
+        apiTokens:
+          - "YOUR_CLAUDE_API_TOKEN"  # 替换为你的 Claude API Token
+        modelMapping:
+          "*": "claude-3-sonnet-20240229"
+        timeout: 120000
+        protocol: "openai"  # 自动转换为 Claude 协议
+      
+      # Provider 4: DeepSeek - 用于客服场景（低成本）
+      - id: "deepseek-support"
+        type: "deepseek"
+        apiTokens:
+          - "YOUR_DEEPSEEK_API_TOKEN"  # 替换为你的 DeepSeek API Token
+        modelMapping:
+          "*": "deepseek-chat"
+        timeout: 120000
+        protocol: "openai"
+    
+    # ===== 默认 Provider 配置 =====
+    # 当没有匹配到意图类别时，使用此 provider
+    activeProviderId: "qwen-finance"
+    
+    # ===== 意图路由配置（核心功能）=====
+    # key: 意图类别（由 ai-intent 插件识别并设置）
+    # value: provider 的 id（对应上面配置的 providers 中的 id）
+    intentRouting:
+      "金融": "qwen-finance"      # 金融类问题 → 通义千问
+      "法律": "gpt-legal"         # 法律类问题 → GPT-4
+      "技术": "claude-tech"       # 技术类问题 → Claude
+      "客服": "deepseek-support"  # 客服类问题 → DeepSeek
+    
+    # ===== 可选的高级配置 =====
+    
+    # Failover 配置：API Token 故障转移
+    # failover:
+    #   enabled: true
+    #   failureThreshold: 3
+    #   successThreshold: 1
+    #   healthCheckInterval: 5000
+    #   healthCheckTimeout: 5000
+    #   healthCheckModel: "gpt-3.5-turbo"
+    #   cooldownDuration: 60000
+    #   failoverOnStatus: ["4.*", "5.*"]
+    
+    # Retry 配置：失败请求重试
+    # retryOnFailure:
+    #   enabled: true
+    #   maxRetries: 2
+    #   retryTimeout: 30000
+    #   retryOnStatus: ["5.*"]
+    
+    # 自定义参数设置（可选）
+    # customSettings:
+    #   - name: "temperature"
+    #     value: 0.7
+    #     mode: "auto"
+    #     overwrite: false
+    #   - name: "max_tokens"
+    #     value: 2048
+    #     mode: "auto"
+    #     overwrite: false
+
+---
+# 配套路由配置：AI 代理服务路由
+# 客户端通过此路由访问 AI 代理服务
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: ai-gateway-route
+  namespace: higress-system
+spec:
+  hosts:
+    - "ai-gateway.example.com"  # 替换为你的域名
+  gateways:
+    - higress-system/higress-gateway
+  http:
+    - match:
+        - uri:
+            prefix: /v1/  # OpenAI 兼容接口路径
+      route:
+        - destination:
+            host: mock-service.higress-system.svc.cluster.local  # Mock 服务或后端服务
+            port:
+              number: 80
+      # WasmPlugin 会自动应用到匹配的路由上
+      # 无需在此处额外配置
+
+---
+# 示例：为不同业务线创建独立的路由规则
+# 可以为不同的路径前缀配置不同的 ai-proxy 实例
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: ai-finance-route
+  namespace: higress-system
+spec:
+  hosts:
+    - "finance-ai.example.com"
+  gateways:
+    - higress-system/higress-gateway
+  http:
+    - match:
+        - uri:
+            prefix: /
+      route:
+        - destination:
+            host: mock-service.higress-system.svc.cluster.local
+            port:
+              number: 80
+
+---
+# 示例：简化版配置（单 Provider，不使用意图路由）
+# 如果不需要智能路由功能，可以使用此简化配置
+apiVersion: extensions.higress.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: ai-proxy-simple
+  namespace: higress-system
+spec:
+  selector:
+    matchLabels:
+      higress: higress-system-higress-gateway
+  phase: UNSPECIFIED_PHASE
+  priority: 100
+  url: oci://registry.cn-hangzhou.aliyuncs.com/higress/wasmplugins/ai-proxy:0.1.0
+  pluginConfig:
+    # 使用旧的单 provider 配置方式
+    provider:
+      type: "qwen"
+      apiTokens:
+        - "YOUR_QWEN_API_TOKEN"
+      modelMapping:
+        "*": "qwen-turbo"
+      timeout: 120000
+      protocol: "openai"

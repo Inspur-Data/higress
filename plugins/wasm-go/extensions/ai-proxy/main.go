@@ -215,7 +215,38 @@ func saveContextsToHeaders(ctx wrapper.HttpContext) {
 }
 
 func onHttpRequestHeader(ctx wrapper.HttpContext, pluginConfig config.PluginConfig) types.Action {
+	// 尝试从 Property 中读取意图类别（由 ai-intent 插件设置）
+	intentCategory := ""
+	if intentBytes, err := proxywasm.GetProperty([]string{"intent_category"}); err == nil && len(intentBytes) > 0 {
+		intentCategory = string(intentBytes)
+		log.Debugf("[onHttpRequestHeader] detected intent_category: %s", intentCategory)
+	}
+
+	// 根据意图动态选择 provider
 	activeProvider := pluginConfig.GetProvider()
+	
+	if intentCategory != "" {
+		selectedProvider, selectedConfig, err := pluginConfig.SelectProviderByIntent(intentCategory)
+		if err != nil {
+			log.Warnf("[onHttpRequestHeader] failed to select provider by intent '%s': %v, using default provider", intentCategory, err)
+		} else if selectedProvider != nil {
+			activeProvider = selectedProvider
+			// 将选中的 provider 信息存入 context，供后续处理使用
+			ctx.SetContext("routed_provider_id", selectedConfig.GetId())
+			ctx.SetContext("intent_category", intentCategory)
+			ctx.SetContext("dynamic_provider", activeProvider)
+			ctx.SetContext("dynamic_provider_config", selectedConfig)
+			
+			// 记录路由决策日志
+			if selectedConfig.GetId() != pluginConfig.GetProviderConfig().GetId() {
+				log.Infof("[Intent Routing] Routed intent '%s' to provider '%s'", 
+					intentCategory, selectedConfig.GetId())
+			} else {
+				log.Debugf("[Intent Routing] Using default provider '%s' for intent '%s'", 
+					selectedConfig.GetId(), intentCategory)
+			}
+		}
+	}
 
 	if activeProvider == nil {
 		log.Debugf("[onHttpRequestHeader] no active provider, skip processing")
@@ -312,7 +343,7 @@ func onHttpRequestHeader(ctx wrapper.HttpContext, pluginConfig config.PluginConf
 }
 
 func onHttpRequestBody(ctx wrapper.HttpContext, pluginConfig config.PluginConfig, body []byte) types.Action {
-	activeProvider := pluginConfig.GetProvider()
+	activeProvider := getActiveProvider(ctx, pluginConfig)
 
 	if activeProvider == nil {
 		log.Debugf("[onHttpRequestBody] no active provider, skip processing")
@@ -326,7 +357,7 @@ func onHttpRequestBody(ctx wrapper.HttpContext, pluginConfig config.PluginConfig
 
 	if handler, ok := activeProvider.(provider.RequestBodyHandler); ok {
 		apiName, _ := ctx.GetContext(provider.CtxKeyApiName).(provider.ApiName)
-		providerConfig := pluginConfig.GetProviderConfig()
+		providerConfig := getActiveProviderConfig(ctx, pluginConfig)
 		// If retryOnFailure is enabled, save the transformed body to the context in case of retry
 		if providerConfig.IsRetryOnFailureEnabled() {
 			ctx.SetContext(provider.CtxRequestBody, body)
@@ -359,7 +390,7 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, pluginConfig config.PluginCo
 		return types.ActionContinue
 	}
 
-	activeProvider := pluginConfig.GetProvider()
+	activeProvider := getActiveProvider(ctx, pluginConfig)
 
 	if activeProvider == nil {
 		log.Debugf("[onHttpResponseHeaders] no active provider, skip processing")
@@ -369,7 +400,7 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, pluginConfig config.PluginCo
 
 	log.Debugf("[onHttpResponseHeaders] provider=%s", activeProvider.GetProviderType())
 
-	providerConfig := pluginConfig.GetProviderConfig()
+	providerConfig := getActiveProviderConfig(ctx, pluginConfig)
 	apiTokenInUse := providerConfig.GetApiTokenInUse(ctx)
 	apiTokens := providerConfig.GetAvailableApiToken(ctx)
 
@@ -424,14 +455,14 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, pluginConfig config.PluginCo
 }
 
 func onStreamingResponseBody(ctx wrapper.HttpContext, pluginConfig config.PluginConfig, chunk []byte, isLastChunk bool) []byte {
-	activeProvider := pluginConfig.GetProvider()
+	activeProvider := getActiveProvider(ctx, pluginConfig)
 
 	if activeProvider == nil {
 		log.Debugf("[onStreamingResponseBody] no active provider, skip processing")
 		return chunk
 	}
 
-	promoteThinking := pluginConfig.GetProviderConfig().GetPromoteThinkingOnEmpty()
+	promoteThinking := getActiveProviderConfig(ctx, pluginConfig).GetPromoteThinkingOnEmpty()
 
 	log.Debugf("[onStreamingResponseBody] provider=%s", activeProvider.GetProviderType())
 	log.Debugf("[onStreamingResponseBody] isLastChunk=%v chunk: %s", isLastChunk, string(chunk))
@@ -533,7 +564,7 @@ func onStreamingResponseBody(ctx wrapper.HttpContext, pluginConfig config.Plugin
 }
 
 func onHttpResponseBody(ctx wrapper.HttpContext, pluginConfig config.PluginConfig, body []byte) types.Action {
-	activeProvider := pluginConfig.GetProvider()
+	activeProvider := getActiveProvider(ctx, pluginConfig)
 
 	if activeProvider == nil {
 		log.Debugf("[onHttpResponseBody] no active provider, skip processing")
@@ -761,6 +792,30 @@ func getApiName(path string) provider.ApiName {
 	}
 
 	return ""
+}
+
+// getActiveProvider 获取当前请求的 active provider（支持动态路由）
+func getActiveProvider(ctx wrapper.HttpContext, pluginConfig config.PluginConfig) provider.Provider {
+	// 先尝试从 context 中获取动态选择的 provider
+	if dynamicProvider := ctx.GetContext("dynamic_provider"); dynamicProvider != nil {
+		if p, ok := dynamicProvider.(provider.Provider); ok {
+			return p
+		}
+	}
+	// 否则使用默认 provider
+	return pluginConfig.GetProvider()
+}
+
+// getActiveProviderConfig 获取当前请求的 provider config（支持动态路由）
+func getActiveProviderConfig(ctx wrapper.HttpContext, pluginConfig config.PluginConfig) *provider.ProviderConfig {
+	// 先尝试从 context 中获取动态选择的 provider config
+	if dynamicConfig := ctx.GetContext("dynamic_provider_config"); dynamicConfig != nil {
+		if cfg, ok := dynamicConfig.(*provider.ProviderConfig); ok {
+			return cfg
+		}
+	}
+	// 否则使用默认 provider config
+	return pluginConfig.GetProviderConfig()
 }
 
 func isSupportedRequestContentType(apiName provider.ApiName, contentType string) bool {

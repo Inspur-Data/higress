@@ -434,3 +434,8 @@ func TestProviderWasmSmoke(t *testing.T) {
 	test.RunTritonWasmSmokeTests(t)
 	test.RunVllmWasmSmokeTests(t)
 }
+
+func TestIntentRouting(t *testing.T) {
+	test.RunIntentRoutingParseConfigTests(t)
+	test.RunIntentRoutingOnHttpRequestHeadersTests(t)
+}
