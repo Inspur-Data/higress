@@ -27,9 +27,12 @@ const (
 	qwenChatCompletionPath                = "/api/v1/services/aigc/text-generation/generation"
 	qwenTextEmbeddingPath                 = "/api/v1/services/embeddings/text-embedding/text-embedding"
 	qwenTextRerankPath                    = "/api/v1/services/rerank/text-rerank/text-rerank"
+	qwenCompatibleTextRerankPath          = "/compatible-api/v1/reranks"
 	qwenCompatibleChatCompletionPath      = "/compatible-mode/v1/chat/completions"
 	qwenCompatibleCompletionsPath         = "/compatible-mode/v1/completions"
 	qwenCompatibleTextEmbeddingPath       = "/compatible-mode/v1/embeddings"
+	qwenCompatibleConversationsPath       = "/compatible-mode/v1/conversations"
+	qwenCompatibleResponsesPath           = "/compatible-mode/v1/responses"
 	qwenCompatibleFilesPath               = "/compatible-mode/v1/files"
 	qwenCompatibleRetrieveFilePath        = "/compatible-mode/v1/files/{file_id}"
 	qwenCompatibleRetrieveFileContentPath = "/compatible-mode/v1/files/{file_id}/content"
@@ -37,7 +40,7 @@ const (
 	qwenCompatibleRetrieveBatchPath       = "/compatible-mode/v1/batches/{batch_id}"
 	qwenBailianPath                       = "/api/v1/apps"
 	qwenMultimodalGenerationPath          = "/api/v1/services/aigc/multimodal-generation/generation"
-	qwenAnthropicMessagesPath             = "/api/v2/apps/claude-code-proxy/v1/messages"
+	qwenAnthropicMessagesPath             = "/apps/anthropic/v1/messages"
 
 	qwenAsyncAIGCPath = "/api/v1/services/aigc/"
 	qwenAsyncTaskPath = "/api/v1/tasks/"
@@ -69,11 +72,16 @@ func (m *qwenProviderInitializer) DefaultCapabilities(qwenEnableCompatible bool)
 			string(ApiNameChatCompletion):      qwenCompatibleChatCompletionPath,
 			string(ApiNameEmbeddings):          qwenCompatibleTextEmbeddingPath,
 			string(ApiNameCompletion):          qwenCompatibleCompletionsPath,
+			string(ApiNameResponses):           qwenCompatibleResponsesPath,
 			string(ApiNameFiles):               qwenCompatibleFilesPath,
 			string(ApiNameRetrieveFile):        qwenCompatibleRetrieveFilePath,
 			string(ApiNameRetrieveFileContent): qwenCompatibleRetrieveFileContentPath,
 			string(ApiNameBatches):             qwenCompatibleBatchesPath,
 			string(ApiNameRetrieveBatch):       qwenCompatibleRetrieveBatchPath,
+			string(ApiNameQwenAsyncAIGC):       qwenAsyncAIGCPath,
+			string(ApiNameQwenAsyncTask):       qwenAsyncTaskPath,
+			string(ApiNameQwenV1Rerank):        qwenCompatibleTextRerankPath,
+			string(ApiNameQwenV1Conversations): qwenCompatibleConversationsPath,
 			string(ApiNameAnthropicMessages):   qwenAnthropicMessagesPath,
 		}
 	} else {
@@ -116,17 +124,29 @@ func (m *qwenProvider) TransformRequestHeaders(ctx wrapper.HttpContext, apiName 
 
 func (m *qwenProvider) TransformRequestBodyHeaders(ctx wrapper.HttpContext, apiName ApiName, body []byte, headers http.Header) ([]byte, error) {
 	if m.config.qwenEnableCompatible {
-		if gjson.GetBytes(body, "model").Exists() {
-			rawModel := gjson.GetBytes(body, "model").String()
-			mappedModel := getMappedModel(rawModel, m.config.modelMapping)
-			newBody, err := sjson.SetBytes(body, "model", mappedModel)
+		modifiedBody := body
+		model := gjson.GetBytes(modifiedBody, "model")
+		mappedModel := ""
+		if model.Exists() {
+			rawModel := model.String()
+			mappedModel = getMappedModel(rawModel, m.config.modelMapping)
+			newBody, err := sjson.SetBytes(modifiedBody, "model", mappedModel)
 			if err != nil {
 				log.Errorf("Replace model error: %v", err)
 				return newBody, err
 			}
-			return newBody, nil
+			modifiedBody = newBody
 		}
-		return body, nil
+		if mappedModel != "" && requestBodyHasMessageReasoningContent(modifiedBody) && qwenSupportsPreserveThinking(mappedModel) {
+			// Qwen OpenAI-compatible mode requires top-level preserve_thinking=true
+			// before historical reasoning_content can be reused by supported models.
+			var err error
+			modifiedBody, err = sjson.SetBytes(modifiedBody, "preserve_thinking", true)
+			if err != nil {
+				return modifiedBody, err
+			}
+		}
+		return modifiedBody, nil
 	}
 	switch apiName {
 	case ApiNameChatCompletion:
@@ -278,6 +298,7 @@ func (m *qwenProvider) buildQwenTextGenerationRequest(ctx wrapper.HttpContext, o
 			TopP:              math.Max(qwenTopPMin, math.Min(origRequest.TopP, qwenTopPMax)),
 			IncrementalOutput: streaming && (origRequest.Tools == nil || len(origRequest.Tools) == 0),
 			EnableSearch:      m.config.qwenEnableSearch,
+			PreserveThinking:  shouldEnableQwenPreserveThinking(origRequest.Model, origRequest.Messages),
 			Tools:             origRequest.Tools,
 		},
 	}
@@ -331,6 +352,11 @@ func (m *qwenProvider) buildChatCompletionResponse(ctx wrapper.HttpContext, qwen
 }
 
 func (m *qwenProvider) buildChatCompletionStreamingResponse(ctx wrapper.HttpContext, qwenResponse *qwenTextGenResponse, incrementalStreaming bool) []*chatCompletionResponse {
+	if len(qwenResponse.Output.Choices) == 0 {
+		log.Warnf("qwen response has no choices, request_id: %s", qwenResponse.RequestId)
+		return nil
+	}
+
 	baseMessage := chatCompletionResponse{
 		Id:                qwenResponse.RequestId,
 		Created:           time.Now().UnixMilli() / 1000,
@@ -349,7 +375,7 @@ func (m *qwenProvider) buildChatCompletionStreamingResponse(ctx wrapper.HttpCont
 
 	reasoningContentMode := m.config.reasoningContentMode
 
-	log.Warnf("incrementalStreaming: %v", incrementalStreaming)
+	log.Debugf("incrementalStreaming: %v", incrementalStreaming)
 	deltaContentMessage := &chatMessage{Role: message.Role, Content: message.Content, ReasoningContent: message.ReasoningContent}
 	deltaToolCallsMessage := &chatMessage{Role: message.Role, ToolCalls: append([]toolCall{}, message.ToolCalls...)}
 	if incrementalStreaming {
@@ -553,6 +579,7 @@ type qwenTextGenParameters struct {
 	TopP              float64 `json:"top_p,omitempty"`
 	IncrementalOutput bool    `json:"incremental_output,omitempty"`
 	EnableSearch      bool    `json:"enable_search,omitempty"`
+	PreserveThinking  bool    `json:"preserve_thinking,omitempty"`
 	Tools             []tool  `json:"tools,omitempty"`
 }
 
@@ -660,13 +687,49 @@ func (m *qwenMessage) StringContent() string {
 	return ""
 }
 
+func chatMessagesHaveReasoningContent(messages []chatMessage) bool {
+	for _, message := range messages {
+		if message.ReasoningContent != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func shouldEnableQwenPreserveThinking(model string, messages []chatMessage) bool {
+	return chatMessagesHaveReasoningContent(messages) && qwenSupportsPreserveThinking(model)
+}
+
+func qwenSupportsPreserveThinking(model string) bool {
+	switch {
+	case model == "qwen3.6-max-preview":
+		return true
+	case strings.HasPrefix(model, "qwen3.6-plus"):
+		return true
+	case model == "kimi-k2.6":
+		return true
+	default:
+		return false
+	}
+}
+
+func requestBodyHasMessageReasoningContent(body []byte) bool {
+	for _, message := range gjson.GetBytes(body, "messages").Array() {
+		if message.Get("reasoning_content").String() != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func chatMessage2QwenMessage(chatMessage chatMessage) qwenMessage {
 	if chatMessage.IsStringContent() {
 		return qwenMessage{
-			Name:      chatMessage.Name,
-			Role:      chatMessage.Role,
-			Content:   chatMessage.StringContent(),
-			ToolCalls: chatMessage.ToolCalls,
+			Name:             chatMessage.Name,
+			Role:             chatMessage.Role,
+			Content:          chatMessage.StringContent(),
+			ReasoningContent: chatMessage.ReasoningContent,
+			ToolCalls:        chatMessage.ToolCalls,
 		}
 	} else {
 		var contents []qwenVlMessageContent
@@ -681,10 +744,11 @@ func chatMessage2QwenMessage(chatMessage chatMessage) qwenMessage {
 			contents = append(contents, content)
 		}
 		return qwenMessage{
-			Name:      chatMessage.Name,
-			Role:      chatMessage.Role,
-			Content:   contents,
-			ToolCalls: chatMessage.ToolCalls,
+			Name:             chatMessage.Name,
+			Role:             chatMessage.Role,
+			Content:          contents,
+			ReasoningContent: chatMessage.ReasoningContent,
+			ToolCalls:        chatMessage.ToolCalls,
 		}
 	}
 }
@@ -699,12 +763,17 @@ func (m *qwenProvider) GetApiName(path string) ApiName {
 	case strings.Contains(path, qwenTextEmbeddingPath),
 		strings.Contains(path, qwenCompatibleTextEmbeddingPath):
 		return ApiNameEmbeddings
+	case strings.Contains(path, qwenCompatibleResponsesPath):
+		return ApiNameResponses
 	case strings.Contains(path, qwenAsyncAIGCPath):
 		return ApiNameQwenAsyncAIGC
 	case strings.Contains(path, qwenAsyncTaskPath):
 		return ApiNameQwenAsyncTask
-	case strings.Contains(path, qwenTextRerankPath):
+	case strings.Contains(path, qwenTextRerankPath),
+		strings.Contains(path, qwenCompatibleTextRerankPath):
 		return ApiNameQwenV1Rerank
+	case strings.Contains(path, qwenCompatibleConversationsPath):
+		return ApiNameQwenV1Conversations
 	default:
 		return ""
 	}

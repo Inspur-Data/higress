@@ -19,6 +19,27 @@ const (
 	HeaderOriginalHost = "X-ENVOY-ORIGINAL-HOST"
 	HeaderOriginalAuth = "X-HI-ORIGINAL-AUTH"
 
+	// HeaderHigressFallbackFrom is set by Envoy custom_response's RedirectPolicy
+	// on internal_redirect (request_headers_to_add) and survives the redirect's
+	// mutateRequestHeaders pass (it is NOT in Envoy's hardcoded strip list). So
+	// its presence at the wasm boundary is a usable signal that the current
+	// filter-chain pass is an internal_redirect re-entry within this gateway.
+	//
+	// SAFETY DEPENDENCY: this header is NOT spoofing-proof unless the listener
+	// lists it in internal_only_headers. An upstream gateway that is itself in
+	// the middle of an internal_redirect chain may forward this header through
+	// to this gateway, causing this gateway's first hop to be misclassified as
+	// a re-entry. Operators relying on cascaded ai-proxy gateways should add
+	// `x-higress-fallback-from` and `x-hi-original-auth` to the listener's
+	// internal_only_headers list as defense-in-depth.
+	//
+	// Note: x-envoy-original-url (which Envoy sets on every internal_redirect
+	// in router.cc) is NOT usable here, because Envoy's recreateStream re-runs
+	// mutateRequestHeaders on the redirected stream and strips x-envoy-original-url
+	// from the hardcoded "headers to be stripped from edge AND intermediate-hop
+	// external requests" list — so wasm filters never see it on a redirect.
+	HeaderHigressFallbackFrom = "x-higress-fallback-from"
+
 	MimeTypeTextPlain       = "text/plain"
 	MimeTypeApplicationJson = "application/json"
 )
@@ -28,6 +49,9 @@ var (
 	RegCancelBatchPath                          = regexp.MustCompile(`^.*/v1/batches/(?P<batch_id>[^/]+)/cancel$`)
 	RegRetrieveFilePath                         = regexp.MustCompile(`^.*/v1/files/(?P<file_id>[^/]+)$`)
 	RegRetrieveFileContentPath                  = regexp.MustCompile(`^.*/v1/files/(?P<file_id>[^/]+)/content$`)
+	RegRetrieveVideoPath                        = regexp.MustCompile(`^.*/v1/videos/(?P<video_id>[^/]+)$`)
+	RegRetrieveVideoContentPath                 = regexp.MustCompile(`^.*/v1/videos/(?P<video_id>[^/]+)/content$`)
+	RegVideoRemixPath                           = regexp.MustCompile(`^.*/v1/videos/(?P<video_id>[^/]+)/remix$`)
 	RegRetrieveFineTuningJobPath                = regexp.MustCompile(`^.*/v1/fine_tuning/jobs/(?P<fine_tuning_job_id>[^/]+)$`)
 	RegRetrieveFineTuningJobEventsPath          = regexp.MustCompile(`^.*/v1/fine_tuning/jobs/(?P<fine_tuning_job_id>[^/]+)/events$`)
 	RegRetrieveFineTuningJobCheckpointsPath     = regexp.MustCompile(`^.*/v1/fine_tuning/jobs/(?P<fine_tuning_job_id>[^/]+)/checkpoints$`)
@@ -90,6 +114,19 @@ func MapRequestPathByCapability(apiName string, originPath string, mapping map[s
 	if !exist {
 		return ""
 	}
+	mappedPathOnly := mappedPath
+	mappedQuery := ""
+	if queryIndex := strings.Index(mappedPathOnly, "?"); queryIndex >= 0 {
+		mappedPathOnly = mappedPathOnly[:queryIndex]
+		mappedQuery = mappedPath[queryIndex:]
+	}
+	// 将查询字符串从原始路径中剥离，避免干扰正则匹配 video_id 等占位符
+	pathOnly := originPath
+	query := ""
+	if queryIndex := strings.Index(originPath, "?"); queryIndex >= 0 {
+		pathOnly = originPath[:queryIndex]
+		query = originPath[queryIndex:]
+	}
 	if strings.Contains(mappedPath, "{") && strings.Contains(mappedPath, "}") {
 		replacements := []struct {
 			regx *regexp.Regexp
@@ -99,11 +136,14 @@ func MapRequestPathByCapability(apiName string, originPath string, mapping map[s
 			{RegRetrieveFileContentPath, "file_id"},
 			{RegRetrieveBatchPath, "batch_id"},
 			{RegCancelBatchPath, "batch_id"},
+			{RegRetrieveVideoPath, "video_id"},
+			{RegRetrieveVideoContentPath, "video_id"},
+			{RegVideoRemixPath, "video_id"},
 		}
 
 		for _, r := range replacements {
-			if r.regx.MatchString(originPath) {
-				subMatch := r.regx.FindStringSubmatch(originPath)
+			if r.regx.MatchString(pathOnly) {
+				subMatch := r.regx.FindStringSubmatch(pathOnly)
 				if subMatch == nil {
 					continue
 				}
@@ -112,10 +152,21 @@ func MapRequestPathByCapability(apiName string, originPath string, mapping map[s
 					continue
 				}
 				id := subMatch[index]
-				mappedPath = r.regx.ReplaceAllStringFunc(mappedPath, func(s string) string {
-					return strings.Replace(s, "{"+r.key+"}", id, 1)
-				})
+				mappedPathOnly = strings.Replace(mappedPathOnly, "{"+r.key+"}", id, 1)
 			}
+		}
+	}
+	if mappedQuery != "" {
+		mappedPath = mappedPathOnly + mappedQuery
+	} else {
+		mappedPath = mappedPathOnly
+	}
+	if query != "" {
+		// 保留原始查询参数，例如 variant=thumbnail
+		if strings.Contains(mappedPath, "?") {
+			mappedPath = mappedPath + "&" + strings.TrimPrefix(query, "?")
+		} else {
+			mappedPath += query
 		}
 	}
 	return mappedPath
@@ -167,11 +218,6 @@ func SetOriginalRequestAuth(auth string) {
 }
 
 func OverwriteRequestAuthorizationHeader(headers http.Header, credential string) {
-	if exist := headers.Get(HeaderOriginalAuth); exist == "" {
-		if originAuth := headers.Get(HeaderAuthorization); originAuth != "" {
-			headers.Set(HeaderOriginalAuth, originAuth)
-		}
-	}
 	headers.Set(HeaderAuthorization, credential)
 }
 
