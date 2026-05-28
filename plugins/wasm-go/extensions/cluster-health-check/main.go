@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"math/rand"
-	"time"
 
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
@@ -235,20 +234,18 @@ func onHttpStreamingResponseBody(ctx wrapper.HttpContext, config ClusterHealthCh
 
 // onHttpStreamDone 流结束阶段
 func onHttpStreamDone(ctx wrapper.HttpContext, config ClusterHealthChecker) {
-	// 输出健康状态摘要
-	if log.GetLogLevel() <= log.DebugLevel {
-		healthyCount := 0
-		unhealthyCount := 0
-		
-		for _, svc := range config.ServiceList {
-			if config.IsServiceHealthy[svc] {
-				healthyCount++
-			} else {
-				unhealthyCount++
-			}
+	// 输出健康状态摘要（调试用）
+	healthyCount := 0
+	unhealthyCount := 0
+	
+	for _, svc := range config.ServiceList {
+		if config.IsServiceHealthy[svc] {
+			healthyCount++
+		} else {
+			unhealthyCount++
 		}
-		
-		log.Debugf("Health check summary - Healthy: %d, Unhealthy: %d, Total: %d",
-			healthyCount, unhealthyCount, len(config.ServiceList))
 	}
+	
+	log.Debugf("Health check summary - Healthy: %d, Unhealthy: %d, Total: %d",
+		healthyCount, unhealthyCount, len(config.ServiceList))
 }
