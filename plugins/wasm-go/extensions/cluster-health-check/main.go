@@ -26,21 +26,22 @@ func init() {
 
 // HealthCheckConfig 健康检查配置
 type HealthCheckConfig struct {
-	Enabled                    bool
+	Enabled                      bool
 	ConsecutiveFailuresThreshold int
+	ProbeProbability             float64 // 探针概率：不健康服务被选中的概率（0.0~1.0），默认0.1
 }
 
 // ClusterHealthChecker 集群健康检查器
 type ClusterHealthChecker struct {
-	ServiceList   []string
-	
+	ServiceList []string
+
 	// 健康检查配置
 	HealthCheck HealthCheckConfig
-	
+
 	// 健康状态追踪
 	ConsecutiveFailures map[string]int  // 连续失败次数
 	IsServiceHealthy    map[string]bool // 服务健康状态
-	
+
 	// 可用服务列表（用于负载均衡）
 	AvailableServices []string
 }
@@ -49,24 +50,33 @@ type ClusterHealthChecker struct {
 func parseConfig(json gjson.Result, config *ClusterHealthChecker) error {
 	config.ConsecutiveFailures = make(map[string]int)
 	config.IsServiceHealthy = make(map[string]bool)
-	
+
 	// 解析健康检查配置
 	config.HealthCheck.Enabled = true
 	if json.Get("health_check.enabled").Exists() {
 		config.HealthCheck.Enabled = json.Get("health_check.enabled").Bool()
 	}
-	
+
 	config.HealthCheck.ConsecutiveFailuresThreshold = int(json.Get("health_check.consecutive_failures_threshold").Int())
 	if config.HealthCheck.ConsecutiveFailuresThreshold == 0 {
 		config.HealthCheck.ConsecutiveFailuresThreshold = 3 // 默认连续3次失败标记为不健康
 	}
-	
+
+	config.HealthCheck.ProbeProbability = float64(json.Get("health_check.probe_probability").Float())
+	if config.HealthCheck.ProbeProbability == 0 {
+		config.HealthCheck.ProbeProbability = 0.1 // 默认10%概率探测不健康服务
+	} else if config.HealthCheck.ProbeProbability > 1.0 {
+		config.HealthCheck.ProbeProbability = 1.0
+	} else if config.HealthCheck.ProbeProbability < 0 {
+		config.HealthCheck.ProbeProbability = 0
+	}
+
 	// 解析服务列表
 	serviceList := json.Get("service_list")
 	if !serviceList.Exists() || !serviceList.IsArray() {
 		return fmt.Errorf("service_list is required and must be an array")
 	}
-	
+
 	for _, svc := range serviceList.Array() {
 		serviceName := svc.String()
 		config.ServiceList = append(config.ServiceList, serviceName)
@@ -74,12 +84,12 @@ func parseConfig(json gjson.Result, config *ClusterHealthChecker) error {
 		config.IsServiceHealthy[serviceName] = true // 初始认为健康
 		config.AvailableServices = append(config.AvailableServices, serviceName)
 	}
-	
+
 	if config.HealthCheck.Enabled {
-		log.Infof("Cluster health check enabled, services: %v, consecutive failures threshold: %d",
-			config.ServiceList, config.HealthCheck.ConsecutiveFailuresThreshold)
+		log.Infof("Cluster health check enabled, services: %v, consecutive failures threshold: %d, probe probability: %.2f",
+			config.ServiceList, config.HealthCheck.ConsecutiveFailuresThreshold, config.HealthCheck.ProbeProbability)
 	}
-	
+
 	return nil
 }
 
@@ -88,7 +98,7 @@ func (hc *ClusterHealthChecker) updateHealthStatus(serviceName string, isSuccess
 	if !hc.HealthCheck.Enabled {
 		return
 	}
-	
+
 	if isSuccess {
 		// 成功则重置失败计数
 		hc.ConsecutiveFailures[serviceName] = 0
@@ -96,13 +106,13 @@ func (hc *ClusterHealthChecker) updateHealthStatus(serviceName string, isSuccess
 			log.Infof("Service %s recovered and marked as healthy", serviceName)
 		}
 		hc.IsServiceHealthy[serviceName] = true
-		
+
 		// 重新构建可用服务列表
 		hc.rebuildAvailableServices()
 	} else {
 		// 失败则累加计数
 		hc.ConsecutiveFailures[serviceName]++
-		
+
 		// 超过阈值标记为不健康
 		if hc.ConsecutiveFailures[serviceName] >= hc.HealthCheck.ConsecutiveFailuresThreshold {
 			if hc.IsServiceHealthy[serviceName] {
@@ -110,7 +120,7 @@ func (hc *ClusterHealthChecker) updateHealthStatus(serviceName string, isSuccess
 					serviceName, hc.ConsecutiveFailures[serviceName])
 			}
 			hc.IsServiceHealthy[serviceName] = false
-			
+
 			// 从可用服务列表中移除
 			hc.removeFromAvailableServices(serviceName)
 		}
@@ -125,7 +135,7 @@ func (hc *ClusterHealthChecker) rebuildAvailableServices() {
 			hc.AvailableServices = append(hc.AvailableServices, svc)
 		}
 	}
-	
+
 	// 如果所有服务都不健康，使用全部服务（降级）
 	if len(hc.AvailableServices) == 0 {
 		log.Warn("All services are unhealthy, using all services as fallback")
@@ -142,13 +152,32 @@ func (hc *ClusterHealthChecker) removeFromAvailableServices(serviceName string) 
 		}
 	}
 	hc.AvailableServices = newList
-	
-	log.Debugf("Service %s removed from available services, remaining: %v", 
+
+	log.Warnf("Service %s removed from available services, remaining: %v",
 		serviceName, hc.AvailableServices)
 }
 
 // getRandomAvailableService 从可用服务列表中随机选择一个
+// 如果存在不健康服务，会以 probeProbability 的概率选择一个不健康服务做探针探测
 func (hc *ClusterHealthChecker) getRandomAvailableService() string {
+	// 探针机制：以一定概率从不健康服务中选一个做探测，给恢复的服务重新加入的机会
+	if hc.HealthCheck.Enabled && hc.HealthCheck.ProbeProbability > 0 {
+		// 收集所有不健康服务
+		unhealthyServices := []string{}
+		for _, svc := range hc.ServiceList {
+			if !hc.IsServiceHealthy[svc] {
+				unhealthyServices = append(unhealthyServices, svc)
+			}
+		}
+
+		// 如果有不健康服务，以 probeProbability 概率选一个做探针
+		if len(unhealthyServices) > 0 && rand.Float64() < hc.HealthCheck.ProbeProbability {
+			probeTarget := unhealthyServices[rand.Intn(len(unhealthyServices))]
+			log.Warnf("Probe: selected unhealthy service %s for health check probe", probeTarget)
+			return probeTarget
+		}
+	}
+
 	if len(hc.AvailableServices) == 0 {
 		// 降级：使用所有服务
 		if len(hc.ServiceList) > 0 {
@@ -156,7 +185,7 @@ func (hc *ClusterHealthChecker) getRandomAvailableService() string {
 		}
 		return ""
 	}
-	
+
 	return hc.AvailableServices[rand.Intn(len(hc.AvailableServices))]
 }
 
@@ -165,7 +194,7 @@ func (hc *ClusterHealthChecker) getHealthyServices() []string {
 	if !hc.HealthCheck.Enabled {
 		return hc.ServiceList
 	}
-	
+
 	return hc.AvailableServices
 }
 
@@ -173,16 +202,16 @@ func (hc *ClusterHealthChecker) getHealthyServices() []string {
 func onHttpRequestHeaders(ctx wrapper.HttpContext, config ClusterHealthChecker) types.Action {
 	// ⭐ 从可用服务列表中随机选择一个健康的服务
 	selectedService := config.getRandomAvailableService()
-	
+
 	if selectedService == "" {
 		log.Error("No available services")
 		return types.ActionContinue
 	}
-	
+
 	// 设置目标服务Header（供后续路由使用）
 	proxywasm.ReplaceHttpRequestHeader("x-higress-target-cluster", selectedService)
 	ctx.SetContext("selected_service", selectedService)
-	
+
 	// 同时设置健康服务列表Header（供其他插件参考）
 	healthyServicesStr := ""
 	for i, svc := range config.AvailableServices {
@@ -193,10 +222,10 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config ClusterHealthChecker) 
 	}
 	proxywasm.ReplaceHttpRequestHeader("x-cluster-healthy-services", healthyServicesStr)
 	ctx.SetContext("healthy_services", config.AvailableServices)
-	
-	log.Debugf("Selected service: %s, Available services: %v", 
+
+	log.Debugf("Selected service: %s, Available services: %v",
 		selectedService, config.AvailableServices)
-	
+
 	return types.ActionContinue
 }
 
@@ -204,24 +233,24 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config ClusterHealthChecker) 
 func onHttpResponseHeaders(ctx wrapper.HttpContext, config ClusterHealthChecker) types.Action {
 	statusCode, _ := proxywasm.GetHttpResponseHeader(":status")
 	ctx.SetContext("statusCode", statusCode)
-	
+
 	// ⭐ 根据实际请求的目标服务更新健康状态
 	targetCluster, _ := ctx.GetContext("selected_service").(string)
 	if targetCluster == "" {
 		// 备选：从Header获取
 		targetCluster, _ = proxywasm.GetHttpRequestHeader("x-higress-target-cluster")
 	}
-	
+
 	if targetCluster != "" {
 		isSuccess := statusCode == "200"
-		
+
 		// 更新健康状态（会自动维护AvailableServices列表）
 		config.updateHealthStatus(targetCluster, isSuccess)
-		
+
 		log.Debugf("Health status updated for %s: success=%v, status=%s",
 			targetCluster, isSuccess, statusCode)
 	}
-	
+
 	return types.ActionContinue
 }
 
@@ -237,7 +266,7 @@ func onHttpStreamDone(ctx wrapper.HttpContext, config ClusterHealthChecker) {
 	// 输出健康状态摘要（调试用）
 	healthyCount := 0
 	unhealthyCount := 0
-	
+
 	for _, svc := range config.ServiceList {
 		if config.IsServiceHealthy[svc] {
 			healthyCount++
@@ -245,7 +274,7 @@ func onHttpStreamDone(ctx wrapper.HttpContext, config ClusterHealthChecker) {
 			unhealthyCount++
 		}
 	}
-	
+
 	log.Debugf("Health check summary - Healthy: %d, Unhealthy: %d, Total: %d",
 		healthyCount, unhealthyCount, len(config.ServiceList))
 }
