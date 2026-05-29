@@ -220,10 +220,11 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config ClusterHealthChecker) 
 		}
 		healthyServicesStr += svc
 	}
+	log.Warnf("Available services: %v",config.AvailableServices)
 	proxywasm.ReplaceHttpRequestHeader("x-cluster-healthy-services", healthyServicesStr)
 	ctx.SetContext("healthy_services", config.AvailableServices)
 
-	log.Debugf("Selected service: %s, Available services: %v",
+	log.Warnf("Selected service: %s, Available services: %v",
 		selectedService, config.AvailableServices)
 
 	return types.ActionContinue
