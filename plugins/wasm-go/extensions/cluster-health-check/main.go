@@ -13,7 +13,11 @@ import (
 
 func main() {}
 
+// 全局实例：所有请求共享同一个健康检查器实例
+var globalHealthChecker *ClusterHealthChecker
+
 func init() {
+	globalHealthChecker = &ClusterHealthChecker{}
 	wrapper.SetCtx(
 		"cluster-health-check",
 		wrapper.ParseConfig(parseConfig),
@@ -48,27 +52,31 @@ type ClusterHealthChecker struct {
 
 // parseConfig 解析配置
 func parseConfig(json gjson.Result, config *ClusterHealthChecker) error {
-	config.ConsecutiveFailures = make(map[string]int)
-	config.IsServiceHealthy = make(map[string]bool)
+	// 注意：config 参数是框架传入的副本，不能跨请求持久化状态
+	// 因此所有状态读写都通过全局变量 globalHealthChecker
+	globalHealthChecker.ConsecutiveFailures = make(map[string]int)
+	globalHealthChecker.IsServiceHealthy = make(map[string]bool)
+	globalHealthChecker.AvailableServices = []string{}
+	globalHealthChecker.ServiceList = []string{}
 
 	// 解析健康检查配置
-	config.HealthCheck.Enabled = true
+	globalHealthChecker.HealthCheck.Enabled = true
 	if json.Get("health_check.enabled").Exists() {
-		config.HealthCheck.Enabled = json.Get("health_check.enabled").Bool()
+		globalHealthChecker.HealthCheck.Enabled = json.Get("health_check.enabled").Bool()
 	}
 
-	config.HealthCheck.ConsecutiveFailuresThreshold = int(json.Get("health_check.consecutive_failures_threshold").Int())
-	if config.HealthCheck.ConsecutiveFailuresThreshold == 0 {
-		config.HealthCheck.ConsecutiveFailuresThreshold = 3 // 默认连续3次失败标记为不健康
+	globalHealthChecker.HealthCheck.ConsecutiveFailuresThreshold = int(json.Get("health_check.consecutive_failures_threshold").Int())
+	if globalHealthChecker.HealthCheck.ConsecutiveFailuresThreshold == 0 {
+		globalHealthChecker.HealthCheck.ConsecutiveFailuresThreshold = 3 // 默认连续3次失败标记为不健康
 	}
 
-	config.HealthCheck.ProbeProbability = float64(json.Get("health_check.probe_probability").Float())
-	if config.HealthCheck.ProbeProbability == 0 {
-		config.HealthCheck.ProbeProbability = 0.1 // 默认10%概率探测不健康服务
-	} else if config.HealthCheck.ProbeProbability > 1.0 {
-		config.HealthCheck.ProbeProbability = 1.0
-	} else if config.HealthCheck.ProbeProbability < 0 {
-		config.HealthCheck.ProbeProbability = 0
+	globalHealthChecker.HealthCheck.ProbeProbability = float64(json.Get("health_check.probe_probability").Float())
+	if globalHealthChecker.HealthCheck.ProbeProbability == 0 {
+		globalHealthChecker.HealthCheck.ProbeProbability = 0.1 // 默认10%概率探测不健康服务
+	} else if globalHealthChecker.HealthCheck.ProbeProbability > 1.0 {
+		globalHealthChecker.HealthCheck.ProbeProbability = 1.0
+	} else if globalHealthChecker.HealthCheck.ProbeProbability < 0 {
+		globalHealthChecker.HealthCheck.ProbeProbability = 0
 	}
 
 	// 解析服务列表
@@ -79,15 +87,15 @@ func parseConfig(json gjson.Result, config *ClusterHealthChecker) error {
 
 	for _, svc := range serviceList.Array() {
 		serviceName := svc.String()
-		config.ServiceList = append(config.ServiceList, serviceName)
-		config.ConsecutiveFailures[serviceName] = 0
-		config.IsServiceHealthy[serviceName] = true // 初始认为健康
-		config.AvailableServices = append(config.AvailableServices, serviceName)
+		globalHealthChecker.ServiceList = append(globalHealthChecker.ServiceList, serviceName)
+		globalHealthChecker.ConsecutiveFailures[serviceName] = 0
+		globalHealthChecker.IsServiceHealthy[serviceName] = true // 初始认为健康
+		globalHealthChecker.AvailableServices = append(globalHealthChecker.AvailableServices, serviceName)
 	}
 
-	if config.HealthCheck.Enabled {
+	if globalHealthChecker.HealthCheck.Enabled {
 		log.Infof("Cluster health check enabled, services: %v, consecutive failures threshold: %d, probe probability: %.2f",
-			config.ServiceList, config.HealthCheck.ConsecutiveFailuresThreshold, config.HealthCheck.ProbeProbability)
+			globalHealthChecker.ServiceList, globalHealthChecker.HealthCheck.ConsecutiveFailuresThreshold, globalHealthChecker.HealthCheck.ProbeProbability)
 	}
 
 	return nil
@@ -201,7 +209,7 @@ func (hc *ClusterHealthChecker) getHealthyServices() []string {
 // onHttpRequestHeaders 请求头处理阶段
 func onHttpRequestHeaders(ctx wrapper.HttpContext, config ClusterHealthChecker) types.Action {
 	// ⭐ 从可用服务列表中随机选择一个健康的服务
-	selectedService := config.getRandomAvailableService()
+	selectedService := globalHealthChecker.getRandomAvailableService()
 
 	if selectedService == "" {
 		log.Error("No available services")
@@ -214,18 +222,18 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config ClusterHealthChecker) 
 
 	// 同时设置健康服务列表Header（供其他插件参考）
 	healthyServicesStr := ""
-	for i, svc := range config.AvailableServices {
+	for i, svc := range globalHealthChecker.AvailableServices {
 		if i > 0 {
 			healthyServicesStr += ","
 		}
 		healthyServicesStr += svc
 	}
-	log.Warnf("Available services: %v",config.AvailableServices)
+	log.Warnf("Available services: %v", globalHealthChecker.AvailableServices)
 	proxywasm.ReplaceHttpRequestHeader("x-cluster-healthy-services", healthyServicesStr)
-	ctx.SetContext("healthy_services", config.AvailableServices)
+	ctx.SetContext("healthy_services", globalHealthChecker.AvailableServices)
 
 	log.Warnf("Selected service: %s, Available services: %v",
-		selectedService, config.AvailableServices)
+		selectedService, globalHealthChecker.AvailableServices)
 
 	return types.ActionContinue
 }
@@ -246,7 +254,7 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config ClusterHealthChecker)
 		isSuccess := statusCode == "200"
 
 		// 更新健康状态（会自动维护AvailableServices列表）
-		config.updateHealthStatus(targetCluster, isSuccess)
+		globalHealthChecker.updateHealthStatus(targetCluster, isSuccess)
 
 		log.Debugf("Health status updated for %s: success=%v, status=%s",
 			targetCluster, isSuccess, statusCode)
@@ -268,8 +276,8 @@ func onHttpStreamDone(ctx wrapper.HttpContext, config ClusterHealthChecker) {
 	healthyCount := 0
 	unhealthyCount := 0
 
-	for _, svc := range config.ServiceList {
-		if config.IsServiceHealthy[svc] {
+	for _, svc := range globalHealthChecker.ServiceList {
+		if globalHealthChecker.IsServiceHealthy[svc] {
 			healthyCount++
 		} else {
 			unhealthyCount++
@@ -277,5 +285,5 @@ func onHttpStreamDone(ctx wrapper.HttpContext, config ClusterHealthChecker) {
 	}
 
 	log.Debugf("Health check summary - Healthy: %d, Unhealthy: %d, Total: %d",
-		healthyCount, unhealthyCount, len(config.ServiceList))
+		healthyCount, unhealthyCount, len(globalHealthChecker.ServiceList))
 }
