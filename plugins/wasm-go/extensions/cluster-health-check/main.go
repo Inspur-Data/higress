@@ -216,7 +216,7 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config ClusterHealthChecker) 
 		return types.ActionContinue
 	}
 
-	// 设置目标服务Header（供后续路由使用）
+	// 设置目标服务Header（供 Higress 路由使用）
 	proxywasm.ReplaceHttpRequestHeader("x-higress-target-cluster", selectedService)
 	ctx.SetContext("selected_service", selectedService)
 
@@ -243,10 +243,11 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config ClusterHealthChecker)
 	statusCode, _ := proxywasm.GetHttpResponseHeader(":status")
 	ctx.SetContext("statusCode", statusCode)
 
-	// ⭐ 根据实际请求的目标服务更新健康状态
+	// ⭐ 获取实际请求的目标服务
+	// 优先从 ctx 获取（正常场景），如果获取不到则从请求 Header 获取
+	// 注意：当后端返回 502/503 时，ctx 可能不是同一个对象，导致 GetContext 返回空
 	targetCluster, _ := ctx.GetContext("selected_service").(string)
 	if targetCluster == "" {
-		// 备选：从Header获取
 		targetCluster, _ = proxywasm.GetHttpRequestHeader("x-higress-target-cluster")
 	}
 
