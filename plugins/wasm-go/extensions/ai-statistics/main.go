@@ -1795,9 +1795,10 @@ func getSourceIP(ctx wrapper.HttpContext) string {
 
 // ====== NEW: Raw JSON Filter State Writer (fixes double-escaping) ======
 
-// writeRawAILogToFilterState writes aiLog map as raw JSON object bytes to wasm.ai_log filter state.
-// When accessLogFormat uses "ai_log":%FILTER_STATE(wasm.ai_log:PLAIN)% (without surrounding quotes),
-// the raw JSON becomes a proper JSON object in the access log output, eliminating backslash escaping.
+// writeRawAILogToFilterState writes aiLog map as JSON bytes to wasm.ai_log filter state.
+// When accessLogFormat uses "ai_log":%FILTER_STATE(wasm.ai_log:JSON)% (without surrounding quotes),
+// Envoy WasmState.serializeAsJson() parses the stored JSON string into a JSON object,
+// which is then embedded directly into the access log JSON without backslash escaping.
 func writeRawAILogToFilterState(aiLog map[string]interface{}) {
 	if aiLog == nil {
 		// Write empty object so access log shows {} instead of -
@@ -1808,8 +1809,9 @@ func writeRawAILogToFilterState(aiLog map[string]interface{}) {
 		log.Warnf("failed to marshal ai_log for filter state: %v", err)
 		return
 	}
-	// Write raw JSON bytes (NOT a JSON string) to filter state.
-	// The caller must ensure accessLogFormat has no quotes around the FILTER_STATE placeholder.
+	// Write JSON bytes to filter state. Envoy's WasmState.serializeAsJson()
+	// will parse these bytes as JSON and return a JSON object (not string),
+	// allowing direct embedding in JSON access log without escaping.
 	if err := proxywasm.SetProperty([]string{"wasm", "ai_log"}, rawJSON); err != nil {
 		log.Warnf("failed to set wasm.ai_log filter state: %v", err)
 	}
