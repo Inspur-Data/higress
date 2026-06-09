@@ -1796,9 +1796,15 @@ func getSourceIP(ctx wrapper.HttpContext) string {
 // ====== NEW: Raw JSON Filter State Writer (fixes double-escaping) ======
 
 // writeRawAILogToFilterState writes aiLog map as JSON bytes to wasm.ai_log filter state.
-// When accessLogFormat uses "ai_log":%FILTER_STATE(wasm.ai_log:JSON)% (without surrounding quotes),
-// Envoy WasmState.serializeAsJson() parses the stored JSON string into a JSON object,
-// which is then embedded directly into the access log JSON without backslash escaping.
+//
+// accessLogFormat configuration: "ai_log":%FILTER_STATE(wasm.ai_log:PLAIN)%
+//   - FILTER_STATE(PLAIN) returns the stored bytes as a string
+//   - TEXT encoding directly substitutes the PLAIN return value into the format
+//   - Result: ai_log field value is a valid JSON object literal (e.g. {"consumer":"x"})
+//   - Docker json-file driver escapes quotes when wrapping the line as JSON string
+//   - log-pilot's double-layer parser restores the nested JSON object in ES
+//
+// Note: Envoy JSON serializer is NOT available in current version (only PLAIN/TYPED).
 func writeRawAILogToFilterState(aiLog map[string]interface{}) {
 	if aiLog == nil {
 		// Write empty object so access log shows {} instead of -
@@ -1809,11 +1815,33 @@ func writeRawAILogToFilterState(aiLog map[string]interface{}) {
 		log.Warnf("failed to marshal ai_log for filter state: %v", err)
 		return
 	}
-	// Write JSON bytes to filter state. Envoy's WasmState.serializeAsJson()
-	// will parse these bytes as JSON and return a JSON object (not string),
-	// allowing direct embedding in JSON access log without escaping.
+	// Store JSON bytes in filter state. FILTER_STATE(PLAIN) returns these bytes
+	// as a string, which is directly embedded into the access log JSON by
+	// TEXT encoding. The nested quotes are escaped by Docker's json-file driver
+	// and restored by log-pilot's parser during collection.
 	if err := proxywasm.SetProperty([]string{"wasm", "ai_log"}, rawJSON); err != nil {
 		log.Warnf("failed to set wasm.ai_log filter state: %v", err)
+	}
+}
+
+// writeFlatAILogFieldsToFilterState writes key ai_log fields as independent filter state keys.
+// This flattens ai_log.consumer and ai_log.model to top-level access log fields,
+// avoiding nested JSON escaping issues in Docker json-file driver + log-pilot parsing.
+// accessLogFormat: "ai_consumer":%FILTER_STATE(wasm.ai_consumer:PLAIN)%,"ai_model":%FILTER_STATE(wasm.ai_model:PLAIN)%
+func writeFlatAILogFieldsToFilterState(ctx wrapper.HttpContext) {
+	consumer := ctx.GetStringContext(ConsumerKey, "none")
+	if consumerBytes, err := json.Marshal(consumer); err == nil {
+		proxywasm.SetProperty([]string{"wasm", "ai_consumer"}, consumerBytes)
+	}
+
+	model := "-"
+	if m := ctx.GetUserAttribute("model"); m != nil {
+		model = fmt.Sprint(m)
+	} else if rm := ctx.GetContext(tokenusage.CtxKeyRequestModel); rm != nil {
+		model = fmt.Sprint(rm)
+	}
+	if modelBytes, err := json.Marshal(model); err == nil {
+		proxywasm.SetProperty([]string{"wasm", "ai_model"}, modelBytes)
 	}
 }
 
@@ -1862,6 +1890,8 @@ func outputAILog(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 	// Write raw JSON object to filter state so access log can embed it without escaping.
 	// Must be called BEFORE json.Marshal(record) to ensure the map is finalized.
 	writeRawAILogToFilterState(record.AILog)
+	// Also write flat fields for reliable parsing by log-pilot (avoids nested JSON issues)
+	writeFlatAILogFieldsToFilterState(ctx)
 
 	recordBytes, err := json.Marshal(record)
 	if err != nil {
@@ -1925,6 +1955,8 @@ func outputAILogFailure(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 
 	// Write raw JSON to filter state for access log (fixes empty ai_log on failure)
 	writeRawAILogToFilterState(aiLog)
+	// Also write flat fields for reliable parsing by log-pilot (avoids nested JSON issues)
+	writeFlatAILogFieldsToFilterState(ctx)
 
 	// Include ai_log in the [AILOG] record too
 	record.AILog = aiLog
