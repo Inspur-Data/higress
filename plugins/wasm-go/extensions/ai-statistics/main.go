@@ -835,6 +835,8 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) ty
 	}
 	if consumer, _ := proxywasm.GetHttpRequestHeader(ConsumerKey); consumer != "" {
 		ctx.SetContext(ConsumerKey, consumer)
+		// Set consumer to user attribute for easy access in logs
+		ctx.SetUserAttribute("ai_consumer", consumer)
 	}
 
 	// Always buffer request body to extract model field
@@ -846,12 +848,6 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) ty
 	if sessionId != "" {
 		ctx.SetUserAttribute(SessionID, sessionId)
 	}
-
-	// Write flat fields to filter state EARLY (request phase).
-	// This ensures ai_consumer/ai_source_ip are available even if the request
-	// fails before reaching the response phase (401/403/connection timeout).
-	writeFilterState("wasm.ai_consumer", getConsumer(ctx))
-	writeFilterState("wasm.ai_source_ip", getSourceIP(ctx))
 
 	// Set span attributes for ARMS.
 	setSpanAttribute(ArmsSpanKind, "LLM")
@@ -899,11 +895,8 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body 
 	}
 	ctx.SetContext(tokenusage.CtxKeyRequestModel, requestModel)
 	setSpanAttribute(ArmsRequestModel, requestModel)
-
-	// Write ai_model to filter state EARLY (request body phase).
-	// This ensures ai_model is available even if the request fails
-	// before reaching the response phase.
-	writeFilterState("wasm.ai_model", requestModel)
+	// Set model to user attribute for easy access in logs
+	ctx.SetUserAttribute("ai_model", requestModel)
 
 	// Extract question (last user message) and conversation rounds
 	question := ""
@@ -937,6 +930,13 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body 
 	// Write log
 	debugLogAiLog(ctx)
 	_ = ctx.WriteUserAttributeToLogWithKey(wrapper.AILogKey)
+	
+	// Set the model and consumer to user attributes so they're available in access logs
+	ctx.SetUserAttribute("model", requestModel)
+	if consumer, _ := proxywasm.GetHttpRequestHeader(ConsumerKey); consumer != "" {
+		ctx.SetUserAttribute("consumer", consumer)
+	}
+	
 	return types.ActionContinue
 }
 
@@ -1843,35 +1843,6 @@ func writeRawAILogToFilterState(aiLog map[string]interface{}) {
 	}
 }
 
-// writeFilterState safely writes a string value to Envoy filter state.
-// Used for early writing of ai_consumer/ai_model/ai_source_ip in request phase.
-func writeFilterState(key, value string) {
-	if value == "" {
-		value = "-"
-	}
-	if err := proxywasm.SetProperty([]string{key}, []byte(value)); err != nil {
-		log.Warnf("[AI-LOG] failed to set filter state %s: %v", key, err)
-	}
-}
-
-// getConsumer reads consumer from context with dual fallback (GetContext → GetUserAttribute).
-func getConsumer(ctx wrapper.HttpContext) string {
-	consumer := "none"
-	if c := ctx.GetContext(ConsumerKey); c != nil {
-		if s, ok := c.(string); ok && s != "" {
-			consumer = s
-		}
-	}
-	if consumer == "none" {
-		if ua := ctx.GetUserAttribute("consumer"); ua != nil {
-			if s, ok := ua.(string); ok && s != "" {
-				consumer = s
-			}
-		}
-	}
-	return consumer
-}
-
 // writeFlatAILogFieldsToFilterState writes key ai_log fields as independent filter state keys.
 // This flattens ai_log.consumer and ai_log.model to top-level access log fields,
 // avoiding nested JSON escaping issues in Docker json-file driver + log-pilot parsing.
@@ -1882,6 +1853,14 @@ func writeFlatAILogFieldsToFilterState(ctx wrapper.HttpContext) {
 	if c := ctx.GetContext(ConsumerKey); c != nil {
 		if s, ok := c.(string); ok && s != "" {
 			consumer = s
+		}
+	}
+	// If consumer is not found in context, try user attribute
+	if consumer == "none" {
+		if ua := ctx.GetUserAttribute("consumer"); ua != nil {
+			if s, ok := ua.(string); ok && s != "" {
+				consumer = s
+			}
 		}
 	}
 	if err := proxywasm.SetProperty([]string{"wasm", "ai_consumer"}, []byte(consumer)); err != nil {
@@ -1921,6 +1900,14 @@ func collectBasicAILogInfo(ctx wrapper.HttpContext, aiLog map[string]interface{}
 	if c := ctx.GetContext(ConsumerKey); c != nil {
 		if s, ok := c.(string); ok && s != "" {
 			consumer = s
+		}
+	}
+	// If consumer is not found in context, try user attribute
+	if consumer == "none" {
+		if ua := ctx.GetUserAttribute("consumer"); ua != nil {
+			if s, ok := ua.(string); ok && s != "" {
+				consumer = s
+			}
 		}
 	}
 	aiLog["consumer"] = consumer
@@ -2080,6 +2067,8 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 	// Model
 	if model := ctx.GetUserAttribute("model"); model != nil {
 		record.Model = fmt.Sprint(model)
+	} else if model := ctx.GetUserAttribute("ai_model"); model != nil {
+		record.Model = fmt.Sprint(model)
 	}
 
 	// Source IP (with fallback chain)
@@ -2148,6 +2137,14 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 	collectAIAttr("cached_tokens")
 	collectAIAttr("input_token_details")
 	collectAIAttr("output_token_details")
+	
+	// Add ai_consumer and ai_model to ai_log for consistency
+	if consumer := ctx.GetUserAttribute("ai_consumer"); consumer != nil {
+		aiLog["ai_consumer"] = consumer
+	}
+	if model := ctx.GetUserAttribute("ai_model"); model != nil {
+		aiLog["ai_model"] = model
+	}
 
 	// Summarize large attributes to prevent oversized logs
 	for key, val := range aiLog {
