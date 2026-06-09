@@ -894,14 +894,16 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body 
 	ctx.SetContext(tokenusage.CtxKeyRequestModel, requestModel)
 	setSpanAttribute(ArmsRequestModel, requestModel)
 
-	// Set the number of conversation rounds (only if body is available)
+	// Extract question (last user message) and conversation rounds
+	question := ""
 	userPromptCount := 0
 	if len(body) > 0 {
 		if messages := gjson.GetBytes(body, "messages"); messages.Exists() && messages.IsArray() {
-			// OpenAI and Claude/Anthropic format - both use "messages" array with "role" field
+			// OpenAI and Claude/Anthropic format
 			for _, msg := range messages.Array() {
 				if msg.Get("role").String() == "user" {
 					userPromptCount += 1
+					question = msg.Get("content").String()
 				}
 			}
 		} else if contents := gjson.GetBytes(body, "contents"); contents.Exists() && contents.IsArray() {
@@ -909,9 +911,15 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body 
 			for _, content := range contents.Array() {
 				if !content.Get("role").Exists() || content.Get("role").String() == "user" {
 					userPromptCount += 1
+					if parts := content.Get("parts"); parts.IsArray() && len(parts.Array()) > 0 {
+						question = parts.Array()[0].Get("text").String()
+					}
 				}
 			}
 		}
+	}
+	if question != "" {
+		ctx.SetContext("ai_request_question", question)
 	}
 	ctx.SetUserAttribute(ChatRound, userPromptCount)
 
@@ -1829,24 +1837,27 @@ func writeRawAILogToFilterState(aiLog map[string]interface{}) {
 // avoiding nested JSON escaping issues in Docker json-file driver + log-pilot parsing.
 // accessLogFormat: "ai_consumer":%FILTER_STATE(wasm.ai_consumer:PLAIN)%,"ai_model":%FILTER_STATE(wasm.ai_model:PLAIN)%,"ai_source_ip":%FILTER_STATE(wasm.ai_source_ip:PLAIN)%
 func writeFlatAILogFieldsToFilterState(ctx wrapper.HttpContext) {
-	// ai_consumer
-	consumer := ctx.GetStringContext(ConsumerKey, "none")
-	if consumer == "" {
-		consumer = "none"
+	// ai_consumer: SetContext stores arbitrary type, must use GetContext + type assertion
+	consumer := "none"
+	if c := ctx.GetContext(ConsumerKey); c != nil {
+		if s, ok := c.(string); ok && s != "" {
+			consumer = s
+		}
 	}
 	if err := proxywasm.SetProperty([]string{"wasm", "ai_consumer"}, []byte(consumer)); err != nil {
 		log.Warnf("[AI-LOG] failed to set ai_consumer filter state: %v", err)
 	}
 
-	// ai_model
+	// ai_model: GetUserAttribute returns interface{}, need type conversion
 	model := "-"
 	if m := ctx.GetUserAttribute("model"); m != nil {
-		model = fmt.Sprint(m)
+		if s, ok := m.(string); ok && s != "" {
+			model = s
+		}
 	} else if rm := ctx.GetContext(tokenusage.CtxKeyRequestModel); rm != nil {
-		model = fmt.Sprint(rm)
-	}
-	if model == "" {
-		model = "-"
+		if s, ok := rm.(string); ok && s != "" {
+			model = s
+		}
 	}
 	if err := proxywasm.SetProperty([]string{"wasm", "ai_model"}, []byte(model)); err != nil {
 		log.Warnf("[AI-LOG] failed to set ai_model filter state: %v", err)
@@ -1865,13 +1876,36 @@ func collectBasicAILogInfo(ctx wrapper.HttpContext, aiLog map[string]interface{}
 	if aiLog == nil {
 		return
 	}
-	aiLog["consumer"] = ctx.GetStringContext(ConsumerKey, "none")
+	// Consumer: SetContext stores arbitrary type, must use GetContext + type assertion
+	consumer := "none"
+	if c := ctx.GetContext(ConsumerKey); c != nil {
+		if s, ok := c.(string); ok && s != "" {
+			consumer = s
+		}
+	}
+	aiLog["consumer"] = consumer
 	aiLog["route_name"] = ctx.GetStringContext(RouteName, "-")
 	aiLog["cluster_name"] = ctx.GetStringContext(ClusterName, "-")
-	if model := ctx.GetUserAttribute("model"); model != nil {
-		aiLog["model"] = model
-	} else if requestModel := ctx.GetContext(tokenusage.CtxKeyRequestModel); requestModel != nil {
-		aiLog["model"] = requestModel
+	// Model: try GetUserAttribute first, then GetContext
+	model := "-"
+	if m := ctx.GetUserAttribute("model"); m != nil {
+		if s, ok := m.(string); ok && s != "" {
+			model = s
+		}
+	}
+	if model == "-" {
+		if rm := ctx.GetContext(tokenusage.CtxKeyRequestModel); rm != nil {
+			if s, ok := rm.(string); ok && s != "" {
+				model = s
+			}
+		}
+	}
+	aiLog["model"] = model
+	// Question: cached in onHttpRequestBody, available even on failure
+	if q := ctx.GetContext("ai_request_question"); q != nil {
+		if s, ok := q.(string); ok && s != "" {
+			aiLog["question"] = s
+		}
 	}
 	if rm := ctx.GetUserAttribute("request_method"); rm != nil {
 		aiLog["request_method"] = rm
