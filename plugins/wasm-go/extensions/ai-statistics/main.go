@@ -847,6 +847,12 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) ty
 		ctx.SetUserAttribute(SessionID, sessionId)
 	}
 
+	// Write flat fields to filter state EARLY (request phase).
+	// This ensures ai_consumer/ai_source_ip are available even if the request
+	// fails before reaching the response phase (401/403/connection timeout).
+	writeFilterState("wasm.ai_consumer", getConsumer(ctx))
+	writeFilterState("wasm.ai_source_ip", getSourceIP(ctx))
+
 	// Set span attributes for ARMS.
 	setSpanAttribute(ArmsSpanKind, "LLM")
 	log.Debugf("ai-statistics start onHttpRequestHeaders/setAttributeBySource/SOURCEIP")
@@ -893,6 +899,11 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body 
 	}
 	ctx.SetContext(tokenusage.CtxKeyRequestModel, requestModel)
 	setSpanAttribute(ArmsRequestModel, requestModel)
+
+	// Write ai_model to filter state EARLY (request body phase).
+	// This ensures ai_model is available even if the request fails
+	// before reaching the response phase.
+	writeFilterState("wasm.ai_model", requestModel)
 
 	// Extract question (last user message) and conversation rounds
 	question := ""
@@ -1830,6 +1841,35 @@ func writeRawAILogToFilterState(aiLog map[string]interface{}) {
 	if err := proxywasm.SetProperty([]string{"wasm", "ai_log"}, rawJSON); err != nil {
 		log.Warnf("failed to set wasm.ai_log filter state: %v", err)
 	}
+}
+
+// writeFilterState safely writes a string value to Envoy filter state.
+// Used for early writing of ai_consumer/ai_model/ai_source_ip in request phase.
+func writeFilterState(key, value string) {
+	if value == "" {
+		value = "-"
+	}
+	if err := proxywasm.SetProperty([]string{key}, []byte(value)); err != nil {
+		log.Warnf("[AI-LOG] failed to set filter state %s: %v", key, err)
+	}
+}
+
+// getConsumer reads consumer from context with dual fallback (GetContext → GetUserAttribute).
+func getConsumer(ctx wrapper.HttpContext) string {
+	consumer := "none"
+	if c := ctx.GetContext(ConsumerKey); c != nil {
+		if s, ok := c.(string); ok && s != "" {
+			consumer = s
+		}
+	}
+	if consumer == "none" {
+		if ua := ctx.GetUserAttribute("consumer"); ua != nil {
+			if s, ok := ua.(string); ok && s != "" {
+				consumer = s
+			}
+		}
+	}
+	return consumer
 }
 
 // writeFlatAILogFieldsToFilterState writes key ai_log fields as independent filter state keys.
