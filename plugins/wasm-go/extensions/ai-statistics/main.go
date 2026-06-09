@@ -1827,21 +1827,35 @@ func writeRawAILogToFilterState(aiLog map[string]interface{}) {
 // writeFlatAILogFieldsToFilterState writes key ai_log fields as independent filter state keys.
 // This flattens ai_log.consumer and ai_log.model to top-level access log fields,
 // avoiding nested JSON escaping issues in Docker json-file driver + log-pilot parsing.
-// accessLogFormat: "ai_consumer":%FILTER_STATE(wasm.ai_consumer:PLAIN)%,"ai_model":%FILTER_STATE(wasm.ai_model:PLAIN)%
+// accessLogFormat: "ai_consumer":%FILTER_STATE(wasm.ai_consumer:PLAIN)%,"ai_model":%FILTER_STATE(wasm.ai_model:PLAIN)%,"ai_source_ip":%FILTER_STATE(wasm.ai_source_ip:PLAIN)%
 func writeFlatAILogFieldsToFilterState(ctx wrapper.HttpContext) {
+	// ai_consumer
 	consumer := ctx.GetStringContext(ConsumerKey, "none")
-	if consumerBytes, err := json.Marshal(consumer); err == nil {
-		proxywasm.SetProperty([]string{"wasm", "ai_consumer"}, consumerBytes)
+	if consumer == "" {
+		consumer = "none"
+	}
+	if err := proxywasm.SetProperty([]string{"wasm", "ai_consumer"}, []byte(consumer)); err != nil {
+		log.Warnf("[AI-LOG] failed to set ai_consumer filter state: %v", err)
 	}
 
+	// ai_model
 	model := "-"
 	if m := ctx.GetUserAttribute("model"); m != nil {
 		model = fmt.Sprint(m)
 	} else if rm := ctx.GetContext(tokenusage.CtxKeyRequestModel); rm != nil {
 		model = fmt.Sprint(rm)
 	}
-	if modelBytes, err := json.Marshal(model); err == nil {
-		proxywasm.SetProperty([]string{"wasm", "ai_model"}, modelBytes)
+	if model == "" {
+		model = "-"
+	}
+	if err := proxywasm.SetProperty([]string{"wasm", "ai_model"}, []byte(model)); err != nil {
+		log.Warnf("[AI-LOG] failed to set ai_model filter state: %v", err)
+	}
+
+	// ai_source_ip
+	sourceIP := getSourceIP(ctx)
+	if err := proxywasm.SetProperty([]string{"wasm", "ai_source_ip"}, []byte(sourceIP)); err != nil {
+		log.Warnf("[AI-LOG] failed to set ai_source_ip filter state: %v", err)
 	}
 }
 
