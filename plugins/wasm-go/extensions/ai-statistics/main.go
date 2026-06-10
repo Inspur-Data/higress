@@ -50,19 +50,18 @@ func init() {
 
 const (
 	defaultMaxBodyBytes uint32 = 100 * 1024 * 1024
-
 	// Context consts
-	StatisticsRequestStartTime   = "ai-statistics-request-start-time"
-	StatisticsFirstTokenTime     = "ai-statistics-first-token-time"
-	CtxGeneralAtrribute          = "attributes"
-	CtxLogAtrribute              = "logAttributes"
-	CtxStreamingBodyBuffer       = "streamingBodyBuffer"
-	RouteName                    = "route"
-	ClusterName                  = "cluster"
-	APIName                      = "api"
-	ConsumerKey                  = "x-mse-consumer"
-	RequestPath                  = "request_path"
-	SkipProcessing               = "skip_processing"
+	StatisticsRequestStartTime = "ai-statistics-request-start-time"
+	StatisticsFirstTokenTime   = "ai-statistics-first-token-time"
+	CtxGeneralAtrribute        = "attributes"
+	CtxLogAtrribute            = "logAttributes"
+	CtxStreamingBodyBuffer     = "streamingBodyBuffer"
+	RouteName                  = "route"
+	ClusterName                = "cluster"
+	APIName                    = "api"
+	ConsumerKey                = "x-mse-consumer"
+	RequestPath                = "request_path"
+	SkipProcessing             = "skip_processing"
 
 	// Session ID related
 	SessionID = "session_id"
@@ -158,21 +157,15 @@ const (
 	CtxRequestStartTimeSaved = "ai_statistics_request_start_time_saved"
 
 	// Response and failure tracking constants
-	ResponseStatusCode        = "ai_statistics_response_status_code"
-	CtxFailureCodeDetails     = "ai_statistics_failure_code_details"
+	ResponseStatusCode          = "ai_statistics_response_status_code"
+	CtxFailureCodeDetails       = "ai_statistics_failure_code_details"
 	CtxUpstreamTransportFailure = "ai_statistics_upstream_transport_failure"
-	CtxBackendUpstreamAddress = "ai_statistics_backend_upstream_address"
-	CtxFailureReason          = "ai_statistics_failure_reason"
+	CtxBackendUpstreamAddress   = "ai_statistics_backend_upstream_address"
+	CtxFailureReason            = "ai_statistics_failure_reason"
 
 	// Log output size limits (prevent oversized logs for large LLM contexts)
-	DefaultMaxLogBodyBytes  = 2 * 1024 * 1024 // 2MB per log record
+	DefaultMaxLogBodyBytes   = 2 * 1024 * 1024 // 2MB per log record
 	DefaultMaxAttributeBytes = 100 * 1024      // 100KB per attribute
-
-	// ====== 核心修复：Filter State Keys (必须与 accessLogFormat 严格匹配) ======
-	FilterStateKeyConsumer = "ai_consumer"
-	FilterStateKeyModel    = "ai_model"
-	FilterStateKeySourceIP = "ai_source_ip"
-	FilterStateKeyAILog    = "wasm.ai_log"
 )
 
 // getDefaultAttributes returns the default attributes configuration for empty config
@@ -456,33 +449,32 @@ func getToolCallsFromBuffer(buffer *StreamingToolCallsBuffer) []ToolCall {
 }
 
 // TracingSpan is the tracing span configuration.
-
 // AILogRecord is the structured AI log record output to stdout via [AILOG] prefix.
 // log-pilot (DaemonSet on each node) collects container stdout, detects lines
 // prefixed with [AILOG], parses the JSON, and forwards to ES.
 type AILogRecord struct {
-	Timestamp             string                 `json:"@timestamp"`
-	RequestID             string                 `json:"request_id,omitempty"`
-	RequestSuccess        bool                   `json:"request_success"`
-	StatusCode            int                    `json:"status_code"`
-	Route                 string                 `json:"route"`
-	Cluster               string                 `json:"cluster"`
-	Model                 string                 `json:"model"`
-	Consumer              string                 `json:"consumer"`
-	SourceIP              string                 `json:"source_ip"`
-	SessionID             string                 `json:"session_id,omitempty"`
-	ResponseType          string                 `json:"response_type,omitempty"`
-	LLMServiceDuration    int64                  `json:"llm_service_duration,omitempty"`
-	LLMFirstTokenDuration int64                  `json:"llm_first_token_duration,omitempty"`
-	RequestMethod         string                 `json:"request_method,omitempty"`
-	RequestPath           string                 `json:"request_path,omitempty"`
+	Timestamp             string `json:"@timestamp"`
+	RequestID             string `json:"request_id,omitempty"`
+	RequestSuccess        bool   `json:"request_success"`
+	StatusCode            int    `json:"status_code"`
+	Route                 string `json:"route"`
+	Cluster               string `json:"cluster"`
+	Model                 string `json:"model"`
+	Consumer              string `json:"consumer"`
+	SourceIP              string `json:"source_ip"`
+	SessionID             string `json:"session_id,omitempty"`
+	ResponseType          string `json:"response_type,omitempty"`
+	LLMServiceDuration    int64  `json:"llm_service_duration,omitempty"`
+	LLMFirstTokenDuration int64  `json:"llm_first_token_duration,omitempty"`
+	RequestMethod         string `json:"request_method,omitempty"`
+	RequestPath           string `json:"request_path,omitempty"`
 	// ai_log contains all AI-specific attributes (question, answer, tokens, etc.)
-	AILog                  map[string]interface{} `json:"ai_log,omitempty"`
+	AILog map[string]interface{} `json:"ai_log,omitempty"`
 	// Gateway & Backend Tracking
-	PodName                string                 `json:"gateway_pod_name"`
-	BackendModelCluster    string                 `json:"backend_model_cluster"`
-	BackendUpstreamAddress string                 `json:"backend_upstream_address,omitempty"`
-	FailureReason          string                 `json:"failure_reason,omitempty"`
+	PodName                string `json:"gateway_pod_name"`
+	BackendModelCluster    string `json:"backend_model_cluster"`
+	BackendUpstreamAddress string `json:"backend_upstream_address,omitempty"`
+	FailureReason          string `json:"failure_reason,omitempty"`
 }
 
 type Attribute struct {
@@ -501,34 +493,24 @@ type AIStatisticsConfig struct {
 	// Metrics
 	// TODO: add more metrics in Gauge and Histogram format
 	counterMetrics map[string]proxywasm.MetricCounter
-
 	// Attributes to be recorded in log & span
 	attributes []Attribute
-
 	// If there exist attributes extracted from streaming body, chunks should be buffered
 	shouldBufferStreamingBody bool
-
 	// If there exist attributes extracted from request body, request body should be buffered
 	shouldBufferRequestBody bool
-
 	// If disableOpenaiUsage is true, model/input_token/output_token logs will be skipped
 	disableOpenaiUsage bool
-
-	valueLengthLimit int
-
+	valueLengthLimit   int
 	// Path suffixes to enable the plugin on
 	enablePathSuffixes []string
-
 	// Content types to enable response body buffering
 	enableContentTypes []string
-
 	// Session ID header name (if configured, takes priority over default headers)
 	sessionIdHeader string
-
-	RedisClient wrapper.RedisClient
-
+	RedisClient     wrapper.RedisClient
 	// Log output size limits (prevent oversized logs for large LLM contexts)
-	maxLogBodyBytes  int // max bytes per log record JSON
+	maxLogBodyBytes   int // max bytes per log record JSON
 	maxAttributeBytes int // max bytes per individual attribute
 }
 
@@ -575,7 +557,6 @@ func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64
 		config.counterMetrics[metricName] = counter
 	}
 	counter.Increment(inc)
-
 	// Update Redis counter stats
 	if config.RedisClient != nil && config.RedisClient.Ready() {
 		redisKeyPrefix := "modelcount."
@@ -694,7 +675,6 @@ func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
 			}
 		}
 	}
-
 	// Metric settings
 	config.counterMetrics = make(map[string]proxywasm.MetricCounter)
 
@@ -812,52 +792,8 @@ func InitRedisClusterClient(redisConfig gjson.Result, config *AIStatisticsConfig
 	if err != nil {
 		log.Errorf("redis init failed")
 	}
+
 	return err
-}
-
-// ==========================================
-// 核心修复：Filter State 写入函数
-// ==========================================
-
-// writeStringToFilterState 将字符串写入 Envoy Filter State
-// 修复：使用 []string{"filter_state", key} 路径，确保 Access Log 的 %FILTER_STATE(key:PLAIN)% 能读取到
-func writeStringToFilterState(key, value string) {
-	if value == "" {
-		return
-	}
-	if err := proxywasm.SetProperty([]string{"filter_state", key}, []byte(value)); err != nil {
-		log.Warnf("failed to set filter state [%s]: %v", key, err)
-	}
-}
-
-// writeRawAILogToFilterState 将 aiLog map 序列化并安全地写入 Filter State
-// 修复：处理换行符等控制字符，防止破坏 Access Log 的外层 JSON 结构
-func writeRawAILogToFilterState(aiLog map[string]interface{}) {
-	if aiLog == nil {
-		aiLog = make(map[string]interface{})
-	}
-	rawJSON, err := json.Marshal(aiLog)
-	if err != nil {
-		log.Warnf("failed to marshal ai_log for filter state: %v", err)
-		return
-	}
-
-	// 强制替换控制字符，确保输出为单行合法 JSON 字符串
-	safeJSON := string(rawJSON)
-	safeJSON = strings.ReplaceAll(safeJSON, "\n", "\\n")
-	safeJSON = strings.ReplaceAll(safeJSON, "\r", "\\r")
-	safeJSON = strings.ReplaceAll(safeJSON, "\t", "\\t")
-
-	if err := proxywasm.SetProperty([]string{"filter_state", FilterStateKeyAILog}, []byte(safeJSON)); err != nil {
-		log.Warnf("failed to set %s filter state: %v", FilterStateKeyAILog, err)
-	}
-}
-
-// writeTopLevelFields 将 record 中的顶层字段提前/更新写入 filter state
-func writeTopLevelFields(record *AILogRecord) {
-	writeStringToFilterState(FilterStateKeyConsumer, record.Consumer)
-	writeStringToFilterState(FilterStateKeyModel, record.Model)
-	writeStringToFilterState(FilterStateKeySourceIP, record.SourceIP)
 }
 
 func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) types.Action {
@@ -897,14 +833,9 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) ty
 	if requestPath, _ := proxywasm.GetHttpRequestHeader(":path"); requestPath != "" {
 		ctx.SetContext(RequestPath, requestPath)
 	}
-
-	// 【核心修复】：提前获取并写入 consumer，防止请求中断导致 Access Log 缺失
-	consumer, _ := proxywasm.GetHttpRequestHeader(ConsumerKey)
-	if consumer == "" {
-		consumer = "none"
+	if consumer, _ := proxywasm.GetHttpRequestHeader(ConsumerKey); consumer != "" {
+		ctx.SetContext(ConsumerKey, consumer)
 	}
-	ctx.SetContext(ConsumerKey, consumer)
-	writeStringToFilterState(FilterStateKeyConsumer, consumer)
 
 	// Always buffer request body to extract model field
 	// This is essential for metrics and logging
@@ -918,17 +849,10 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) ty
 
 	// Set span attributes for ARMS.
 	setSpanAttribute(ArmsSpanKind, "LLM")
-
 	log.Debugf("ai-statistics start onHttpRequestHeaders/setAttributeBySource/SOURCEIP")
 	// Set source_ip first
 	setAttributeBySource(ctx, config, SourceIP, nil)
-	
-	// 【核心修复】：提前获取并写入 source_ip
-	sourceIP := getSourceIP(ctx)
-	writeStringToFilterState(FilterStateKeySourceIP, sourceIP)
-	
 	log.Debugf("ai-statistics end onHttpRequestHeaders/setAttributeBySource/SOURCEIP")
-
 	// Set user defined log & span attributes which type is fixed_value
 	setAttributeBySource(ctx, config, FixedValue, nil)
 	// Set user defined log & span attributes which type is request_header
@@ -969,11 +893,6 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body 
 	}
 	ctx.SetContext(tokenusage.CtxKeyRequestModel, requestModel)
 	setSpanAttribute(ArmsRequestModel, requestModel)
-
-	// 【核心修复】：提前获取并写入 model
-	if requestModel != "UNKNOWN" {
-		writeStringToFilterState(FilterStateKeyModel, requestModel)
-	}
 
 	// Set the number of conversation rounds (only if body is available)
 	userPromptCount := 0
@@ -1135,16 +1054,10 @@ func onHttpStreamingBody(ctx wrapper.HttpContext, config AIStatisticsConfig, dat
 				ctx.SetContext(tokenusage.CtxKeyOutputTokenDetails, usage.OutputTokenDetails)
 			}
 
-			// 【核心修复】：如果响应中返回了真实的 model，更新 Filter State
-			if usage.Model != "" {
-				writeStringToFilterState(FilterStateKeyModel, usage.Model)
-			}
-
 			// Write once
 			_ = ctx.WriteUserAttributeToLogWithKey(wrapper.AILogKey)
 		}
 	}
-
 	// If the end of the stream is reached, record metrics/logs/spans.
 	if endOfStream {
 		responseEndTime := time.Now().UnixMilli()
@@ -1165,7 +1078,6 @@ func onHttpStreamingBody(ctx wrapper.HttpContext, config AIStatisticsConfig, dat
 
 		// Write metrics
 		writeMetric(ctx, config)
-
 		// Output structured AI log to stdout (log-pilot collects)
 		// Skip if already output for failed request in onHttpResponseHeaders
 		if !ctx.GetBoolContext(CtxAILogOutput, false) {
@@ -1216,11 +1128,6 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body
 			if len(usage.OutputTokenDetails) > 0 {
 				ctx.SetContext(tokenusage.CtxKeyOutputTokenDetails, usage.OutputTokenDetails)
 			}
-
-			// 【核心修复】：如果响应中返回了真实的 model，更新 Filter State
-			if usage.Model != "" {
-				writeStringToFilterState(FilterStateKeyModel, usage.Model)
-			}
 		}
 	}
 
@@ -1233,7 +1140,6 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body
 
 	// Write metrics
 	writeMetric(ctx, config)
-
 	// Output structured AI log to stdout (log-pilot collects)
 	// Skip if already output for failed request in onHttpResponseHeaders
 	if !ctx.GetBoolContext(CtxAILogOutput, false) {
@@ -1247,6 +1153,7 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body
 }
 
 // fetches the tracing span value from the specified source.
+
 func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, source string, body []byte) {
 	for _, attribute := range config.attributes {
 		var key string
@@ -1353,21 +1260,15 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 				} else {
 					marshalledJsonStr = wrapper.MarshalStr(fmt.Sprint(formattedValue))
 				}
-				// 修复：SetProperty 返回 error，必须接收，且路径必须是 filter_state
-				if err := proxywasm.SetProperty([]string{"filter_state", key}, []byte(marshalledJsonStr)); err != nil {
+				if err := proxywasm.SetProperty([]string{key}, []byte(marshalledJsonStr)); err != nil {
 					log.Warnf("failed to set %s in filter state, raw is %s, err is %v", key, marshalledJsonStr, err)
 				}
 			} else {
 				ctx.SetUserAttribute(key, formattedValue)
 			}
 		}
-		
 		// for metrics
-		if key == tokenusage.CtxKeyModel ||
-			key == tokenusage.CtxKeyInputToken ||
-			key == tokenusage.CtxKeyOutputToken ||
-			key == tokenusage.CtxKeyTotalToken ||
-			key == SourceIP {
+		if key == tokenusage.CtxKeyModel || key == tokenusage.CtxKeyInputToken || key == tokenusage.CtxKeyOutputToken || key == tokenusage.CtxKeyTotalToken || key == SourceIP {
 			ctx.SetContext(key, value)
 		}
 		if attribute.ApplyToSpan {
@@ -1403,8 +1304,7 @@ func getBuiltinAttributeDefaultSources(key string) []string {
 		return []string{RequestBody}
 	case BuiltinAnswerKey, BuiltinToolCallsKey, BuiltinReasoningKey:
 		return []string{ResponseStreamingBody, ResponseBody}
-	case BuiltinReasoningTokens, BuiltinCachedTokens,
-		BuiltinInputTokenDetails, BuiltinOutputTokenDetails:
+	case BuiltinReasoningTokens, BuiltinCachedTokens, BuiltinInputTokenDetails, BuiltinOutputTokenDetails:
 		// Token details are extracted from context (set by tokenusage.GetTokenUsage),
 		// not from body parsing. We use ResponseStreamingBody/ResponseBody to indicate
 		// they should be processed during response phase, but they don't require body buffering.
@@ -1504,12 +1404,7 @@ func getBuiltinAttributeFallback(ctx wrapper.HttpContext, config AIStatisticsCon
 	case BuiltinReasoningTokens:
 		// Extract reasoning_tokens from output_token_details (only available after response)
 		if source == ResponseBody || source == ResponseStreamingBody {
-			// 修复：安全断言，防止 panic
-			if outputTokenDetailsRaw, ok := ctx.GetContext(tokenusage.CtxKeyOutputTokenDetails).(map[string]interface{}); ok {
-				if reasoningTokens, exists := outputTokenDetailsRaw["reasoning_tokens"]; exists {
-					return reasoningTokens
-				}
-			} else if outputTokenDetails, ok := ctx.GetContext(tokenusage.CtxKeyOutputTokenDetails).(map[string]int64); ok {
+			if outputTokenDetails, ok := ctx.GetContext(tokenusage.CtxKeyOutputTokenDetails).(map[string]int64); ok {
 				if reasoningTokens, exists := outputTokenDetails["reasoning_tokens"]; exists {
 					return reasoningTokens
 				}
@@ -1518,11 +1413,7 @@ func getBuiltinAttributeFallback(ctx wrapper.HttpContext, config AIStatisticsCon
 	case BuiltinCachedTokens:
 		// Extract cached_tokens from input_token_details (only available after response)
 		if source == ResponseBody || source == ResponseStreamingBody {
-			if inputTokenDetailsRaw, ok := ctx.GetContext(tokenusage.CtxKeyInputTokenDetails).(map[string]interface{}); ok {
-				if cachedTokens, exists := inputTokenDetailsRaw["cached_tokens"]; exists {
-					return cachedTokens
-				}
-			} else if inputTokenDetails, ok := ctx.GetContext(tokenusage.CtxKeyInputTokenDetails).(map[string]int64); ok {
+			if inputTokenDetails, ok := ctx.GetContext(tokenusage.CtxKeyInputTokenDetails).(map[string]int64); ok {
 				if cachedTokens, exists := inputTokenDetails["cached_tokens"]; exists {
 					return cachedTokens
 				}
@@ -1533,8 +1424,6 @@ func getBuiltinAttributeFallback(ctx wrapper.HttpContext, config AIStatisticsCon
 		if source == ResponseBody || source == ResponseStreamingBody {
 			if inputTokenDetails, ok := ctx.GetContext(tokenusage.CtxKeyInputTokenDetails).(map[string]int64); ok {
 				return inputTokenDetails
-			} else if inputTokenDetailsRaw, ok := ctx.GetContext(tokenusage.CtxKeyInputTokenDetails).(map[string]interface{}); ok {
-				return inputTokenDetailsRaw
 			}
 		}
 	case BuiltinOutputTokenDetails:
@@ -1542,8 +1431,6 @@ func getBuiltinAttributeFallback(ctx wrapper.HttpContext, config AIStatisticsCon
 		if source == ResponseBody || source == ResponseStreamingBody {
 			if outputTokenDetails, ok := ctx.GetContext(tokenusage.CtxKeyOutputTokenDetails).(map[string]int64); ok {
 				return outputTokenDetails
-			} else if outputTokenDetailsRaw, ok := ctx.GetContext(tokenusage.CtxKeyOutputTokenDetails).(map[string]interface{}); ok {
-				return outputTokenDetailsRaw
 			}
 		}
 	}
@@ -1906,36 +1793,61 @@ func getSourceIP(ctx wrapper.HttpContext) string {
 	return "unknown"
 }
 
-// collectBasicAILogInfo collects basic request info into the ai_log map.
-// This ensures even failed requests have essential fields for debugging and filtering.
-func collectBasicAILogInfo(ctx wrapper.HttpContext, aiLog map[string]interface{}) {
+// ====== NEW: Raw JSON Filter State Writer (fixes double-escaping) ======
+
+// writeRawAILogToFilterState writes aiLog map as JSON bytes to wasm.ai_log filter state.
+// When accessLogFormat uses "ai_log":%FILTER_STATE(wasm.ai_log:JSON)% (without surrounding quotes),
+// Envoy WasmState.serializeAsJson() parses the stored JSON string into a JSON object,
+// which is then embedded directly into the access log JSON without backslash escaping.
+func writeRawAILogToFilterState(aiLog map[string]interface{}) {
 	if aiLog == nil {
+		// Write empty object so access log shows {} instead of -
+		aiLog = make(map[string]interface{})
+	}
+	rawJSON, err := json.Marshal(aiLog)
+	if err != nil {
+		log.Warnf("failed to marshal ai_log for filter state: %v", err)
 		return
 	}
-	aiLog["consumer"] = ctx.GetStringContext(ConsumerKey, "none")
-	aiLog["route_name"] = ctx.GetStringContext(RouteName, "-")
-	aiLog["cluster_name"] = ctx.GetStringContext(ClusterName, "-")
-	if model := ctx.GetUserAttribute("model"); model != nil {
-		aiLog["model"] = model
-	} else if requestModel := ctx.GetContext(tokenusage.CtxKeyRequestModel); requestModel != nil {
-		aiLog["model"] = requestModel
+	// Write JSON bytes to filter state. Envoy's WasmState.serializeAsJson()
+	// will parse these bytes as JSON and return a JSON object (not string),
+	// allowing direct embedding in JSON access log without escaping.
+	if err := proxywasm.SetProperty([]string{"wasm", "ai_log"}, rawJSON); err != nil {
+		log.Warnf("failed to set wasm.ai_log filter state: %v", err)
 	}
-	if rm := ctx.GetUserAttribute("request_method"); rm != nil {
-		aiLog["request_method"] = rm
+}
+
+// ====== 修改点1：重写 writeStringToFilterState 为 PLAIN 格式 ======
+// writeStringToFilterState 将字符串以 JSON 字符串格式写入 Envoy filter state。
+// 存储的内容为带双引号的 JSON 字符串字面量（如 "user-123"）。
+// 配合 accessLogFormat 中的 %FILTER_STATE(wasm.key:PLAIN)% 使用（注意：accessLogFormat 中该字段值位置不要加引号），
+// 可直接嵌入 JSON 格式的 access log，避免反斜杠转义问题。
+func writeStringToFilterState(key, value string) {
+	if value == "" {
+		value = "-"
 	}
-	if rp := ctx.GetUserAttribute("request_path"); rp != nil {
-		aiLog["request_path"] = rp
+	// 将字符串序列化为 JSON 字符串字面量（自动添加双引号并转义内部特殊字符）
+	jsonBytes, err := json.Marshal(value)
+	if err != nil {
+		log.Warnf("failed to marshal value for key %s: %v", key, err)
+		return
 	}
-	if sessionId := ctx.GetUserAttribute(SessionID); sessionId != nil {
-		aiLog["session_id"] = sessionId
+	if err := proxywasm.SetProperty([]string{"wasm", key}, jsonBytes); err != nil {
+		log.Warnf("failed to set filter state wasm.%s: %v", key, err)
+	} else {
+		log.Debugf("successfully set filter state wasm.%s = %s", key, value)
 	}
-	statusCodeStr := ctx.GetStringContext(ResponseStatusCode, "0")
-	if sc, _ := strconv.Atoi(statusCodeStr); sc > 0 {
-		aiLog["status_code"] = sc
+}
+
+// ====== 修改点2：重写 writeTopLevelFields ======
+// writeTopLevelFields 将 record 中的核心字段单独写入 filter state
+func writeTopLevelFields(record *AILogRecord) {
+	if record == nil {
+		return
 	}
-	if failureReason := ctx.GetStringContext(CtxFailureReason, ""); failureReason != "" {
-		aiLog["failure_reason"] = failureReason
-	}
+	writeStringToFilterState("consumer", record.Consumer)
+	writeStringToFilterState("model", record.Model)
+	writeStringToFilterState("source_ip", record.SourceIP)
 }
 
 // ====== Log Output Functions ======
@@ -1948,12 +1860,12 @@ func outputAILog(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 	record := buildAILogRecord(ctx, config)
 	log.Debugf("[AI-LOG] record built: status=%d model=%s success=%v", record.StatusCode, record.Model, record.RequestSuccess)
 
-	// 【核心修复】：先写顶层字段 (确保 Filter State 是最新的)
-	writeTopLevelFields(record)
-
 	// Write raw JSON object to filter state so access log can embed it without escaping.
 	// Must be called BEFORE json.Marshal(record) to ensure the map is finalized.
 	writeRawAILogToFilterState(record.AILog)
+
+	// 【新增】写入平级字段到 filter state，供 accessLogFormat 平级引用
+	writeTopLevelFields(record)
 
 	recordBytes, err := json.Marshal(record)
 	if err != nil {
@@ -1981,7 +1893,7 @@ func outputAILogFailure(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 		record.PodName = "unknown"
 	}
 
-	// 提前写入请求阶段提取的 request model，防止 onHttpRequestBody 未执行
+	// 【补充】失败请求也可能已经解析过 request model（在 onHttpRequestBody 中设置）
 	if requestModel := ctx.GetContext(tokenusage.CtxKeyRequestModel); requestModel != nil {
 		record.Model = fmt.Sprint(requestModel)
 	}
@@ -2021,11 +1933,11 @@ func outputAILogFailure(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 	aiLog := make(map[string]interface{})
 	collectBasicAILogInfo(ctx, aiLog)
 
-	// 【核心修复】：失败时同样先写顶层字段，再写 ai_log
-	writeTopLevelFields(record)
-	
 	// Write raw JSON to filter state for access log (fixes empty ai_log on failure)
 	writeRawAILogToFilterState(aiLog)
+
+	// 【新增】写入平级字段到 filter state，供 accessLogFormat 平级引用
+	writeTopLevelFields(record)
 
 	// Include ai_log in the [AILOG] record too
 	record.AILog = aiLog
@@ -2062,7 +1974,7 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 	if model := ctx.GetUserAttribute("model"); model != nil {
 		record.Model = fmt.Sprint(model)
 	} else if requestModel := ctx.GetContext(tokenusage.CtxKeyRequestModel); requestModel != nil {
-		// 增加兜底 fallback：如果 user attribute 中没有 model，则使用请求阶段提取的 model
+		// 【修复】增加 fallback：如果 user attribute 中没有 model，尝试从请求阶段解析的 model 获取
 		record.Model = fmt.Sprint(requestModel)
 	}
 
@@ -2181,7 +2093,6 @@ func summarizeMessages(value interface{}, maxBytes int) interface{} {
 	if len(arr) <= 4 {
 		return summarizeAttribute("messages", value, maxBytes)
 	}
-
 	var buf bytes.Buffer
 	buf.WriteString("[")
 	for i := 0; i < 2 && i < len(arr); i++ {
@@ -2224,7 +2135,6 @@ func enforceSizeCap(record *AILogRecord, maxBytes int) {
 		record.AILog["_dropped_fields"] = fmt.Sprintf("removed %v to stay under %dKB limit", dropped, maxBytes/1024)
 	}
 }
-
 func convertToUInt(val interface{}) (uint64, bool) {
 	switch v := val.(type) {
 	case float32:
@@ -2274,7 +2184,38 @@ func parseIP(source string) string {
 	}
 	return source
 }
-
 func isValidIP(ip string) bool {
 	return ip != "" && ip != "unknown" && net.ParseIP(ip) != nil
+}
+
+// collectBasicAILogInfo collects basic request info into the ai_log map.
+// This ensures even failed requests have essential fields for debugging and filtering.
+func collectBasicAILogInfo(ctx wrapper.HttpContext, aiLog map[string]interface{}) {
+	if aiLog == nil {
+		return
+	}
+	aiLog["consumer"] = ctx.GetStringContext(ConsumerKey, "none")
+	aiLog["route_name"] = ctx.GetStringContext(RouteName, "-")
+	aiLog["cluster_name"] = ctx.GetStringContext(ClusterName, "-")
+	if model := ctx.GetUserAttribute("model"); model != nil {
+		aiLog["model"] = model
+	} else if requestModel := ctx.GetContext(tokenusage.CtxKeyRequestModel); requestModel != nil {
+		aiLog["model"] = requestModel
+	}
+	if rm := ctx.GetUserAttribute("request_method"); rm != nil {
+		aiLog["request_method"] = rm
+	}
+	if rp := ctx.GetUserAttribute("request_path"); rp != nil {
+		aiLog["request_path"] = rp
+	}
+	if sessionId := ctx.GetUserAttribute(SessionID); sessionId != nil {
+		aiLog["session_id"] = sessionId
+	}
+	statusCodeStr := ctx.GetStringContext(ResponseStatusCode, "0")
+	if sc, _ := strconv.Atoi(statusCodeStr); sc > 0 {
+		aiLog["status_code"] = sc
+	}
+	if failureReason := ctx.GetStringContext(CtxFailureReason, ""); failureReason != "" {
+		aiLog["failure_reason"] = failureReason
+	}
 }
