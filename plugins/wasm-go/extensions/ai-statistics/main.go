@@ -19,6 +19,7 @@ import (
 	"github.com/higress-group/wasm-go/pkg/tokenusage"
 	"github.com/higress-group/wasm-go/pkg/wrapper"
 	"github.com/tidwall/gjson"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 const (
@@ -1817,54 +1818,56 @@ func writeRawAILogToFilterState(aiLog map[string]interface{}) {
 	}
 }
 
-// ====== NEW: Filter State 平级字段写入 ======
-
-// writeStringToFilterState 将字符串写入 Envoy filter state。
-// Access Log 通过 %FILTER_STATE(wasm.<key>:PLAIN)% 直接引用。
-// 即使 value 为空也强制写入，避免 Envoy 默认输出 "-" 导致 JSON 格式被破坏。
+// ====== 修改点1：重写 writeStringToFilterState 为 TYPED 格式 ======
+// writeStringToFilterState 将字符串以 TYPED 格式写入 Envoy filter state
+// 这样 %FILTER_STATE(wasm.key:TYPED)% 可以正确读取
 func writeStringToFilterState(key, value string) {
-	if err := proxywasm.SetProperty([]string{"wasm", key}, []byte(value)); err != nil {
-		log.Warnf("failed to set filter state wasm.%s: %v", key, err)
-	}
-}
-
-// writeTopLevelFields 将 record 中的核心字段单独写入 filter state，
-// 供 accessLogFormat 平级引用。
-func writeTopLevelFields(record *AILogRecord) {
-	writeStringToFilterState("consumer", record.Consumer)
-	writeStringToFilterState("model", record.Model)
-	writeStringToFilterState("source_ip", record.SourceIP)
-}
-
-// collectBasicAILogInfo collects basic request info into the ai_log map.
-// This ensures even failed requests have essential fields for debugging and filtering.
-func collectBasicAILogInfo(ctx wrapper.HttpContext, aiLog map[string]interface{}) {
-	if aiLog == nil {
+	if value == "" {
+		log.Debugf("skip writing empty value for filter state wasm.%s", key)
 		return
 	}
-	aiLog["consumer"] = ctx.GetStringContext(ConsumerKey, "none")
-	aiLog["route_name"] = ctx.GetStringContext(RouteName, "-")
-	aiLog["cluster_name"] = ctx.GetStringContext(ClusterName, "-")
-	if model := ctx.GetUserAttribute("model"); model != nil {
-		aiLog["model"] = model
-	} else if requestModel := ctx.GetContext(tokenusage.CtxKeyRequestModel); requestModel != nil {
-		aiLog["model"] = requestModel
+	// 构建 structpb.Struct，包含一个字段
+	// Envoy 的 TYPED 格式期望的数据类型是 google.protobuf.Struct
+	fields := make(map[string]*structpb.Value)
+	fields[key] = structpb.NewStringValue(value)
+	s := &structpb.Struct{
+		Fields: fields,
 	}
-	if rm := ctx.GetUserAttribute("request_method"); rm != nil {
-		aiLog["request_method"] = rm
+	// 将 struct 序列化为 protobuf 二进制 (anypb.Any 包装)
+	anyBytes, err := s.MarshalVT() // 注意：需要 protobuf 库，或者使用 proto.Marshal
+	if err != nil {
+		log.Warnf("failed to marshal struct for key %s: %v", key, err)
+		// 降级方案：尝试直接写入字符串（可能无效但保留日志）
+		if err2 := proxywasm.SetProperty([]string{"wasm", key}, []byte(value)); err2 != nil {
+			log.Warnf("failed to set fallback string filter state wasm.%s: %v", key, err2)
+		}
+		return
 	}
-	if rp := ctx.GetUserAttribute("request_path"); rp != nil {
-		aiLog["request_path"] = rp
+	// 写入 filter state，key 为 wasm.xxx，存储的是 protobuf 二进制数据
+	if err := proxywasm.SetProperty([]string{"wasm", key}, anyBytes); err != nil {
+		log.Warnf("failed to set typed filter state wasm.%s: %v", key, err)
+	} else {
+		log.Debugf("successfully set typed filter state wasm.%s = %s", key, value)
 	}
-	if sessionId := ctx.GetUserAttribute(SessionID); sessionId != nil {
-		aiLog["session_id"] = sessionId
+}
+
+// ====== 修改点2：增强 writeTopLevelFields，仅写入非空值 ======
+// writeTopLevelFields 将 record 中的核心字段单独写入 filter state
+func writeTopLevelFields(record *AILogRecord) {
+	if record == nil {
+		return
 	}
-	statusCodeStr := ctx.GetStringContext(ResponseStatusCode, "0")
-	if sc, _ := strconv.Atoi(statusCodeStr); sc > 0 {
-		aiLog["status_code"] = sc
+	// 写入 consumer，非空且非默认值 "none"
+	if record.Consumer != "" && record.Consumer != "none" {
+		writeStringToFilterState("consumer", record.Consumer)
 	}
-	if failureReason := ctx.GetStringContext(CtxFailureReason, ""); failureReason != "" {
-		aiLog["failure_reason"] = failureReason
+	// 写入 model，非空且非默认值 "-"
+	if record.Model != "" && record.Model != "-" {
+		writeStringToFilterState("model", record.Model)
+	}
+	// 写入 source_ip，非空且非默认值 "unknown"
+	if record.SourceIP != "" && record.SourceIP != "unknown" {
+		writeStringToFilterState("source_ip", record.SourceIP)
 	}
 }
 
@@ -2204,4 +2207,36 @@ func parseIP(source string) string {
 }
 func isValidIP(ip string) bool {
 	return ip != "" && ip != "unknown" && net.ParseIP(ip) != nil
+}
+
+// collectBasicAILogInfo collects basic request info into the ai_log map.
+// This ensures even failed requests have essential fields for debugging and filtering.
+func collectBasicAILogInfo(ctx wrapper.HttpContext, aiLog map[string]interface{}) {
+	if aiLog == nil {
+		return
+	}
+	aiLog["consumer"] = ctx.GetStringContext(ConsumerKey, "none")
+	aiLog["route_name"] = ctx.GetStringContext(RouteName, "-")
+	aiLog["cluster_name"] = ctx.GetStringContext(ClusterName, "-")
+	if model := ctx.GetUserAttribute("model"); model != nil {
+		aiLog["model"] = model
+	} else if requestModel := ctx.GetContext(tokenusage.CtxKeyRequestModel); requestModel != nil {
+		aiLog["model"] = requestModel
+	}
+	if rm := ctx.GetUserAttribute("request_method"); rm != nil {
+		aiLog["request_method"] = rm
+	}
+	if rp := ctx.GetUserAttribute("request_path"); rp != nil {
+		aiLog["request_path"] = rp
+	}
+	if sessionId := ctx.GetUserAttribute(SessionID); sessionId != nil {
+		aiLog["session_id"] = sessionId
+	}
+	statusCodeStr := ctx.GetStringContext(ResponseStatusCode, "0")
+	if sc, _ := strconv.Atoi(statusCodeStr); sc > 0 {
+		aiLog["status_code"] = sc
+	}
+	if failureReason := ctx.GetStringContext(CtxFailureReason, ""); failureReason != "" {
+		aiLog["failure_reason"] = failureReason
+	}
 }
