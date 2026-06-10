@@ -1991,6 +1991,9 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 	// Model
 	if model := ctx.GetUserAttribute("model"); model != nil {
 		record.Model = fmt.Sprint(model)
+	} else if requestModel := ctx.GetContext(tokenusage.CtxKeyRequestModel); requestModel != nil {
+		// 【修复】增加 fallback：如果 user attribute 中没有 model，尝试从请求阶段解析的 model 获取
+		record.Model = fmt.Sprint(requestModel)
 	}
 
 	// Source IP (with fallback chain)
