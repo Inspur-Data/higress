@@ -835,8 +835,6 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) ty
 	}
 	if consumer, _ := proxywasm.GetHttpRequestHeader(ConsumerKey); consumer != "" {
 		ctx.SetContext(ConsumerKey, consumer)
-		// Set consumer to user attribute for easy access in logs
-		ctx.SetUserAttribute("ai_consumer", consumer)
 	}
 
 	// Always buffer request body to extract model field
@@ -895,19 +893,15 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body 
 	}
 	ctx.SetContext(tokenusage.CtxKeyRequestModel, requestModel)
 	setSpanAttribute(ArmsRequestModel, requestModel)
-	// Set model to user attribute for easy access in logs
-	ctx.SetUserAttribute("ai_model", requestModel)
 
-	// Extract question (last user message) and conversation rounds
-	question := ""
+	// Set the number of conversation rounds (only if body is available)
 	userPromptCount := 0
 	if len(body) > 0 {
 		if messages := gjson.GetBytes(body, "messages"); messages.Exists() && messages.IsArray() {
-			// OpenAI and Claude/Anthropic format
+			// OpenAI and Claude/Anthropic format - both use "messages" array with "role" field
 			for _, msg := range messages.Array() {
 				if msg.Get("role").String() == "user" {
 					userPromptCount += 1
-					question = msg.Get("content").String()
 				}
 			}
 		} else if contents := gjson.GetBytes(body, "contents"); contents.Exists() && contents.IsArray() {
@@ -915,28 +909,15 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body 
 			for _, content := range contents.Array() {
 				if !content.Get("role").Exists() || content.Get("role").String() == "user" {
 					userPromptCount += 1
-					if parts := content.Get("parts"); parts.IsArray() && len(parts.Array()) > 0 {
-						question = parts.Array()[0].Get("text").String()
-					}
 				}
 			}
 		}
-	}
-	if question != "" {
-		ctx.SetContext("ai_request_question", question)
 	}
 	ctx.SetUserAttribute(ChatRound, userPromptCount)
 
 	// Write log
 	debugLogAiLog(ctx)
 	_ = ctx.WriteUserAttributeToLogWithKey(wrapper.AILogKey)
-	
-	// Set the model and consumer to user attributes so they're available in access logs
-	ctx.SetUserAttribute("model", requestModel)
-	if consumer, _ := proxywasm.GetHttpRequestHeader(ConsumerKey); consumer != "" {
-		ctx.SetUserAttribute("consumer", consumer)
-	}
-	
 	return types.ActionContinue
 }
 
@@ -1815,15 +1796,9 @@ func getSourceIP(ctx wrapper.HttpContext) string {
 // ====== NEW: Raw JSON Filter State Writer (fixes double-escaping) ======
 
 // writeRawAILogToFilterState writes aiLog map as JSON bytes to wasm.ai_log filter state.
-//
-// accessLogFormat configuration: "ai_log":%FILTER_STATE(wasm.ai_log:PLAIN)%
-//   - FILTER_STATE(PLAIN) returns the stored bytes as a string
-//   - TEXT encoding directly substitutes the PLAIN return value into the format
-//   - Result: ai_log field value is a valid JSON object literal (e.g. {"consumer":"x"})
-//   - Docker json-file driver escapes quotes when wrapping the line as JSON string
-//   - log-pilot's double-layer parser restores the nested JSON object in ES
-//
-// Note: Envoy JSON serializer is NOT available in current version (only PLAIN/TYPED).
+// When accessLogFormat uses "ai_log":%FILTER_STATE(wasm.ai_log:JSON)% (without surrounding quotes),
+// Envoy WasmState.serializeAsJson() parses the stored JSON string into a JSON object,
+// which is then embedded directly into the access log JSON without backslash escaping.
 func writeRawAILogToFilterState(aiLog map[string]interface{}) {
 	if aiLog == nil {
 		// Write empty object so access log shows {} instead of -
@@ -1834,59 +1809,31 @@ func writeRawAILogToFilterState(aiLog map[string]interface{}) {
 		log.Warnf("failed to marshal ai_log for filter state: %v", err)
 		return
 	}
-	// Store JSON bytes in filter state. FILTER_STATE(PLAIN) returns these bytes
-	// as a string, which is directly embedded into the access log JSON by
-	// TEXT encoding. The nested quotes are escaped by Docker's json-file driver
-	// and restored by log-pilot's parser during collection.
+	// Write JSON bytes to filter state. Envoy's WasmState.serializeAsJson()
+	// will parse these bytes as JSON and return a JSON object (not string),
+	// allowing direct embedding in JSON access log without escaping.
 	if err := proxywasm.SetProperty([]string{"wasm", "ai_log"}, rawJSON); err != nil {
 		log.Warnf("failed to set wasm.ai_log filter state: %v", err)
 	}
 }
 
-// writeFlatAILogFieldsToFilterState writes key ai_log fields as independent filter state keys.
-// This flattens ai_log.consumer and ai_log.model to top-level access log fields,
-// avoiding nested JSON escaping issues in Docker json-file driver + log-pilot parsing.
-// accessLogFormat: "ai_consumer":%FILTER_STATE(wasm.ai_consumer:PLAIN)%,"ai_model":%FILTER_STATE(wasm.ai_model:PLAIN)%,"ai_source_ip":%FILTER_STATE(wasm.ai_source_ip:PLAIN)%
-func writeFlatAILogFieldsToFilterState(ctx wrapper.HttpContext) {
-	// ai_consumer: SetContext stores arbitrary type, must use GetContext + type assertion
-	consumer := "none"
-	if c := ctx.GetContext(ConsumerKey); c != nil {
-		if s, ok := c.(string); ok && s != "" {
-			consumer = s
-		}
-	}
-	// If consumer is not found in context, try user attribute
-	if consumer == "none" {
-		if ua := ctx.GetUserAttribute("consumer"); ua != nil {
-			if s, ok := ua.(string); ok && s != "" {
-				consumer = s
-			}
-		}
-	}
-	if err := proxywasm.SetProperty([]string{"wasm", "ai_consumer"}, []byte(consumer)); err != nil {
-		log.Warnf("[AI-LOG] failed to set ai_consumer filter state: %v", err)
-	}
+// ====== NEW: Filter State 平级字段写入 ======
 
-	// ai_model: GetUserAttribute returns interface{}, need type conversion
-	model := "-"
-	if m := ctx.GetUserAttribute("model"); m != nil {
-		if s, ok := m.(string); ok && s != "" {
-			model = s
-		}
-	} else if rm := ctx.GetContext(tokenusage.CtxKeyRequestModel); rm != nil {
-		if s, ok := rm.(string); ok && s != "" {
-			model = s
-		}
+// writeStringToFilterState 将字符串写入 Envoy filter state。
+// Access Log 通过 %FILTER_STATE(wasm.<key>:PLAIN)% 直接引用。
+// 即使 value 为空也强制写入，避免 Envoy 默认输出 "-" 导致 JSON 格式被破坏。
+func writeStringToFilterState(key, value string) {
+	if err := proxywasm.SetProperty([]string{"wasm", key}, []byte(value)); err != nil {
+		log.Warnf("failed to set filter state wasm.%s: %v", key, err)
 	}
-	if err := proxywasm.SetProperty([]string{"wasm", "ai_model"}, []byte(model)); err != nil {
-		log.Warnf("[AI-LOG] failed to set ai_model filter state: %v", err)
-	}
+}
 
-	// ai_source_ip
-	sourceIP := getSourceIP(ctx)
-	if err := proxywasm.SetProperty([]string{"wasm", "ai_source_ip"}, []byte(sourceIP)); err != nil {
-		log.Warnf("[AI-LOG] failed to set ai_source_ip filter state: %v", err)
-	}
+// writeTopLevelFields 将 record 中的核心字段单独写入 filter state，
+// 供 accessLogFormat 平级引用。
+func writeTopLevelFields(record *AILogRecord) {
+	writeStringToFilterState("consumer", record.Consumer)
+	writeStringToFilterState("model", record.Model)
+	writeStringToFilterState("source_ip", record.SourceIP)
 }
 
 // collectBasicAILogInfo collects basic request info into the ai_log map.
@@ -1895,44 +1842,13 @@ func collectBasicAILogInfo(ctx wrapper.HttpContext, aiLog map[string]interface{}
 	if aiLog == nil {
 		return
 	}
-	// Consumer: SetContext stores arbitrary type, must use GetContext + type assertion
-	consumer := "none"
-	if c := ctx.GetContext(ConsumerKey); c != nil {
-		if s, ok := c.(string); ok && s != "" {
-			consumer = s
-		}
-	}
-	// If consumer is not found in context, try user attribute
-	if consumer == "none" {
-		if ua := ctx.GetUserAttribute("consumer"); ua != nil {
-			if s, ok := ua.(string); ok && s != "" {
-				consumer = s
-			}
-		}
-	}
-	aiLog["consumer"] = consumer
+	aiLog["consumer"] = ctx.GetStringContext(ConsumerKey, "none")
 	aiLog["route_name"] = ctx.GetStringContext(RouteName, "-")
 	aiLog["cluster_name"] = ctx.GetStringContext(ClusterName, "-")
-	// Model: try GetUserAttribute first, then GetContext
-	model := "-"
-	if m := ctx.GetUserAttribute("model"); m != nil {
-		if s, ok := m.(string); ok && s != "" {
-			model = s
-		}
-	}
-	if model == "-" {
-		if rm := ctx.GetContext(tokenusage.CtxKeyRequestModel); rm != nil {
-			if s, ok := rm.(string); ok && s != "" {
-				model = s
-			}
-		}
-	}
-	aiLog["model"] = model
-	// Question: cached in onHttpRequestBody, available even on failure
-	if q := ctx.GetContext("ai_request_question"); q != nil {
-		if s, ok := q.(string); ok && s != "" {
-			aiLog["question"] = s
-		}
+	if model := ctx.GetUserAttribute("model"); model != nil {
+		aiLog["model"] = model
+	} else if requestModel := ctx.GetContext(tokenusage.CtxKeyRequestModel); requestModel != nil {
+		aiLog["model"] = requestModel
 	}
 	if rm := ctx.GetUserAttribute("request_method"); rm != nil {
 		aiLog["request_method"] = rm
@@ -1965,8 +1881,9 @@ func outputAILog(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 	// Write raw JSON object to filter state so access log can embed it without escaping.
 	// Must be called BEFORE json.Marshal(record) to ensure the map is finalized.
 	writeRawAILogToFilterState(record.AILog)
-	// Also write flat fields for reliable parsing by log-pilot (avoids nested JSON issues)
-	writeFlatAILogFieldsToFilterState(ctx)
+
+	// 【新增】写入平级字段到 filter state，供 accessLogFormat 平级引用
+	writeTopLevelFields(record)
 
 	recordBytes, err := json.Marshal(record)
 	if err != nil {
@@ -1993,6 +1910,12 @@ func outputAILogFailure(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 	if record.PodName == "" {
 		record.PodName = "unknown"
 	}
+
+	// 【补充】失败请求也可能已经解析过 request model（在 onHttpRequestBody 中设置）
+	if requestModel := ctx.GetContext(tokenusage.CtxKeyRequestModel); requestModel != nil {
+		record.Model = fmt.Sprint(requestModel)
+	}
+
 	log.Debugf("[AI-LOG] failure record base: route=%s cluster=%s pod=%s", record.Route, record.Cluster, record.PodName)
 
 	// Status code and success flag
@@ -2030,8 +1953,9 @@ func outputAILogFailure(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 
 	// Write raw JSON to filter state for access log (fixes empty ai_log on failure)
 	writeRawAILogToFilterState(aiLog)
-	// Also write flat fields for reliable parsing by log-pilot (avoids nested JSON issues)
-	writeFlatAILogFieldsToFilterState(ctx)
+
+	// 【新增】写入平级字段到 filter state，供 accessLogFormat 平级引用
+	writeTopLevelFields(record)
 
 	// Include ai_log in the [AILOG] record too
 	record.AILog = aiLog
@@ -2066,8 +1990,6 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 
 	// Model
 	if model := ctx.GetUserAttribute("model"); model != nil {
-		record.Model = fmt.Sprint(model)
-	} else if model := ctx.GetUserAttribute("ai_model"); model != nil {
 		record.Model = fmt.Sprint(model)
 	}
 
@@ -2137,14 +2059,6 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 	collectAIAttr("cached_tokens")
 	collectAIAttr("input_token_details")
 	collectAIAttr("output_token_details")
-	
-	// Add ai_consumer and ai_model to ai_log for consistency
-	if consumer := ctx.GetUserAttribute("ai_consumer"); consumer != nil {
-		aiLog["ai_consumer"] = consumer
-	}
-	if model := ctx.GetUserAttribute("ai_model"); model != nil {
-		aiLog["ai_model"] = model
-	}
 
 	// Summarize large attributes to prevent oversized logs
 	for key, val := range aiLog {
