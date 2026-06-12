@@ -43,8 +43,7 @@ func init() {
 		wrapper.ProcessResponseHeaders(onHttpResponseHeaders),
 		wrapper.ProcessStreamingResponseBody(onHttpStreamingBody),
 		wrapper.ProcessResponseBody(onHttpResponseBody),
-		// 【新增】注册 OnLog 兜底，确保请求结束时必有日志
-		wrapper.ProcessLog(onLog),
+		// 【注意】wrapper.ProcessLog 在当前 SDK 中不存在，已移除
 		wrapper.WithRebuildAfterRequests[AIStatisticsConfig](1000),
 		wrapper.WithRebuildMaxMemBytes[AIStatisticsConfig](200*1024*1024),
 	)
@@ -411,7 +410,7 @@ func extractClaudeStreamingToolCalls(data []byte, buffer *StreamingToolCallsBuff
 			}
 
 		case "content_block_stop":
-				// Finalize the tool call if we were in a tool block
+			// Finalize the tool call if we were in a tool block
 			index := int(gjson.GetBytes(chunk, ClaudeIndex).Int())
 			if buffer.InToolBlock[index] {
 				buffer.InToolBlock[index] = false
@@ -810,8 +809,8 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) ty
 		return types.ActionContinue
 	}
 
-	// 【新增调试日志】确认 404 请求是否进入插件
-	log.Infof("[AI-LOG-DEBUG] onHttpRequestHeaders entered: path=%s, suffixes=%v", requestPath, config.enablePathSuffixes)
+	// 【调试日志】确认 404 请求是否进入插件
+	log.Infof("[AI-STATISTICS-DEBUG] onHttpRequestHeaders: path=%s suffixes=%v", requestPath, config.enablePathSuffixes)
 
 	ctx.DisableReroute()
 	route, _ := getRouteName()
@@ -869,12 +868,12 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) ty
 func onHttpRequestBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body []byte) types.Action {
 	// Check if processing should be skipped
 	if ctx.GetBoolContext(SkipProcessing, false) {
-		log.Infof("[AI-LOG-DEBUG] onHttpRequestBody skipped due to SkipProcessing=true")
+		log.Infof("[AI-STATISTICS-DEBUG] onHttpRequestBody: skipped due to SkipProcessing=true")
 		return types.ActionContinue
 	}
 
-	// 【新增调试日志】确认 body 是否到达
-	log.Infof("[AI-LOG-DEBUG] onHttpRequestBody entered: bodySize=%d, shouldBuffer=%v", len(body), config.shouldBufferRequestBody)
+	// 【调试日志】确认 body 是否到达
+	log.Infof("[AI-STATISTICS-DEBUG] onHttpRequestBody: bodySize=%d shouldBuffer=%v", len(body), config.shouldBufferRequestBody)
 
 	// Only process request body if we need to extract attributes from it
 	if config.shouldBufferRequestBody && len(body) > 0 {
@@ -924,11 +923,11 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body 
 	}
 	ctx.SetUserAttribute(ChatRound, userPromptCount)
 
-	// 【新增调试日志】确认 question 是否已解析到 UserAttribute
+	// 【调试日志】确认 question 是否已解析
 	if q := ctx.GetUserAttribute("question"); q != nil {
-		log.Infof("[AI-LOG-DEBUG] question parsed successfully: %v", q)
+		log.Infof("[AI-STATISTICS-DEBUG] question parsed: %v", q)
 	} else {
-		log.Infof("[AI-LOG-DEBUG] question NOT parsed (may be missing from body or wrong path)")
+		log.Infof("[AI-STATISTICS-DEBUG] question NOT parsed")
 	}
 
 	// Write log
@@ -938,6 +937,64 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body 
 }
 
 func onHttpResponseHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) types.Action {
+	// 【关键优化】先获取 status code 并处理失败请求，不受 content-type 检查影响
+	statusCode, _ := proxywasm.GetHttpResponseHeader(":status")
+	if statusCode != "" {
+		ctx.SetContext(ResponseStatusCode, statusCode)
+	}
+
+	// 【调试日志】
+	log.Infof("[AI-STATISTICS-DEBUG] onHttpResponseHeaders: status=%s", statusCode)
+
+	// 对于失败请求（4xx/5xx），立即输出日志，不受后续 content-type 检查影响
+	if statusCode != "" {
+		code, _ := strconv.Atoi(statusCode)
+		if code >= 400 {
+			log.Infof("[AI-STATISTICS-DEBUG] FAILED request detected: status=%d, collecting failure info", code)
+
+			// Capture Envoy Failure Diagnostics
+			var codeDetails, transportFailure string
+			if cd, err := proxywasm.GetProperty([]string{"response", "code_details"}); err == nil && len(cd) > 0 {
+				codeDetails = string(cd)
+				ctx.SetContext(CtxFailureCodeDetails, codeDetails)
+				log.Debugf("response code_details: %s", codeDetails)
+			}
+			if tf, err := proxywasm.GetProperty([]string{"upstream", "transport_failure_reason"}); err == nil && len(tf) > 0 {
+				transportFailure = string(tf)
+				ctx.SetContext(CtxUpstreamTransportFailure, transportFailure)
+				log.Debugf("upstream transport_failure_reason: %s", transportFailure)
+			}
+
+			// Capture Upstream Actual Address
+			var upstreamAddress string
+			if ua, err := proxywasm.GetProperty([]string{"upstream", "address"}); err == nil && len(ua) > 0 {
+				upstreamAddress = string(ua)
+			}
+			if upstreamAddress == "" {
+				upstreamAddress, _ = proxywasm.GetHttpResponseHeader("x-envoy-upstream-remote-address")
+			}
+			if upstreamAddress != "" {
+				ctx.SetContext(CtxBackendUpstreamAddress, upstreamAddress)
+				ctx.SetUserAttribute("backend_upstream_address", upstreamAddress)
+				log.Debugf("backend upstream address: %s", upstreamAddress)
+			}
+
+			// Determine and Record Failure Reason
+			failureReason := classifyFailure(statusCode, codeDetails, transportFailure)
+			if failureReason != "" {
+				ctx.SetContext(CtxFailureReason, failureReason)
+				ctx.SetUserAttribute("failure_reason", failureReason)
+				log.Infof("request failure classified: status=%s, reason=%s", statusCode, failureReason)
+			}
+
+			// 【核心】输出失败日志，确保 404/401/5xx 必有 ai_log
+			outputAILogFailure(ctx, config)
+			ctx.SetContext(CtxAILogOutput, true)
+			log.Infof("[AI-STATISTICS-DEBUG] failure log output complete, CtxAILogOutput=true")
+		}
+	}
+
+	// 后续逻辑：content-type 检查（仅影响 response body 处理，不影响已输出的失败日志）
 	contentType, _ := proxywasm.GetHttpResponseHeader("content-type")
 
 	if !isContentTypeEnabled(contentType, config.enableContentTypes) {
@@ -949,64 +1006,6 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) t
 
 	if !strings.Contains(contentType, "text/event-stream") {
 		ctx.BufferResponseBody()
-	}
-
-	// Capture Response Status Code
-	statusCode, _ := proxywasm.GetHttpResponseHeader(":status")
-	if statusCode != "" {
-		ctx.SetContext(ResponseStatusCode, statusCode)
-	}
-
-	// 【新增调试日志】
-	log.Infof("[AI-LOG-DEBUG] onHttpResponseHeaders entered: status=%s, contentType=%s", statusCode, contentType)
-
-	// Capture Envoy Failure Diagnostics
-	var codeDetails, transportFailure string
-	if cd, err := proxywasm.GetProperty([]string{"response", "code_details"}); err == nil && len(cd) > 0 {
-		codeDetails = string(cd)
-		ctx.SetContext(CtxFailureCodeDetails, codeDetails)
-		log.Debugf("response code_details: %s", codeDetails)
-	}
-	if tf, err := proxywasm.GetProperty([]string{"upstream", "transport_failure_reason"}); err == nil && len(tf) > 0 {
-		transportFailure = string(tf)
-		ctx.SetContext(CtxUpstreamTransportFailure, transportFailure)
-		log.Debugf("upstream transport_failure_reason: %s", transportFailure)
-	}
-
-	// Capture Upstream Actual Address
-	var upstreamAddress string
-	if ua, err := proxywasm.GetProperty([]string{"upstream", "address"}); err == nil && len(ua) > 0 {
-		upstreamAddress = string(ua)
-	}
-	if upstreamAddress == "" {
-		upstreamAddress, _ = proxywasm.GetHttpResponseHeader("x-envoy-upstream-remote-address")
-	}
-	if upstreamAddress != "" {
-		ctx.SetContext(CtxBackendUpstreamAddress, upstreamAddress)
-		ctx.SetUserAttribute("backend_upstream_address", upstreamAddress)
-		log.Debugf("backend upstream address: %s", upstreamAddress)
-	}
-
-	// Determine and Record Failure Reason
-	failureReason := classifyFailure(statusCode, codeDetails, transportFailure)
-	if failureReason != "" {
-		ctx.SetContext(CtxFailureReason, failureReason)
-		ctx.SetUserAttribute("failure_reason", failureReason)
-		log.Infof("request failure classified: status=%s, reason=%s, code_details=%s, transport_failure=%s",
-			statusCode, failureReason, codeDetails, transportFailure)
-	}
-
-	// Output AI log for FAILED requests immediately
-	// Failed requests (4xx/5xx) may not reach body processing.
-	// Output the log here so failed requests are always captured.
-	if statusCode != "" {
-		code, _ := strconv.Atoi(statusCode)
-		if code >= 400 {
-			log.Infof("[AI-LOG] FAILED request detected: status=%d, reason=%s, outputting failure log", code, failureReason)
-			outputAILogFailure(ctx, config)
-			ctx.SetContext(CtxAILogOutput, true) // mark: log already output
-			log.Debugf("[AI-LOG] failure log output complete, marked CtxAILogOutput=true")
-		}
 	}
 
 	// Set user defined log & span attributes which type is response_header
@@ -1169,31 +1168,6 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body
 	}
 
 	return types.ActionContinue
-}
-
-// 【新增】OnLog 兜底：Envoy 保证请求结束时必调用，无论成功/失败/404/401/5xx
-func onLog(ctx wrapper.HttpContext, config AIStatisticsConfig) {
-	if ctx.GetBoolContext(CtxAILogOutput, false) {
-		log.Debugf("[AI-LOG-DEBUG] OnLog: log already output in previous phase, skipping")
-		return
-	}
-
-	// 兜底保护：如果 StatusCode 仍未设置，尝试最后一次获取
-	statusCode := ctx.GetStringContext(ResponseStatusCode, "0")
-	if statusCode == "0" {
-		if sc, _ := proxywasm.GetHttpResponseHeader(":status"); sc != "" {
-			ctx.SetContext(ResponseStatusCode, sc)
-			statusCode = sc
-		}
-	}
-
-	log.Infof("[AI-LOG-DEBUG] OnLog fallback triggered: status=%s, route=%s, cluster=%s, outputting failure log",
-		statusCode,
-		ctx.GetStringContext(RouteName, "-"),
-		ctx.GetStringContext(ClusterName, "-"),
-	)
-
-	outputAILogFailure(ctx, config)
 }
 
 // fetches the tracing span value from the specified source.
