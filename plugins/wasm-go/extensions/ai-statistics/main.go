@@ -884,7 +884,7 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body 
 	if requestModel == "UNKNOWN" {
 		requestPath := ctx.GetStringContext(RequestPath, "")
 		if strings.Contains(requestPath, "generateContent") || strings.Contains(requestPath, "streamGenerateContent") { // Google Gemini GenerateContent
-			reg := regexp.MustCompile(`^.*/(?P<api_version>[^/]+)/models/(?P<model>[^:]+):\w+Content$`)
+			reg := regexp.MustCompile(`^.*/(?P<<api_version>[^/]+)/models/(?P<<model>[^:]+):\w+Content$`)
 			matches := reg.FindStringSubmatch(requestPath)
 			if len(matches) == 3 {
 				requestModel = matches[2]
@@ -1878,71 +1878,39 @@ func outputAILog(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 
 // outputAILogFailure outputs a log for requests that fail before
 // response body processing (e.g., 401/403/404/5xx with no body read).
-// It includes basic request info so the access log ai_log field is never empty.
+// It reuses buildAILogRecord to ensure question, model, consumer, route_name
+// and other fields are collected uniformly with success logs.
 func outputAILogFailure(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 	log.Debugf("[AI-LOG] building failure log record...")
-	record := &AILogRecord{
-		Timestamp:           time.Now().Format(time.RFC3339Nano),
-		PodName:             os.Getenv("POD_NAME"),
-		Route:               ctx.GetStringContext(RouteName, "-"),
-		Cluster:             ctx.GetStringContext(ClusterName, "-"),
-		Consumer:            ctx.GetStringContext(ConsumerKey, "none"),
-		BackendModelCluster: ctx.GetStringContext(ClusterName, "-"),
-	}
-	if record.PodName == "" {
-		record.PodName = "unknown"
-	}
 
-	// 【补充】失败请求也可能已经解析过 request model（在 onHttpRequestBody 中设置）
-	if requestModel := ctx.GetContext(tokenusage.CtxKeyRequestModel); requestModel != nil {
-		record.Model = fmt.Sprint(requestModel)
-	}
+	// 【核心修复】复用 buildAILogRecord 的完整字段收集逻辑。
+	// 该函数会从 UserAttribute 和 Context 中统一提取：
+	//   - question（在 onHttpRequestBody 中通过 setAttributeBySource 解析）
+	//   - model（从请求体或路径解析，fallback 到 CtxKeyRequestModel）
+	//   - consumer、route_name、cluster_name、source_ip
+	//   - request_method、request_path、session_id
+	//   - 已解析的 token 信息（如有）
+	// 对于失败请求，answer/reasoning 等字段因无响应体自然为 nil，不会污染日志。
+	record := buildAILogRecord(ctx, config)
 
-	log.Debugf("[AI-LOG] failure record base: route=%s cluster=%s pod=%s", record.Route, record.Cluster, record.PodName)
+	// 强制标记为失败（buildAILogRecord 已根据 StatusCode 判断，但显式覆盖确保一致性）
+	record.RequestSuccess = false
 
-	// Status code and success flag
-	statusCodeStr := ctx.GetStringContext(ResponseStatusCode, "0")
-	record.StatusCode, _ = strconv.Atoi(statusCodeStr)
-	record.RequestSuccess = record.StatusCode >= 200 && record.StatusCode < 400
-
-	// Failure reason
-	record.FailureReason = ctx.GetStringContext(CtxFailureReason, "")
-
-	// Backend upstream address
-	record.BackendUpstreamAddress = ctx.GetStringContext(CtxBackendUpstreamAddress, "")
-
-	// Source IP (with fallback chain)
-	record.SourceIP = getSourceIP(ctx)
-
-	// Session ID
-	if sessionId := ctx.GetUserAttribute(SessionID); sessionId != nil {
-		record.SessionID = fmt.Sprint(sessionId)
+	// 兜底保护：如果 buildAILogRecord 中未获取到 FailureReason，再次从 Context 读取
+	if record.FailureReason == "" {
+		record.FailureReason = ctx.GetStringContext(CtxFailureReason, "")
 	}
 
-	// Request path and method (recorded in onHttpRequestHeaders)
-	record.RequestMethod = ""
-	if rm := ctx.GetUserAttribute("request_method"); rm != nil {
-		record.RequestMethod = fmt.Sprint(rm)
-	}
-	record.RequestPath = ""
-	if rp := ctx.GetUserAttribute("request_path"); rp != nil {
-		record.RequestPath = fmt.Sprint(rp)
+	// 兜底保护：如果 StatusCode 异常（如 0），使用 ResponseStatusCode 上下文修正
+	if record.StatusCode == 0 {
+		if sc := ctx.GetStringContext(ResponseStatusCode, "0"); sc != "" {
+			record.StatusCode, _ = strconv.Atoi(sc)
+		}
 	}
 
-	// Build ai_log map with basic info so access log never shows empty ai_log
-	aiLog := make(map[string]interface{})
-	collectBasicAILogInfo(ctx, aiLog)
-
-	// Write raw JSON to filter state for access log (fixes empty ai_log on failure)
-	writeRawAILogToFilterState(aiLog)
-
-	// 【新增】写入平级字段到 filter state，供 accessLogFormat 平级引用
-	writeTopLevelFields(record)
-
-	// Include ai_log in the [AILOG] record too
-	record.AILog = aiLog
-
-	// Output
+	// 输出日志
+	// buildAILogRecord 内部已调用 writeRawAILogToFilterState 和 writeTopLevelFields，
+	// 这里直接序列化输出即可，无需重复写入 filter state。
 	if recordBytes, err := json.Marshal(record); err == nil {
 		log.Infof("[AILOG] %s", string(recordBytes))
 		log.Debugf("[AI-LOG] failure log output complete: status=%d reason=%s size=%d bytes", record.StatusCode, record.FailureReason, len(recordBytes))
@@ -2059,6 +2027,13 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 
 	// Enforce total log body size cap
 	enforceSizeCap(record, config.maxLogBodyBytes)
+
+	// Write raw JSON object to filter state so access log can embed it without escaping.
+	// Must be called BEFORE json.Marshal(record) to ensure the map is finalized.
+	writeRawAILogToFilterState(record.AILog)
+
+	// 【新增】写入平级字段到 filter state，供 accessLogFormat 平级引用
+	writeTopLevelFields(record)
 
 	return record
 }
