@@ -1814,7 +1814,7 @@ func getSourceIP(ctx wrapper.HttpContext) string {
 // ====== NEW: Raw JSON Filter State Writer (fixes double-escaping) ======
 
 // writeRawAILogToFilterState writes aiLog map as JSON bytes to wasm.ai_log filter state.
-// When accessLogFormat uses "ai_log":%FILTER_STATE(wasm.ai_log:JSON)% (without surrounding quotes),
+// When accessLogFormat uses "ai_log":%FILTER_STATE(wasm.ai_log:PLAIN)% (without surrounding quotes),
 // Envoy WasmState.serializeAsJson() parses the stored JSON string into a JSON object,
 // which is then embedded directly into the access log JSON without backslash escaping.
 func writeRawAILogToFilterState(aiLog map[string]interface{}) {
@@ -1835,7 +1835,6 @@ func writeRawAILogToFilterState(aiLog map[string]interface{}) {
 	}
 }
 
-// ====== 修改点1：重写 writeStringToFilterState 为 PLAIN 格式 ======
 // writeStringToFilterState 将字符串以 JSON 字符串格式写入 Envoy filter state。
 // 存储的内容为带双引号的 JSON 字符串字面量（如 "user-123"）。
 // 配合 accessLogFormat 中的 %FILTER_STATE(wasm.key:PLAIN)% 使用（注意：accessLogFormat 中该字段值位置不要加引号），
@@ -1857,15 +1856,71 @@ func writeStringToFilterState(key, value string) {
 	}
 }
 
-// ====== 修改点2：重写 writeTopLevelFields ======
-// writeTopLevelFields 将 record 中的核心字段单独写入 filter state
+// writeTopLevelFields 将 record 中的核心字段以及 ai_log 中的关键业务字段
+// 作为独立的 filter state 键写入，供 accessLogFormat 直接平级引用。
+// 本函数仅做“额外冗余输出”，不影响原有的 ai_log 与 stdout 日志链路。
 func writeTopLevelFields(record *AILogRecord) {
 	if record == nil {
 		return
 	}
-	writeStringToFilterState("consumer", record.Consumer)
+
+	// === 从 record 提取的元数据（请求级）===
 	writeStringToFilterState("model", record.Model)
+	writeStringToFilterState("consumer", record.Consumer)
 	writeStringToFilterState("source_ip", record.SourceIP)
+	writeStringToFilterState("route_name", record.Route)
+	writeStringToFilterState("request_path", record.RequestPath)
+	writeStringToFilterState("request_method", record.RequestMethod)
+	writeStringToFilterState("status_code", strconv.Itoa(record.StatusCode))
+	if record.RequestSuccess {
+		writeStringToFilterState("request_success", "true")
+	} else {
+		writeStringToFilterState("request_success", "false")
+	}
+	writeStringToFilterState("failure_reason", record.FailureReason)
+	writeStringToFilterState("backend_upstream_address", record.BackendUpstreamAddress)
+	writeStringToFilterState("response_type", record.ResponseType)
+	writeStringToFilterState("session_id", record.SessionID)
+
+	// === 从 ai_log 提取的 AI 业务字段 ===
+	if record.AILog != nil {
+		if v, ok := record.AILog["question"]; ok {
+			writeStringToFilterState("question", fmt.Sprint(v))
+		}
+		if v, ok := record.AILog["answer"]; ok {
+			writeStringToFilterState("answer", fmt.Sprint(v))
+		}
+		if v, ok := record.AILog["system"]; ok {
+			writeStringToFilterState("system", fmt.Sprint(v))
+		}
+		if v, ok := record.AILog["reasoning"]; ok {
+			writeStringToFilterState("reasoning", fmt.Sprint(v))
+		}
+		if v, ok := record.AILog["tool_calls"]; ok {
+			writeStringToFilterState("tool_calls", fmt.Sprint(v))
+		}
+		if v, ok := record.AILog["chat_id"]; ok {
+			writeStringToFilterState("chat_id", fmt.Sprint(v))
+		}
+		if v, ok := record.AILog["chat_round"]; ok {
+			writeStringToFilterState("chat_round", fmt.Sprint(v))
+		}
+		if v, ok := record.AILog["input_token"]; ok {
+			writeStringToFilterState("input_token", fmt.Sprint(v))
+		}
+		if v, ok := record.AILog["output_token"]; ok {
+			writeStringToFilterState("output_token", fmt.Sprint(v))
+		}
+		if v, ok := record.AILog["total_token"]; ok {
+			writeStringToFilterState("total_token", fmt.Sprint(v))
+		}
+		if v, ok := record.AILog["llm_service_duration"]; ok {
+			writeStringToFilterState("llm_service_duration", fmt.Sprint(v))
+		}
+		if v, ok := record.AILog["llm_first_token_duration"]; ok {
+			writeStringToFilterState("llm_first_token_duration", fmt.Sprint(v))
+		}
+	}
 }
 
 // ====== Log Output Functions ======
