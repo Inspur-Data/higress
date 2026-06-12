@@ -1591,20 +1591,25 @@ func writeRawAILogToFilterState(aiLog map[string]interface{}) {
 	}
 }
 
-// writeStringToFilterState 将原始字符串字节写入 Envoy filter state。
-// 不再使用 json.Marshal 包装，避免 Envoy PLAIN 序列化时产生双引号嵌套，
-// 导致 accessLogFormat 解析为 "-" 或出现反斜杠转义。
-// 配合 accessLogFormat 中 "model": "%FILTER_STATE(wasm.model:PLAIN)%" 使用，
-// Envoy 会自动将 PLAIN 输出编码为合法 JSON 字符串。
+// writeStringToFilterState 将字段包装为单键 JSON 对象写入 Envoy filter state。
+// 例如 key="model", value="DeepSeek" 会存储为 {"model":"DeepSeek"}。
+// 配合 accessLogFormat 中 "model": %FILTER_STATE(wasm.model:PLAIN)% 使用（不加引号），
+// Envoy 会直接将 JSON 对象嵌入外层日志，避免字符串转义问题。
 func writeStringToFilterState(key, value string) {
 	if value == "" {
 		value = "-"
 	}
-	// 使用 SetFilterState 而非 SetProperty，确保与 FILTER_STATE 宏完全兼容
-	if err := proxywasm.SetFilterState("wasm."+key, value); err != nil {
+	// 包装为单键 JSON 对象，如 {"model":"DeepSeek-R1"}
+	obj := map[string]string{key: value}
+	rawJSON, err := json.Marshal(obj)
+	if err != nil {
+		log.Warnf("failed to marshal JSON object for key %s: %v", key, err)
+		return
+	}
+	if err := proxywasm.SetProperty([]string{"wasm", key}, rawJSON); err != nil {
 		log.Warnf("failed to set filter state wasm.%s: %v", key, err)
 	} else {
-		log.Infof("successfully set filter state wasm.%s = %s", key, value)
+		log.Infof("successfully set filter state wasm.%s = %s", key, string(rawJSON))
 	}
 }
 
