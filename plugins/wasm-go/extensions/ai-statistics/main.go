@@ -43,6 +43,8 @@ func init() {
 		wrapper.ProcessResponseHeaders(onHttpResponseHeaders),
 		wrapper.ProcessStreamingResponseBody(onHttpStreamingBody),
 		wrapper.ProcessResponseBody(onHttpResponseBody),
+		// 【新增】注册 OnLog 兜底，确保请求结束时必有日志
+		wrapper.ProcessLog(onLog),
 		wrapper.WithRebuildAfterRequests[AIStatisticsConfig](1000),
 		wrapper.WithRebuildMaxMemBytes[AIStatisticsConfig](200*1024*1024),
 	)
@@ -409,7 +411,7 @@ func extractClaudeStreamingToolCalls(data []byte, buffer *StreamingToolCallsBuff
 			}
 
 		case "content_block_stop":
-			// Finalize the tool call if we were in a tool block
+				// Finalize the tool call if we were in a tool block
 			index := int(gjson.GetBytes(chunk, ClaudeIndex).Int())
 			if buffer.InToolBlock[index] {
 				buffer.InToolBlock[index] = false
@@ -808,6 +810,9 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) ty
 		return types.ActionContinue
 	}
 
+	// 【新增调试日志】确认 404 请求是否进入插件
+	log.Infof("[AI-LOG-DEBUG] onHttpRequestHeaders entered: path=%s, suffixes=%v", requestPath, config.enablePathSuffixes)
+
 	ctx.DisableReroute()
 	route, _ := getRouteName()
 	cluster, _ := getClusterName()
@@ -864,8 +869,12 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) ty
 func onHttpRequestBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body []byte) types.Action {
 	// Check if processing should be skipped
 	if ctx.GetBoolContext(SkipProcessing, false) {
+		log.Infof("[AI-LOG-DEBUG] onHttpRequestBody skipped due to SkipProcessing=true")
 		return types.ActionContinue
 	}
+
+	// 【新增调试日志】确认 body 是否到达
+	log.Infof("[AI-LOG-DEBUG] onHttpRequestBody entered: bodySize=%d, shouldBuffer=%v", len(body), config.shouldBufferRequestBody)
 
 	// Only process request body if we need to extract attributes from it
 	if config.shouldBufferRequestBody && len(body) > 0 {
@@ -915,6 +924,13 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body 
 	}
 	ctx.SetUserAttribute(ChatRound, userPromptCount)
 
+	// 【新增调试日志】确认 question 是否已解析到 UserAttribute
+	if q := ctx.GetUserAttribute("question"); q != nil {
+		log.Infof("[AI-LOG-DEBUG] question parsed successfully: %v", q)
+	} else {
+		log.Infof("[AI-LOG-DEBUG] question NOT parsed (may be missing from body or wrong path)")
+	}
+
 	// Write log
 	debugLogAiLog(ctx)
 	_ = ctx.WriteUserAttributeToLogWithKey(wrapper.AILogKey)
@@ -940,6 +956,9 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) t
 	if statusCode != "" {
 		ctx.SetContext(ResponseStatusCode, statusCode)
 	}
+
+	// 【新增调试日志】
+	log.Infof("[AI-LOG-DEBUG] onHttpResponseHeaders entered: status=%s, contentType=%s", statusCode, contentType)
 
 	// Capture Envoy Failure Diagnostics
 	var codeDetails, transportFailure string
@@ -1150,6 +1169,31 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body
 	}
 
 	return types.ActionContinue
+}
+
+// 【新增】OnLog 兜底：Envoy 保证请求结束时必调用，无论成功/失败/404/401/5xx
+func onLog(ctx wrapper.HttpContext, config AIStatisticsConfig) {
+	if ctx.GetBoolContext(CtxAILogOutput, false) {
+		log.Debugf("[AI-LOG-DEBUG] OnLog: log already output in previous phase, skipping")
+		return
+	}
+
+	// 兜底保护：如果 StatusCode 仍未设置，尝试最后一次获取
+	statusCode := ctx.GetStringContext(ResponseStatusCode, "0")
+	if statusCode == "0" {
+		if sc, _ := proxywasm.GetHttpResponseHeader(":status"); sc != "" {
+			ctx.SetContext(ResponseStatusCode, sc)
+			statusCode = sc
+		}
+	}
+
+	log.Infof("[AI-LOG-DEBUG] OnLog fallback triggered: status=%s, route=%s, cluster=%s, outputting failure log",
+		statusCode,
+		ctx.GetStringContext(RouteName, "-"),
+		ctx.GetStringContext(ClusterName, "-"),
+	)
+
+	outputAILogFailure(ctx, config)
 }
 
 // fetches the tracing span value from the specified source.
