@@ -1600,7 +1600,8 @@ func writeStringToFilterState(key, value string) {
 	if value == "" {
 		value = "-"
 	}
-	if err := proxywasm.SetProperty([]string{"wasm", key}, []byte(value)); err != nil {
+	// 使用 SetFilterState 而非 SetProperty，确保与 FILTER_STATE 宏完全兼容
+	if err := proxywasm.SetFilterState("wasm."+key, value); err != nil {
 		log.Warnf("failed to set filter state wasm.%s: %v", key, err)
 	} else {
 		log.Infof("successfully set filter state wasm.%s = %s", key, value)
