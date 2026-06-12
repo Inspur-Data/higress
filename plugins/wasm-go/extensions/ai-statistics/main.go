@@ -43,7 +43,6 @@ func init() {
 		wrapper.ProcessResponseHeaders(onHttpResponseHeaders),
 		wrapper.ProcessStreamingResponseBody(onHttpStreamingBody),
 		wrapper.ProcessResponseBody(onHttpResponseBody),
-		// 【注意】wrapper.ProcessLog 在当前 SDK 中不存在，已移除
 		wrapper.WithRebuildAfterRequests[AIStatisticsConfig](1000),
 		wrapper.WithRebuildMaxMemBytes[AIStatisticsConfig](200*1024*1024),
 	)
@@ -118,26 +117,20 @@ const (
 	BuiltinOutputTokenDetails = "output_token_details"
 
 	// Built-in attribute paths
-	// Question paths (from request body)
 	QuestionPathOpenAI = "messages.@reverse.0.content"
-	QuestionPathClaude = "messages.@reverse.0.content" // Claude uses same format
+	QuestionPathClaude = "messages.@reverse.0.content"
 
-	// System prompt paths (from request body)
-	SystemPathClaude = "system" // Claude /v1/messages has system as a top-level field
+	SystemPathClaude = "system"
 
-	// Answer paths (from response body - non-streaming)
 	AnswerPathOpenAINonStreaming = "choices.0.message.content"
 	AnswerPathClaudeNonStreaming = "content.0.text"
 
-	// Answer paths (from response streaming body)
 	AnswerPathOpenAIStreaming = "choices.0.delta.content"
 	AnswerPathClaudeStreaming = "delta.text"
 
-	// Tool calls paths (OpenAI format)
 	ToolCallsPathNonStreaming = "choices.0.message.tool_calls"
 	ToolCallsPathStreaming    = "choices.0.delta.tool_calls"
 
-	// Claude/Anthropic tool calls paths (streaming)
 	ClaudeEventType         = "type"
 	ClaudeContentBlockType  = "content_block.type"
 	ClaudeContentBlockID    = "content_block.id"
@@ -146,41 +139,32 @@ const (
 	ClaudeDeltaPartialJSON  = "delta.partial_json"
 	ClaudeIndex             = "index"
 
-	// Reasoning paths
 	ReasoningPathNonStreaming = "choices.0.message.reasoning_content"
 	ReasoningPathStreaming    = "choices.0.delta.reasoning_content"
 
-	// Context key for streaming tool calls buffer
 	CtxStreamingToolCallsBuffer = "streamingToolCallsBuffer"
 
-	// ====== AI Log Output Constants ======
 	CtxAILogOutput           = "ai_log_already_output"
 	CtxRequestStartTimeSaved = "ai_statistics_request_start_time_saved"
 
-	// Response and failure tracking constants
 	ResponseStatusCode          = "ai_statistics_response_status_code"
 	CtxFailureCodeDetails       = "ai_statistics_failure_code_details"
 	CtxUpstreamTransportFailure = "ai_statistics_upstream_transport_failure"
 	CtxBackendUpstreamAddress   = "ai_statistics_backend_upstream_address"
 	CtxFailureReason            = "ai_statistics_failure_reason"
 
-	// Log output size limits (prevent oversized logs for large LLM contexts)
-	DefaultMaxLogBodyBytes   = 2 * 1024 * 1024 // 2MB per log record
-	DefaultMaxAttributeBytes = 100 * 1024      // 100KB per attribute
+	DefaultMaxLogBodyBytes   = 2 * 1024 * 1024
+	DefaultMaxAttributeBytes = 100 * 1024
 )
 
-// getDefaultAttributes returns the default attributes configuration for empty config
-// This includes all attributes but may consume significant memory for large conversations
 func getDefaultAttributes() []Attribute {
 	return []Attribute{
-		// Extract complete conversation history from request body
 		{
 			Key:         "messages",
 			ValueSource: RequestBody,
 			Value:       "messages",
 			ApplyToLog:  true,
 		},
-		// Built-in attributes (no value_source needed, will be auto-extracted)
 		{
 			Key:        BuiltinQuestionKey,
 			ApplyToLog: true,
@@ -192,18 +176,17 @@ func getDefaultAttributes() []Attribute {
 		{
 			Key:        BuiltinAnswerKey,
 			ApplyToLog: true,
-			Rule:       RuleAppend, // Streaming responses need to append content from all chunks
+			Rule:       RuleAppend,
 		},
 		{
 			Key:        BuiltinReasoningKey,
 			ApplyToLog: true,
-			Rule:       RuleAppend, // Streaming responses need to append content from all chunks
+			Rule:       RuleAppend,
 		},
 		{
 			Key:        BuiltinToolCallsKey,
 			ApplyToLog: true,
 		},
-		// Token statistics (auto-extracted from response)
 		{
 			Key:        BuiltinReasoningTokens,
 			ApplyToLog: true,
@@ -212,7 +195,6 @@ func getDefaultAttributes() []Attribute {
 			Key:        BuiltinCachedTokens,
 			ApplyToLog: true,
 		},
-		// Detailed token information
 		{
 			Key:        BuiltinInputTokenDetails,
 			ApplyToLog: true,
@@ -224,15 +206,8 @@ func getDefaultAttributes() []Attribute {
 	}
 }
 
-// getDefaultResponseAttributes returns a lightweight default attributes configuration
-// for production environments with high concurrency and high latency.
-// - Buffers request body for model extraction (small, essential field)
-// - Does NOT extract large fields like question, system, messages
-// - Does NOT buffer streaming response body (no answer, reasoning, tool_calls)
-// - Only extracts token statistics from response context
 func getDefaultResponseAttributes() []Attribute {
 	return []Attribute{
-		// Token statistics (extracted from context, no body buffering needed)
 		{
 			Key:        BuiltinReasoningTokens,
 			ApplyToLog: true,
@@ -252,7 +227,6 @@ func getDefaultResponseAttributes() []Attribute {
 	}
 }
 
-// Default session ID headers in priority order
 var defaultSessionHeaders = []string{
 	"x-openclaw-session-key",
 	"x-clawdbot-session-key",
@@ -260,16 +234,12 @@ var defaultSessionHeaders = []string{
 	"x-agent-session",
 }
 
-// extractSessionId extracts session ID from request headers
-// If customHeader is configured, it takes priority; otherwise falls back to default headers
 func extractSessionId(customHeader string) string {
-	// If custom header is configured, try it first
 	if customHeader != "" {
 		if sessionId, _ := proxywasm.GetHttpRequestHeader(customHeader); sessionId != "" {
 			return sessionId
 		}
 	}
-	// Fall back to default session headers in priority order
 	for _, header := range defaultSessionHeaders {
 		if sessionId, _ := proxywasm.GetHttpRequestHeader(header); sessionId != "" {
 			return sessionId
@@ -278,7 +248,6 @@ func extractSessionId(customHeader string) string {
 	return ""
 }
 
-// ToolCall represents a single tool call in the response
 type ToolCall struct {
 	Index    int              `json:"index,omitempty"`
 	ID       string           `json:"id,omitempty"`
@@ -286,20 +255,17 @@ type ToolCall struct {
 	Function ToolCallFunction `json:"function,omitempty"`
 }
 
-// ToolCallFunction represents the function details in a tool call
 type ToolCallFunction struct {
 	Name      string `json:"name,omitempty"`
 	Arguments string `json:"arguments,omitempty"`
 }
 
-// StreamingToolCallsBuffer holds the state for assembling streaming tool calls
 type StreamingToolCallsBuffer struct {
-	ToolCalls       map[int]*ToolCall // keyed by index (OpenAI format)
-	InToolBlock     map[int]bool      // tracks which indices are in tool_use blocks (Claude format)
-	ArgumentsBuffer map[int]string    // buffers partial JSON arguments (Claude format)
+	ToolCalls       map[int]*ToolCall
+	InToolBlock     map[int]bool
+	ArgumentsBuffer map[int]string
 }
 
-// extractStreamingToolCalls extracts and assembles tool calls from streaming response chunks (OpenAI format)
 func extractStreamingToolCalls(data []byte, buffer *StreamingToolCallsBuffer) *StreamingToolCallsBuffer {
 	if buffer == nil {
 		buffer = &StreamingToolCallsBuffer{
@@ -319,14 +285,12 @@ func extractStreamingToolCalls(data []byte, buffer *StreamingToolCallsBuffer) *S
 		for _, tcResult := range toolCallsResult.Array() {
 			index := int(tcResult.Get("index").Int())
 
-			// Get or create tool call entry
 			tc, exists := buffer.ToolCalls[index]
 			if !exists {
 				tc = &ToolCall{Index: index}
 				buffer.ToolCalls[index] = tc
 			}
 
-			// Update fields if present
 			if id := tcResult.Get("id").String(); id != "" {
 				tc.ID = id
 			}
@@ -336,7 +300,6 @@ func extractStreamingToolCalls(data []byte, buffer *StreamingToolCallsBuffer) *S
 			if funcName := tcResult.Get("function.name").String(); funcName != "" {
 				tc.Function.Name = funcName
 			}
-			// Append arguments (they come in chunks)
 			if args := tcResult.Get("function.arguments").String(); args != "" {
 				tc.Function.Arguments += args
 			}
@@ -346,8 +309,6 @@ func extractStreamingToolCalls(data []byte, buffer *StreamingToolCallsBuffer) *S
 	return buffer
 }
 
-// extractClaudeStreamingToolCalls extracts and assembles tool calls from Claude/Anthropic streaming response chunks
-// Claude format uses events: content_block_start, content_block_delta, content_block_stop
 func extractClaudeStreamingToolCalls(data []byte, buffer *StreamingToolCallsBuffer) *StreamingToolCallsBuffer {
 	if buffer == nil {
 		buffer = &StreamingToolCallsBuffer{
@@ -359,7 +320,6 @@ func extractClaudeStreamingToolCalls(data []byte, buffer *StreamingToolCallsBuff
 
 	chunks := bytes.Split(bytes.TrimSpace(wrapper.UnifySSEChunk(data)), []byte("\n\n"))
 	for _, chunk := range chunks {
-		// Get event type
 		eventType := gjson.GetBytes(chunk, ClaudeEventType)
 		if !eventType.Exists() {
 			continue
@@ -367,15 +327,12 @@ func extractClaudeStreamingToolCalls(data []byte, buffer *StreamingToolCallsBuff
 
 		switch eventType.String() {
 		case "content_block_start":
-			// Check if this is a tool_use block
 			contentBlockType := gjson.GetBytes(chunk, ClaudeContentBlockType)
 			if contentBlockType.Exists() && contentBlockType.String() == "tool_use" {
 				index := int(gjson.GetBytes(chunk, ClaudeIndex).Int())
 
-				// Create tool call entry
 				tc := &ToolCall{Index: index}
 
-				// Extract id and name
 				if id := gjson.GetBytes(chunk, ClaudeContentBlockID).String(); id != "" {
 					tc.ID = id
 				}
@@ -388,7 +345,6 @@ func extractClaudeStreamingToolCalls(data []byte, buffer *StreamingToolCallsBuff
 				buffer.InToolBlock[index] = true
 				buffer.ArgumentsBuffer[index] = ""
 
-				// Try to extract initial input if present
 				if input := gjson.GetBytes(chunk, ClaudeContentBlockInput); input.Exists() {
 					if inputMap, ok := input.Value().(map[string]interface{}); ok {
 						if jsonBytes, err := json.Marshal(inputMap); err == nil {
@@ -399,10 +355,8 @@ func extractClaudeStreamingToolCalls(data []byte, buffer *StreamingToolCallsBuff
 			}
 
 		case "content_block_delta":
-			// Check if we're in a tool block
 			index := int(gjson.GetBytes(chunk, ClaudeIndex).Int())
 			if buffer.InToolBlock[index] {
-				// Accumulate partial JSON arguments
 				partialJSON := gjson.GetBytes(chunk, ClaudeDeltaPartialJSON)
 				if partialJSON.Exists() {
 					buffer.ArgumentsBuffer[index] += partialJSON.String()
@@ -410,12 +364,10 @@ func extractClaudeStreamingToolCalls(data []byte, buffer *StreamingToolCallsBuff
 			}
 
 		case "content_block_stop":
-			// Finalize the tool call if we were in a tool block
 			index := int(gjson.GetBytes(chunk, ClaudeIndex).Int())
 			if buffer.InToolBlock[index] {
 				buffer.InToolBlock[index] = false
 
-				// Parse accumulated arguments and set them
 				if tc, exists := buffer.ToolCalls[index]; exists {
 					tc.Function.Arguments = buffer.ArgumentsBuffer[index]
 				}
@@ -426,13 +378,11 @@ func extractClaudeStreamingToolCalls(data []byte, buffer *StreamingToolCallsBuff
 	return buffer
 }
 
-// getToolCallsFromBuffer converts the buffer to a sorted slice of tool calls
 func getToolCallsFromBuffer(buffer *StreamingToolCallsBuffer) []ToolCall {
 	if buffer == nil || len(buffer.ToolCalls) == 0 {
 		return nil
 	}
 
-	// Find max index to create properly sized slice
 	maxIndex := 0
 	for idx := range buffer.ToolCalls {
 		if idx > maxIndex {
@@ -449,10 +399,6 @@ func getToolCallsFromBuffer(buffer *StreamingToolCallsBuffer) []ToolCall {
 	return result
 }
 
-// TracingSpan is the tracing span configuration.
-// AILogRecord is the structured AI log record output to stdout via [AILOG] prefix.
-// log-pilot (DaemonSet on each node) collects container stdout, detects lines
-// prefixed with [AILOG], parses the JSON, and forwards to ES.
 type AILogRecord struct {
 	Timestamp             string `json:"@timestamp"`
 	RequestID             string `json:"request_id,omitempty"`
@@ -469,9 +415,7 @@ type AILogRecord struct {
 	LLMFirstTokenDuration int64  `json:"llm_first_token_duration,omitempty"`
 	RequestMethod         string `json:"request_method,omitempty"`
 	RequestPath           string `json:"request_path,omitempty"`
-	// ai_log contains all AI-specific attributes (question, answer, tokens, etc.)
-	AILog map[string]interface{} `json:"ai_log,omitempty"`
-	// Gateway & Backend Tracking
+	AILog                 map[string]interface{} `json:"ai_log,omitempty"`
 	PodName                string `json:"gateway_pod_name"`
 	BackendModelCluster    string `json:"backend_model_cluster"`
 	BackendUpstreamAddress string `json:"backend_upstream_address,omitempty"`
@@ -491,28 +435,18 @@ type Attribute struct {
 }
 
 type AIStatisticsConfig struct {
-	// Metrics
-	// TODO: add more metrics in Gauge and Histogram format
-	counterMetrics map[string]proxywasm.MetricCounter
-	// Attributes to be recorded in log & span
-	attributes []Attribute
-	// If there exist attributes extracted from streaming body, chunks should be buffered
+	counterMetrics            map[string]proxywasm.MetricCounter
+	attributes                []Attribute
 	shouldBufferStreamingBody bool
-	// If there exist attributes extracted from request body, request body should be buffered
-	shouldBufferRequestBody bool
-	// If disableOpenaiUsage is true, model/input_token/output_token logs will be skipped
-	disableOpenaiUsage bool
-	valueLengthLimit   int
-	// Path suffixes to enable the plugin on
-	enablePathSuffixes []string
-	// Content types to enable response body buffering
-	enableContentTypes []string
-	// Session ID header name (if configured, takes priority over default headers)
-	sessionIdHeader string
-	RedisClient     wrapper.RedisClient
-	// Log output size limits (prevent oversized logs for large LLM contexts)
-	maxLogBodyBytes   int // max bytes per log record JSON
-	maxAttributeBytes int // max bytes per individual attribute
+	shouldBufferRequestBody   bool
+	disableOpenaiUsage        bool
+	valueLengthLimit          int
+	enablePathSuffixes          []string
+	enableContentTypes        []string
+	sessionIdHeader           string
+	RedisClient               wrapper.RedisClient
+	maxLogBodyBytes           int
+	maxAttributeBytes         int
 }
 
 func generateMetricName(route, cluster, model, consumer, sourceIP, metricName string) string {
@@ -558,10 +492,8 @@ func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64
 		config.counterMetrics[metricName] = counter
 	}
 	counter.Increment(inc)
-	// Update Redis counter stats
 	if config.RedisClient != nil && config.RedisClient.Ready() {
-		redisKeyPrefix := "modelcount."
-		redisKeyPrefix = redisKeyPrefix + os.Getenv("POD_NAME") + "."
+		redisKeyPrefix := "modelcount." + os.Getenv("POD_NAME") + "."
 		err := config.RedisClient.Set(redisKeyPrefix+metricName, counter.Value(), nil)
 		if err != nil {
 			log.Errorf("failed to execute redis set command: %v", err)
@@ -569,19 +501,16 @@ func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64
 	}
 }
 
-// isPathEnabled checks if the request path matches any of the enabled path suffixes
 func isPathEnabled(requestPath string, enabledSuffixes []string) bool {
 	if len(enabledSuffixes) == 0 {
-		return true // If no path suffixes configured, enable for all
+		return true
 	}
 
-	// Remove query parameters from path
 	pathWithoutQuery := requestPath
 	if queryPos := strings.Index(requestPath, "?"); queryPos != -1 {
 		pathWithoutQuery = requestPath[:queryPos]
 	}
 
-	// Check if path ends with any enabled suffix
 	for _, suffix := range enabledSuffixes {
 		if strings.HasSuffix(pathWithoutQuery, suffix) {
 			return true
@@ -590,10 +519,9 @@ func isPathEnabled(requestPath string, enabledSuffixes []string) bool {
 	return false
 }
 
-// isContentTypeEnabled checks if the content type matches any of the enabled content types
 func isContentTypeEnabled(contentType string, enabledContentTypes []string) bool {
 	if len(enabledContentTypes) == 0 {
-		return true // If no content types configured, enable for all
+		return true
 	}
 
 	for _, enabledType := range enabledContentTypes {
@@ -605,32 +533,25 @@ func isContentTypeEnabled(contentType string, enabledContentTypes []string) bool
 }
 
 func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
-	// Check if use_default_attributes is enabled
 	useDefaultAttributes := configJson.Get("use_default_attributes").Bool()
-	// Check if use_default_response_attributes is enabled (lightweight mode)
 	useDefaultResponseAttributes := configJson.Get("use_default_response_attributes").Bool()
 
-	// Parse tracing span attributes setting.
 	attributeConfigs := configJson.Get("attributes").Array()
 
-	// Set value_length_limit
 	if configJson.Get("value_length_limit").Exists() {
 		config.valueLengthLimit = int(configJson.Get("value_length_limit").Int())
 	} else {
 		config.valueLengthLimit = 32000
 	}
 
-	// Parse attributes or use defaults
 	if useDefaultAttributes {
 		config.attributes = getDefaultAttributes()
-		// Update value_length_limit to default when using default attributes
 		if !configJson.Get("value_length_limit").Exists() {
-			config.valueLengthLimit = 10485760 // 10MB
+			config.valueLengthLimit = 10485760
 		}
 		log.Infof("Using default attributes configuration")
 	} else if useDefaultResponseAttributes {
 		config.attributes = getDefaultResponseAttributes()
-		// Use a reasonable default for lightweight mode
 		if !configJson.Get("value_length_limit").Exists() {
 			config.valueLengthLimit = 4000
 		}
@@ -651,51 +572,39 @@ func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
 		}
 	}
 
-	// Check if any attribute needs request body or streaming body buffering
 	for _, attribute := range config.attributes {
-		// Check for request body buffering
 		if attribute.ValueSource == RequestBody {
 			config.shouldBufferRequestBody = true
 		}
-		// Check for streaming body buffering (explicitly configured)
 		if attribute.ValueSource == ResponseStreamingBody {
 			config.shouldBufferStreamingBody = true
 		}
-		// For built-in attributes without explicit ValueSource, check default sources
 		if attribute.ValueSource == "" && isBuiltinAttribute(attribute.Key) {
 			defaultSources := getBuiltinAttributeDefaultSources(attribute.Key)
 			for _, src := range defaultSources {
 				if src == RequestBody {
 					config.shouldBufferRequestBody = true
 				}
-				// Only answer/reasoning/tool_calls need actual body buffering
-				// Token-related attributes are extracted from context, not from body
 				if src == ResponseStreamingBody && needsBodyBuffering(attribute.Key) {
 					config.shouldBufferStreamingBody = true
 				}
 			}
 		}
 	}
-	// Metric settings
-	config.counterMetrics = make(map[string]proxywasm.MetricCounter)
 
-	// Parse openai usage config setting.
+	config.counterMetrics = make(map[string]proxywasm.MetricCounter)
 	config.disableOpenaiUsage = configJson.Get("disable_openai_usage").Bool()
 
-	// Parse path suffix configuration
 	pathSuffixes := configJson.Get("enable_path_suffixes").Array()
 	config.enablePathSuffixes = make([]string, 0, len(pathSuffixes))
 
-	// If use_default_attributes or use_default_response_attributes is enabled and enable_path_suffixes is not configured, use default path suffixes
 	if (useDefaultAttributes || useDefaultResponseAttributes) && !configJson.Get("enable_path_suffixes").Exists() {
 		config.enablePathSuffixes = []string{"/completions", "/messages"}
 		log.Infof("Using default path suffixes: /completions, /messages")
 	} else {
-		// Process manually configured path suffixes
 		for _, suffix := range pathSuffixes {
 			suffixStr := suffix.String()
 			if suffixStr == "*" {
-				// Clear the suffixes list since * means all paths are enabled
 				config.enablePathSuffixes = make([]string, 0)
 				break
 			}
@@ -703,33 +612,28 @@ func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
 		}
 	}
 
-	// Parse content type configuration
 	contentTypes := configJson.Get("enable_content_types").Array()
 	config.enableContentTypes = make([]string, 0, len(contentTypes))
 
 	for _, contentType := range contentTypes {
 		contentTypeStr := contentType.String()
 		if contentTypeStr == "*" {
-			// Clear the content types list since * means all content types are enabled
 			config.enableContentTypes = make([]string, 0)
 			break
 		}
 		config.enableContentTypes = append(config.enableContentTypes, contentTypeStr)
 	}
 
-	// Parse session ID header configuration
 	if sessionIdHeader := configJson.Get("session_id_header"); sessionIdHeader.Exists() {
 		config.sessionIdHeader = sessionIdHeader.String()
 	}
 
-	// Metric settings
 	counter1 := proxywasm.DefineCounterMetric("gateway_model_metrics")
 	if config.counterMetrics == nil {
 		config.counterMetrics = make(map[string]proxywasm.MetricCounter)
 	}
 	config.counterMetrics["gateway_model_metrics"] = counter1
 
-	// Parse openai usage config setting.
 	config.disableOpenaiUsage = configJson.Get("disable_openai_usage").Bool()
 
 	redisConfig := configJson.Get("redis")
@@ -747,7 +651,6 @@ func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
 		return errors.New("redisClient is not ready")
 	}
 
-	// Set size limits for log output (prevent OOM on large LLM contexts)
 	if configJson.Get("max_log_body_bytes").Exists() {
 		config.maxLogBodyBytes = int(configJson.Get("max_log_body_bytes").Int())
 	} else {
@@ -798,18 +701,15 @@ func InitRedisClusterClient(redisConfig gjson.Result, config *AIStatisticsConfig
 }
 
 func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) types.Action {
-	// Check if request path matches enabled suffixes
 	requestPath, _ := proxywasm.GetHttpRequestHeader(":path")
 	if !isPathEnabled(requestPath, config.enablePathSuffixes) {
 		log.Debugf("ai-statistics: skipping request for path %s (not in enabled suffixes)", requestPath)
-		// Set skip processing flag and avoid reading request/response body
 		ctx.SetContext(SkipProcessing, true)
 		ctx.DontReadRequestBody()
 		ctx.DontReadResponseBody()
 		return types.ActionContinue
 	}
 
-	// 【调试日志】确认 404 请求是否进入插件
 	log.Infof("[AI-STATISTICS-DEBUG] onHttpRequestHeaders: path=%s suffixes=%v", requestPath, config.enablePathSuffixes)
 
 	ctx.DisableReroute()
@@ -824,7 +724,6 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) ty
 	ctx.SetUserAttribute(APIName, api)
 	ctx.SetContext(StatisticsRequestStartTime, time.Now().UnixMilli())
 
-	// Record request method and path as user attributes for log output
 	if requestMethod, _ := proxywasm.GetHttpRequestHeader(":method"); requestMethod != "" {
 		ctx.SetUserAttribute("request_method", requestMethod)
 		log.Debugf("[AI-LOG] request method recorded: %s", requestMethod)
@@ -833,7 +732,6 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) ty
 		ctx.SetUserAttribute("request_path", requestPath)
 		log.Debugf("[AI-LOG] request path recorded: %s", requestPath)
 	}
-	// Mark that request has been tracked (for duplicate prevention)
 	if requestPath, _ := proxywasm.GetHttpRequestHeader(":path"); requestPath != "" {
 		ctx.SetContext(RequestPath, requestPath)
 	}
@@ -841,57 +739,44 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) ty
 		ctx.SetContext(ConsumerKey, consumer)
 	}
 
-	// Always buffer request body to extract model field
-	// This is essential for metrics and logging
 	ctx.SetRequestBodyBufferLimit(defaultMaxBodyBytes)
 
-	// Extract session ID from headers
 	sessionId := extractSessionId(config.sessionIdHeader)
 	if sessionId != "" {
 		ctx.SetUserAttribute(SessionID, sessionId)
 	}
 
-	// Set span attributes for ARMS.
 	setSpanAttribute(ArmsSpanKind, "LLM")
 	log.Debugf("ai-statistics start onHttpRequestHeaders/setAttributeBySource/SOURCEIP")
-	// Set source_ip first
 	setAttributeBySource(ctx, config, SourceIP, nil)
 	log.Debugf("ai-statistics end onHttpRequestHeaders/setAttributeBySource/SOURCEIP")
-	// Set user defined log & span attributes which type is fixed_value
 	setAttributeBySource(ctx, config, FixedValue, nil)
-	// Set user defined log & span attributes which type is request_header
 	setAttributeBySource(ctx, config, RequestHeader, nil)
 
 	return types.ActionContinue
 }
 
 func onHttpRequestBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body []byte) types.Action {
-	// Check if processing should be skipped
 	if ctx.GetBoolContext(SkipProcessing, false) {
 		log.Infof("[AI-STATISTICS-DEBUG] onHttpRequestBody: skipped due to SkipProcessing=true")
 		return types.ActionContinue
 	}
 
-	// 【调试日志】确认 body 是否到达
 	log.Infof("[AI-STATISTICS-DEBUG] onHttpRequestBody: bodySize=%d shouldBuffer=%v", len(body), config.shouldBufferRequestBody)
 
-	// Only process request body if we need to extract attributes from it
 	if config.shouldBufferRequestBody && len(body) > 0 {
-		// Set user defined log & span attributes.
 		setAttributeBySource(ctx, config, RequestBody, body)
 	}
 
-	// Extract model from request body if available, otherwise try path
 	requestModel := "UNKNOWN"
 	if len(body) > 0 {
 		if model := gjson.GetBytes(body, "model"); model.Exists() {
 			requestModel = model.String()
 		}
 	}
-	// If model not found in body, try to extract from path (Gemini style)
 	if requestModel == "UNKNOWN" {
 		requestPath := ctx.GetStringContext(RequestPath, "")
-		if strings.Contains(requestPath, "generateContent") || strings.Contains(requestPath, "streamGenerateContent") { // Google Gemini GenerateContent
+		if strings.Contains(requestPath, "generateContent") || strings.Contains(requestPath, "streamGenerateContent") {
 			reg := regexp.MustCompile(`^.*/(?P<<api_version>[^/]+)/models/(?P<<model>[^:]+):\w+Content$`)
 			matches := reg.FindStringSubmatch(requestPath)
 			if len(matches) == 3 {
@@ -902,18 +787,15 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body 
 	ctx.SetContext(tokenusage.CtxKeyRequestModel, requestModel)
 	setSpanAttribute(ArmsRequestModel, requestModel)
 
-	// Set the number of conversation rounds (only if body is available)
 	userPromptCount := 0
 	if len(body) > 0 {
 		if messages := gjson.GetBytes(body, "messages"); messages.Exists() && messages.IsArray() {
-			// OpenAI and Claude/Anthropic format - both use "messages" array with "role" field
 			for _, msg := range messages.Array() {
 				if msg.Get("role").String() == "user" {
 					userPromptCount += 1
 				}
 			}
 		} else if contents := gjson.GetBytes(body, "contents"); contents.Exists() && contents.IsArray() {
-			// Google Gemini GenerateContent
 			for _, content := range contents.Array() {
 				if !content.Get("role").Exists() || content.Get("role").String() == "user" {
 					userPromptCount += 1
@@ -923,36 +805,30 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body 
 	}
 	ctx.SetUserAttribute(ChatRound, userPromptCount)
 
-	// 【调试日志】确认 question 是否已解析
 	if q := ctx.GetUserAttribute("question"); q != nil {
 		log.Infof("[AI-STATISTICS-DEBUG] question parsed: %v", q)
 	} else {
 		log.Infof("[AI-STATISTICS-DEBUG] question NOT parsed")
 	}
 
-	// Write log
 	debugLogAiLog(ctx)
 	_ = ctx.WriteUserAttributeToLogWithKey(wrapper.AILogKey)
 	return types.ActionContinue
 }
 
 func onHttpResponseHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) types.Action {
-	// 【关键优化】先获取 status code 并处理失败请求，不受 content-type 检查影响
 	statusCode, _ := proxywasm.GetHttpResponseHeader(":status")
 	if statusCode != "" {
 		ctx.SetContext(ResponseStatusCode, statusCode)
 	}
 
-	// 【调试日志】
 	log.Infof("[AI-STATISTICS-DEBUG] onHttpResponseHeaders: status=%s", statusCode)
 
-	// 对于失败请求（4xx/5xx），立即输出日志，不受后续 content-type 检查影响
 	if statusCode != "" {
 		code, _ := strconv.Atoi(statusCode)
 		if code >= 400 {
 			log.Infof("[AI-STATISTICS-DEBUG] FAILED request detected: status=%d, collecting failure info", code)
 
-			// Capture Envoy Failure Diagnostics
 			var codeDetails, transportFailure string
 			if cd, err := proxywasm.GetProperty([]string{"response", "code_details"}); err == nil && len(cd) > 0 {
 				codeDetails = string(cd)
@@ -965,7 +841,6 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) t
 				log.Debugf("upstream transport_failure_reason: %s", transportFailure)
 			}
 
-			// Capture Upstream Actual Address
 			var upstreamAddress string
 			if ua, err := proxywasm.GetProperty([]string{"upstream", "address"}); err == nil && len(ua) > 0 {
 				upstreamAddress = string(ua)
@@ -979,7 +854,6 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) t
 				log.Debugf("backend upstream address: %s", upstreamAddress)
 			}
 
-			// Determine and Record Failure Reason
 			failureReason := classifyFailure(statusCode, codeDetails, transportFailure)
 			if failureReason != "" {
 				ctx.SetContext(CtxFailureReason, failureReason)
@@ -987,14 +861,12 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) t
 				log.Infof("request failure classified: status=%s, reason=%s", statusCode, failureReason)
 			}
 
-			// 【核心】输出失败日志，确保 404/401/5xx 必有 ai_log
 			outputAILogFailure(ctx, config)
 			ctx.SetContext(CtxAILogOutput, true)
 			log.Infof("[AI-STATISTICS-DEBUG] failure log output complete, CtxAILogOutput=true")
 		}
 	}
 
-	// 后续逻辑：content-type 检查（仅影响 response body 处理，不影响已输出的失败日志）
 	contentType, _ := proxywasm.GetHttpResponseHeader("content-type")
 
 	if !isContentTypeEnabled(contentType, config.enableContentTypes) {
@@ -1008,19 +880,16 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) t
 		ctx.BufferResponseBody()
 	}
 
-	// Set user defined log & span attributes which type is response_header
 	setAttributeBySource(ctx, config, ResponseHeader, nil)
 
 	return types.ActionContinue
 }
 
 func onHttpStreamingBody(ctx wrapper.HttpContext, config AIStatisticsConfig, data []byte, endOfStream bool) []byte {
-	// Check if processing should be skipped
 	if ctx.GetBoolContext(SkipProcessing, false) {
 		return data
 	}
 
-	// Buffer stream body for record log & span attributes
 	if config.shouldBufferStreamingBody {
 		streamingBodyBuffer, ok := ctx.GetContext(CtxStreamingBodyBuffer).([]byte)
 		if !ok {
@@ -1035,36 +904,31 @@ func onHttpStreamingBody(ctx wrapper.HttpContext, config AIStatisticsConfig, dat
 	if chatID := wrapper.GetValueFromBody(data, []string{
 		"id",
 		"response.id",
-		"responseId", // Gemini generateContent
-		"message.id", // anthropic/claude messages
+		"responseId",
+		"message.id",
 	}); chatID != nil {
 		ctx.SetUserAttribute(ChatID, chatID.String())
 	}
 
-	// Get requestStartTime from http context
 	requestStartTime, ok := ctx.GetContext(StatisticsRequestStartTime).(int64)
 	if !ok {
 		log.Error("failed to get requestStartTime from http context")
 		return data
 	}
 
-	// If this is the first chunk, record first token duration metric and span attribute
 	if ctx.GetContext(StatisticsFirstTokenTime) == nil {
 		firstTokenTime := time.Now().UnixMilli()
 		ctx.SetContext(StatisticsFirstTokenTime, firstTokenTime)
 		ctx.SetUserAttribute(LLMFirstTokenDuration, firstTokenTime-requestStartTime)
 	}
 
-	// Set information about this request
 	if !config.disableOpenaiUsage {
 		if usage := tokenusage.GetTokenUsage(ctx, data); usage.TotalToken > 0 {
-			// Set span attributes for ARMS.
 			setSpanAttribute(ArmsTotalToken, usage.TotalToken)
 			setSpanAttribute(ArmsModelName, usage.Model)
 			setSpanAttribute(ArmsInputToken, usage.InputToken)
 			setSpanAttribute(ArmsOutputToken, usage.OutputToken)
 
-			// Set token details to context for later use in attributes
 			if len(usage.InputTokenDetails) > 0 {
 				ctx.SetContext(tokenusage.CtxKeyInputTokenDetails, usage.InputTokenDetails)
 			}
@@ -1072,32 +936,23 @@ func onHttpStreamingBody(ctx wrapper.HttpContext, config AIStatisticsConfig, dat
 				ctx.SetContext(tokenusage.CtxKeyOutputTokenDetails, usage.OutputTokenDetails)
 			}
 
-			// Write once
 			_ = ctx.WriteUserAttributeToLogWithKey(wrapper.AILogKey)
 		}
 	}
-	// If the end of the stream is reached, record metrics/logs/spans.
 	if endOfStream {
 		responseEndTime := time.Now().UnixMilli()
 		ctx.SetUserAttribute(LLMServiceDuration, responseEndTime-requestStartTime)
 
-		// Set user defined log & span attributes from streaming body.
-		// Always call setAttributeBySource even if shouldBufferStreamingBody is false,
-		// because token-related attributes are extracted from context (not buffered body).
 		var streamingBodyBuffer []byte
 		if config.shouldBufferStreamingBody {
 			streamingBodyBuffer, _ = ctx.GetContext(CtxStreamingBodyBuffer).([]byte)
 		}
 		setAttributeBySource(ctx, config, ResponseStreamingBody, streamingBodyBuffer)
 
-		// Write log
 		debugLogAiLog(ctx)
 		_ = ctx.WriteUserAttributeToLogWithKey(wrapper.AILogKey)
 
-		// Write metrics
 		writeMetric(ctx, config)
-		// Output structured AI log to stdout (log-pilot collects)
-		// Skip if already output for failed request in onHttpResponseHeaders
 		if !ctx.GetBoolContext(CtxAILogOutput, false) {
 			log.Debugf("[AI-LOG] streaming body end, outputting success log")
 			outputAILog(ctx, config)
@@ -1109,12 +964,10 @@ func onHttpStreamingBody(ctx wrapper.HttpContext, config AIStatisticsConfig, dat
 }
 
 func onHttpResponseBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body []byte) types.Action {
-	// Check if processing should be skipped
 	if ctx.GetBoolContext(SkipProcessing, false) {
 		return types.ActionContinue
 	}
 
-	// Get requestStartTime from http context
 	requestStartTime, _ := ctx.GetContext(StatisticsRequestStartTime).(int64)
 
 	responseEndTime := time.Now().UnixMilli()
@@ -1124,22 +977,19 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body
 	if chatID := wrapper.GetValueFromBody(body, []string{
 		"id",
 		"response.id",
-		"responseId", // Gemini generateContent
-		"message.id", // anthropic/claude messages
+		"responseId",
+		"message.id",
 	}); chatID != nil {
 		ctx.SetUserAttribute(ChatID, chatID.String())
 	}
 
-	// Set information about this request
 	if !config.disableOpenaiUsage {
 		if usage := tokenusage.GetTokenUsage(ctx, body); usage.TotalToken > 0 {
-			// Set span attributes for ARMS.
 			setSpanAttribute(ArmsModelName, usage.Model)
 			setSpanAttribute(ArmsInputToken, usage.InputToken)
 			setSpanAttribute(ArmsOutputToken, usage.OutputToken)
 			setSpanAttribute(ArmsTotalToken, usage.TotalToken)
 
-			// Set token details to context for later use in attributes
 			if len(usage.InputTokenDetails) > 0 {
 				ctx.SetContext(tokenusage.CtxKeyInputTokenDetails, usage.InputTokenDetails)
 			}
@@ -1149,17 +999,12 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body
 		}
 	}
 
-	// Set user defined log & span attributes.
 	setAttributeBySource(ctx, config, ResponseBody, body)
 
-	// Write log
 	debugLogAiLog(ctx)
 	_ = ctx.WriteUserAttributeToLogWithKey(wrapper.AILogKey)
 
-	// Write metrics
 	writeMetric(ctx, config)
-	// Output structured AI log to stdout (log-pilot collects)
-	// Skip if already output for failed request in onHttpResponseHeaders
 	if !ctx.GetBoolContext(CtxAILogOutput, false) {
 		log.Debugf("[AI-LOG] response body processed, outputting success log")
 		outputAILog(ctx, config)
@@ -1170,21 +1015,16 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body
 	return types.ActionContinue
 }
 
-// fetches the tracing span value from the specified source.
-
 func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, source string, body []byte) {
 	for _, attribute := range config.attributes {
 		var key string
 		var value interface{}
 		key = attribute.Key
 
-		// Check if this attribute should be processed for the current source
-		// For built-in attributes without value_source configured, use default source matching
 		if !shouldProcessBuiltinAttribute(key, attribute.ValueSource, source) {
 			continue
 		}
 
-		// If value is configured, try to extract using the configured path
 		if attribute.Value != "" {
 			switch source {
 			case FixedValue:
@@ -1200,21 +1040,16 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 			case ResponseBody:
 				value = gjson.GetBytes(body, attribute.Value).Value()
 			case SourceIP:
-				// 1. Try X-Forwarded-For first
 				value = "unknown"
-				// 1. Prefer source.address (real IP from eBPF PPv2)
 				if bs, err := proxywasm.GetProperty([]string{"source", "address"}); err == nil {
 					rawSource := string(bs)
 					sourceIP := parseIP(rawSource)
 					if isValidIP(sourceIP) {
 						value = sourceIP
-						// Log at Info level to verify eBPF is working
 						log.Infof("[Check-eBPF] Got Source IP from connection: %s (Raw: %s)", value, rawSource)
 					}
 				}
 
-				// 2. If internal IP or unknown, try XFF (optional based on trust policy)
-				// Note: if eBPF works, XFF is not needed since source.address is most trustworthy
 				if value == "unknown" {
 					if xff, err := proxywasm.GetHttpRequestHeader("X-Forwarded-For"); err == nil && xff != "" {
 						ips := strings.Split(xff, ",")
@@ -1229,7 +1064,6 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 					}
 				}
 
-				// 3. Fallback
 				if value == "" {
 					value = "unknown"
 				}
@@ -1237,7 +1071,6 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 			}
 		}
 
-		// Handle built-in attributes: use fallback if value is empty or not configured
 		if (value == nil || value == "") && isBuiltinAttribute(key) {
 			value = getBuiltinAttributeFallback(ctx, config, key, source, body, attribute.Rule)
 			if value != nil && value != "" {
@@ -1249,11 +1082,9 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 			value = attribute.DefaultValue
 		}
 
-		// Format value for logging/span
 		var formattedValue interface{}
 		switch v := value.(type) {
 		case map[string]int64:
-			// For token details maps, convert to JSON string
 			jsonBytes, err := json.Marshal(v)
 			if err != nil {
 				log.Warnf("failed to marshal token details: %v", err)
@@ -1273,7 +1104,6 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 			if attribute.AsSeparateLogField {
 				var marshalledJsonStr string
 				if _, ok := value.(map[string]int64); ok {
-					// Already marshaled in formattedValue
 					marshalledJsonStr = fmt.Sprint(formattedValue)
 				} else {
 					marshalledJsonStr = wrapper.MarshalStr(fmt.Sprint(formattedValue))
@@ -1285,7 +1115,6 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 				ctx.SetUserAttribute(key, formattedValue)
 			}
 		}
-		// for metrics
 		if key == tokenusage.CtxKeyModel || key == tokenusage.CtxKeyInputToken || key == tokenusage.CtxKeyOutputToken || key == tokenusage.CtxKeyTotalToken || key == SourceIP {
 			ctx.SetContext(key, value)
 		}
@@ -1298,24 +1127,16 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 	}
 }
 
-// isBuiltinAttribute checks if the given key is a built-in attribute
 func isBuiltinAttribute(key string) bool {
 	return key == BuiltinQuestionKey || key == BuiltinAnswerKey || key == BuiltinToolCallsKey || key == BuiltinReasoningKey || key == BuiltinSystemKey ||
 		key == BuiltinReasoningTokens || key == BuiltinCachedTokens ||
 		key == BuiltinInputTokenDetails || key == BuiltinOutputTokenDetails
 }
 
-// needsBodyBuffering checks if a built-in attribute needs body buffering
-// Token-related attributes are extracted from context (set by tokenusage.GetTokenUsage),
-// so they don't require buffering the response body.
 func needsBodyBuffering(key string) bool {
 	return key == BuiltinAnswerKey || key == BuiltinToolCallsKey || key == BuiltinReasoningKey
 }
 
-// getBuiltinAttributeDefaultSources returns the default value_source(s) for a built-in attribute
-// Returns nil if the key is not a built-in attribute
-// Note: Token-related attributes are extracted from context (set by tokenusage.GetTokenUsage),
-// so they don't require body buffering even though they're processed during response phase.
 func getBuiltinAttributeDefaultSources(key string) []string {
 	switch key {
 	case BuiltinQuestionKey, BuiltinSystemKey:
@@ -1323,22 +1144,16 @@ func getBuiltinAttributeDefaultSources(key string) []string {
 	case BuiltinAnswerKey, BuiltinToolCallsKey, BuiltinReasoningKey:
 		return []string{ResponseStreamingBody, ResponseBody}
 	case BuiltinReasoningTokens, BuiltinCachedTokens, BuiltinInputTokenDetails, BuiltinOutputTokenDetails:
-		// Token details are extracted from context (set by tokenusage.GetTokenUsage),
-		// not from body parsing. We use ResponseStreamingBody/ResponseBody to indicate
-		// they should be processed during response phase, but they don't require body buffering.
 		return []string{ResponseStreamingBody, ResponseBody}
 	default:
 		return nil
 	}
 }
 
-// shouldProcessBuiltinAttribute checks if a built-in attribute should be processed for the given source
 func shouldProcessBuiltinAttribute(key, configuredSource, currentSource string) bool {
-	// If value_source is configured, use exact match
 	if configuredSource != "" {
 		return configuredSource == currentSource
 	}
-	// If value_source is not configured and it's a built-in attribute, check default sources
 	defaultSources := getBuiltinAttributeDefaultSources(key)
 	for _, src := range defaultSources {
 		if src == currentSource {
@@ -1348,57 +1163,46 @@ func shouldProcessBuiltinAttribute(key, configuredSource, currentSource string) 
 	return false
 }
 
-// getBuiltinAttributeFallback provides protocol compatibility fallback for built-in attributes
 func getBuiltinAttributeFallback(ctx wrapper.HttpContext, config AIStatisticsConfig, key, source string, body []byte, rule string) interface{} {
 	switch key {
 	case BuiltinQuestionKey:
 		if source == RequestBody {
-			// Try OpenAI/Claude format (both use same messages structure)
 			if value := gjson.GetBytes(body, QuestionPathOpenAI).Value(); value != nil && value != "" {
 				return value
 			}
 		}
 	case BuiltinSystemKey:
 		if source == RequestBody {
-			// Try Claude /v1/messages format (system is a top-level field)
 			if value := gjson.GetBytes(body, SystemPathClaude).Value(); value != nil && value != "" {
 				return value
 			}
 		}
 	case BuiltinAnswerKey:
 		if source == ResponseStreamingBody {
-			// Try OpenAI format first
 			if value := extractStreamingBodyByJsonPath(body, AnswerPathOpenAIStreaming, rule); value != nil && value != "" {
 				return value
 			}
-			// Try Claude format
 			if value := extractStreamingBodyByJsonPath(body, AnswerPathClaudeStreaming, rule); value != nil && value != "" {
 				return value
 			}
 		} else if source == ResponseBody {
-			// Try OpenAI format first
 			if value := gjson.GetBytes(body, AnswerPathOpenAINonStreaming).Value(); value != nil && value != "" {
 				return value
 			}
-			// Try Claude format
 			if value := gjson.GetBytes(body, AnswerPathClaudeNonStreaming).Value(); value != nil && value != "" {
 				return value
 			}
 		}
 	case BuiltinToolCallsKey:
 		if source == ResponseStreamingBody {
-			// Get or create buffer from context
 			var buffer *StreamingToolCallsBuffer
 			if existingBuffer, ok := ctx.GetContext(CtxStreamingToolCallsBuffer).(*StreamingToolCallsBuffer); ok {
 				buffer = existingBuffer
 			}
-			// Try OpenAI format first
 			buffer = extractStreamingToolCalls(body, buffer)
-			// Also try Claude format (both formats can be checked)
 			buffer = extractClaudeStreamingToolCalls(body, buffer)
 			ctx.SetContext(CtxStreamingToolCallsBuffer, buffer)
 
-			// Also set tool_calls to user attributes so they appear in ai_log
 			toolCalls := getToolCallsFromBuffer(buffer)
 			if len(toolCalls) > 0 {
 				ctx.SetUserAttribute(BuiltinToolCallsKey, toolCalls)
@@ -1420,7 +1224,6 @@ func getBuiltinAttributeFallback(ctx wrapper.HttpContext, config AIStatisticsCon
 			}
 		}
 	case BuiltinReasoningTokens:
-		// Extract reasoning_tokens from output_token_details (only available after response)
 		if source == ResponseBody || source == ResponseStreamingBody {
 			if outputTokenDetails, ok := ctx.GetContext(tokenusage.CtxKeyOutputTokenDetails).(map[string]int64); ok {
 				if reasoningTokens, exists := outputTokenDetails["reasoning_tokens"]; exists {
@@ -1429,7 +1232,6 @@ func getBuiltinAttributeFallback(ctx wrapper.HttpContext, config AIStatisticsCon
 			}
 		}
 	case BuiltinCachedTokens:
-		// Extract cached_tokens from input_token_details (only available after response)
 		if source == ResponseBody || source == ResponseStreamingBody {
 			if inputTokenDetails, ok := ctx.GetContext(tokenusage.CtxKeyInputTokenDetails).(map[string]int64); ok {
 				if cachedTokens, exists := inputTokenDetails["cached_tokens"]; exists {
@@ -1438,14 +1240,12 @@ func getBuiltinAttributeFallback(ctx wrapper.HttpContext, config AIStatisticsCon
 			}
 		}
 	case BuiltinInputTokenDetails:
-		// Return the entire input_token_details map (only available after response)
 		if source == ResponseBody || source == ResponseStreamingBody {
 			if inputTokenDetails, ok := ctx.GetContext(tokenusage.CtxKeyInputTokenDetails).(map[string]int64); ok {
 				return inputTokenDetails
 			}
 		}
 	case BuiltinOutputTokenDetails:
-		// Return the entire output_token_details map (only available after response)
 		if source == ResponseBody || source == ResponseStreamingBody {
 			if outputTokenDetails, ok := ctx.GetContext(tokenusage.CtxKeyOutputTokenDetails).(map[string]int64); ok {
 				return outputTokenDetails
@@ -1474,7 +1274,6 @@ func extractStreamingBodyByJsonPath(data []byte, jsonPath string, rule string) i
 			}
 		}
 	} else if rule == RuleAppend {
-		// extract llm response
 		var strValue string
 		for _, chunk := range chunks {
 			jsonObj := gjson.GetBytes(chunk, jsonPath)
@@ -1489,33 +1288,25 @@ func extractStreamingBodyByJsonPath(data []byte, jsonPath string, rule string) i
 	return value
 }
 
-// shouldLogDebug returns true if the log level is debug or trace
 func shouldLogDebug() bool {
 	value, err := proxywasm.CallForeignFunction("get_log_level", nil)
 	if err != nil {
-		// If we can't get log level, default to not logging debug info
 		return false
 	}
 	if len(value) < 4 {
-		// Invalid log level value length
 		return false
 	}
 	envoyLogLevel := binary.LittleEndian.Uint32(value[:4])
 	return envoyLogLevel == LogLevelTrace || envoyLogLevel == LogLevelDebug
 }
 
-// debugLogAiLog logs the current user attributes that will be written to ai_log
 func debugLogAiLog(ctx wrapper.HttpContext) {
-	// Only log in debug/trace mode
 	if !shouldLogDebug() {
 		return
 	}
 
-	// Get all user attributes as a map
 	userAttrs := make(map[string]interface{})
 
-	// Try to reconstruct from GetUserAttribute (note: this is best-effort)
-	// The actual attributes are stored internally, we log what we know
 	if question := ctx.GetUserAttribute("question"); question != nil {
 		userAttrs["question"] = question
 	}
@@ -1574,12 +1365,10 @@ func debugLogAiLog(ctx wrapper.HttpContext) {
 		userAttrs["output_token_details"] = outputTokenDetails
 	}
 
-	// Log the attributes as JSON
 	logJson, _ := json.Marshal(userAttrs)
 	log.Debugf("[ai_log] attributes to be written: %s", string(logJson))
 }
 
-// Set the tracing span with value.
 func setSpanAttribute(key string, value interface{}) {
 	if value != "" {
 		traceSpanTag := wrapper.TraceSpanTagPrefix + key
@@ -1592,7 +1381,6 @@ func setSpanAttribute(key string, value interface{}) {
 }
 
 func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig) {
-	// Generate usage metrics
 	var ok bool
 	var route, cluster, model string
 	consumer := ctx.GetStringContext(ConsumerKey, "none")
@@ -1645,9 +1433,7 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 		log.Info("TotalToken type assert failed, skip metric record")
 	}
 
-	// Generate duration metrics
 	var llmFirstTokenDuration, llmServiceDuration uint64
-	// Is stream response
 	if ctx.GetUserAttribute(LLMFirstTokenDuration) != nil {
 		llmFirstTokenDuration, ok = convertToUInt(ctx.GetUserAttribute(LLMFirstTokenDuration))
 		if !ok {
@@ -1668,15 +1454,9 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 	}
 }
 
-// ====== Failure Classification ======
-
-// classifyFailure determines the root cause of a failed request based on
-// Envoy response code details and upstream transport failure reason.
-// Returns empty string for successful requests (2xx/3xx).
 func classifyFailure(statusCode, codeDetails, transportFailure string) string {
 	code, _ := strconv.Atoi(statusCode)
 
-	// Success range - no failure
 	if code >= 200 && code < 400 {
 		return ""
 	}
@@ -1684,7 +1464,6 @@ func classifyFailure(statusCode, codeDetails, transportFailure string) string {
 	lowerDetails := strings.ToLower(codeDetails)
 	lowerTransport := strings.ToLower(transportFailure)
 
-	// Transport-level failures (could not reach upstream at all)
 	if transportFailure != "" {
 		switch {
 		case strings.Contains(lowerTransport, "connection refused"):
@@ -1703,7 +1482,6 @@ func classifyFailure(statusCode, codeDetails, transportFailure string) string {
 		}
 	}
 
-	// Auth & Permission failures
 	switch {
 	case code == 401:
 		if strings.Contains(lowerDetails, "jwt") {
@@ -1728,7 +1506,6 @@ func classifyFailure(statusCode, codeDetails, transportFailure string) string {
 		return "rate_limited"
 	}
 
-	// Routing failures
 	if code == 404 {
 		if strings.Contains(lowerDetails, "no_route") || strings.Contains(lowerDetails, "no cluster") {
 			return "gateway_no_route"
@@ -1740,7 +1517,6 @@ func classifyFailure(statusCode, codeDetails, transportFailure string) string {
 		return "request_timeout"
 	}
 
-	// Upstream errors (reached upstream but it returned 5xx or connection broke)
 	if code >= 500 && code < 600 {
 		if strings.Contains(lowerDetails, "via_upstream") {
 			return "upstream_service_error"
@@ -1769,37 +1545,27 @@ func classifyFailure(statusCode, codeDetails, transportFailure string) string {
 		return fmt.Sprintf("server_error_%d", code)
 	}
 
-	// Client errors (4xx not handled above)
 	if code >= 400 && code < 500 {
 		return fmt.Sprintf("client_error_%d", code)
 	}
 
-	// Catch-all
 	if code == 0 {
 		return "unknown"
 	}
 	return fmt.Sprintf("error_status_%d", code)
 }
 
-// getSourceIP retrieves source IP with a fallback chain:
-// 1. User attribute "source_ip" (set by setAttributeBySource)
-// 2. Proxywasm property "source.address" (eBPF / proxy protocol)
-// 3. X-Forwarded-For header
-// 4. Default "unknown"
 func getSourceIP(ctx wrapper.HttpContext) string {
-	// Try 1: user attribute
 	if v := ctx.GetUserAttribute(SourceIP); v != nil {
 		if s, ok := v.(string); ok && s != "" && s != "unknown" {
 			return s
 		}
 	}
-	// Try 2: proxywasm property
 	if bs, err := proxywasm.GetProperty([]string{"source", "address"}); err == nil && len(bs) > 0 {
 		if ip := parseIP(string(bs)); isValidIP(ip) {
 			return ip
 		}
 	}
-	// Try 3: X-Forwarded-For
 	if xff, err := proxywasm.GetHttpRequestHeader("X-Forwarded-For"); err == nil && xff != "" {
 		ips := strings.Split(xff, ",")
 		for _, ip := range ips {
@@ -1811,15 +1577,8 @@ func getSourceIP(ctx wrapper.HttpContext) string {
 	return "unknown"
 }
 
-// ====== NEW: Raw JSON Filter State Writer (fixes double-escaping) ======
-
-// writeRawAILogToFilterState writes aiLog map as JSON bytes to wasm.ai_log filter state.
-// When accessLogFormat uses "ai_log":%FILTER_STATE(wasm.ai_log:PLAIN)% (without surrounding quotes),
-// Envoy WasmState.serializeAsJson() parses the stored JSON string into a JSON object,
-// which is then embedded directly into the access log JSON without backslash escaping.
 func writeRawAILogToFilterState(aiLog map[string]interface{}) {
 	if aiLog == nil {
-		// Write empty object so access log shows {} instead of -
 		aiLog = make(map[string]interface{})
 	}
 	rawJSON, err := json.Marshal(aiLog)
@@ -1827,32 +1586,24 @@ func writeRawAILogToFilterState(aiLog map[string]interface{}) {
 		log.Warnf("failed to marshal ai_log for filter state: %v", err)
 		return
 	}
-	// Write JSON bytes to filter state. Envoy's WasmState.serializeAsJson()
-	// will parse these bytes as JSON and return a JSON object (not string),
-	// allowing direct embedding in JSON access log without escaping.
 	if err := proxywasm.SetProperty([]string{"wasm", "ai_log"}, rawJSON); err != nil {
 		log.Warnf("failed to set wasm.ai_log filter state: %v", err)
 	}
 }
 
-// writeStringToFilterState 将字符串以 JSON 字符串格式写入 Envoy filter state。
-// 存储的内容为带双引号的 JSON 字符串字面量（如 "user-123"）。
-// 配合 accessLogFormat 中的 %FILTER_STATE(wasm.key:PLAIN)% 使用（注意：accessLogFormat 中该字段值位置不要加引号），
-// 可直接嵌入 JSON 格式的 access log，避免反斜杠转义问题。
+// writeStringToFilterState 将原始字符串字节写入 Envoy filter state。
+// 不再使用 json.Marshal 包装，避免 Envoy PLAIN 序列化时产生双引号嵌套，
+// 导致 accessLogFormat 解析为 "-" 或出现反斜杠转义。
+// 配合 accessLogFormat 中 "model": "%FILTER_STATE(wasm.model:PLAIN)%" 使用，
+// Envoy 会自动将 PLAIN 输出编码为合法 JSON 字符串。
 func writeStringToFilterState(key, value string) {
 	if value == "" {
 		value = "-"
 	}
-	// 将字符串序列化为 JSON 字符串字面量（自动添加双引号并转义内部特殊字符）
-	jsonBytes, err := json.Marshal(value)
-	if err != nil {
-		log.Warnf("failed to marshal value for key %s: %v", key, err)
-		return
-	}
-	if err := proxywasm.SetProperty([]string{"wasm", key}, jsonBytes); err != nil {
+	if err := proxywasm.SetProperty([]string{"wasm", key}, []byte(value)); err != nil {
 		log.Warnf("failed to set filter state wasm.%s: %v", key, err)
 	} else {
-		log.Debugf("successfully set filter state wasm.%s = %s", key, value)
+		log.Infof("successfully set filter state wasm.%s = %s", key, value)
 	}
 }
 
@@ -1923,23 +1674,13 @@ func writeTopLevelFields(record *AILogRecord) {
 	}
 }
 
-// ====== Log Output Functions ======
-
-// outputAILog outputs a structured JSON log line to container stdout.
-// log-pilot (DaemonSet on each node) collects container stdout, detects lines
-// prefixed with [AILOG], parses the JSON, and forwards to ES.
 func outputAILog(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 	log.Debugf("[AI-LOG] building success log record...")
 	record := buildAILogRecord(ctx, config)
 	log.Debugf("[AI-LOG] record built: status=%d model=%s success=%v", record.StatusCode, record.Model, record.RequestSuccess)
 
-	// Write raw JSON object to filter state so access log can embed it without escaping.
-	// Must be called BEFORE json.Marshal(record) to ensure the map is finalized.
-	writeRawAILogToFilterState(record.AILog)
-
-	// 【新增】写入平级字段到 filter state，供 accessLogFormat 平级引用
-	writeTopLevelFields(record)
-
+	// buildAILogRecord 内部已统一调用 writeRawAILogToFilterState 和 writeTopLevelFields，
+	// 这里直接序列化输出即可，无需重复写入 filter state。
 	recordBytes, err := json.Marshal(record)
 	if err != nil {
 		log.Errorf("[AI-LOG] failed to marshal AI log: %v", err)
@@ -1949,41 +1690,18 @@ func outputAILog(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 	log.Debugf("[AI-LOG] success log output complete, size=%d bytes", len(recordBytes))
 }
 
-// outputAILogFailure outputs a log for requests that fail before
-// response body processing (e.g., 401/403/404/5xx with no body read).
-// It reuses buildAILogRecord to ensure question, model, consumer, route_name
-// and other fields are collected uniformly with success logs.
 func outputAILogFailure(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 	log.Debugf("[AI-LOG] building failure log record...")
-
-	// 【核心修复】复用 buildAILogRecord 的完整字段收集逻辑。
-	// 该函数会从 UserAttribute 和 Context 中统一提取：
-	//   - question（在 onHttpRequestBody 中通过 setAttributeBySource 解析）
-	//   - model（从请求体或路径解析，fallback 到 CtxKeyRequestModel）
-	//   - consumer、route_name、cluster_name、source_ip
-	//   - request_method、request_path、session_id
-	//   - 已解析的 token 信息（如有）
-	// 对于失败请求，answer/reasoning 等字段因无响应体自然为 nil，不会污染日志。
 	record := buildAILogRecord(ctx, config)
-
-	// 强制标记为失败（buildAILogRecord 已根据 StatusCode 判断，但显式覆盖确保一致性）
 	record.RequestSuccess = false
-
-	// 兜底保护：如果 buildAILogRecord 中未获取到 FailureReason，再次从 Context 读取
 	if record.FailureReason == "" {
 		record.FailureReason = ctx.GetStringContext(CtxFailureReason, "")
 	}
-
-	// 兜底保护：如果 StatusCode 异常（如 0），使用 ResponseStatusCode 上下文修正
 	if record.StatusCode == 0 {
 		if sc := ctx.GetStringContext(ResponseStatusCode, "0"); sc != "" {
 			record.StatusCode, _ = strconv.Atoi(sc)
 		}
 	}
-
-	// 输出日志
-	// buildAILogRecord 内部已调用 writeRawAILogToFilterState 和 writeTopLevelFields，
-	// 这里直接序列化输出即可，无需重复写入 filter state。
 	if recordBytes, err := json.Marshal(record); err == nil {
 		log.Infof("[AILOG] %s", string(recordBytes))
 		log.Debugf("[AI-LOG] failure log output complete: status=%d reason=%s size=%d bytes", record.StatusCode, record.FailureReason, len(recordBytes))
@@ -1992,7 +1710,6 @@ func outputAILogFailure(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 	}
 }
 
-// buildAILogRecord collects all request info and AI attributes into a structured record.
 func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILogRecord {
 	record := &AILogRecord{
 		Timestamp:           time.Now().Format(time.RFC3339Nano),
@@ -2006,28 +1723,22 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 		record.PodName = "unknown"
 	}
 
-	// Status code and success flag
 	statusCodeStr := ctx.GetStringContext(ResponseStatusCode, "0")
 	record.StatusCode, _ = strconv.Atoi(statusCodeStr)
 	record.RequestSuccess = record.StatusCode >= 200 && record.StatusCode < 400
 
-	// Model
 	if model := ctx.GetUserAttribute("model"); model != nil {
 		record.Model = fmt.Sprint(model)
 	} else if requestModel := ctx.GetContext(tokenusage.CtxKeyRequestModel); requestModel != nil {
-		// 【修复】增加 fallback：如果 user attribute 中没有 model，尝试从请求阶段解析的 model 获取
 		record.Model = fmt.Sprint(requestModel)
 	}
 
-	// Source IP (with fallback chain)
 	record.SourceIP = getSourceIP(ctx)
 
-	// Session ID
 	if sessionId := ctx.GetUserAttribute(SessionID); sessionId != nil {
 		record.SessionID = fmt.Sprint(sessionId)
 	}
 
-	// Response type and durations
 	if respType := ctx.GetUserAttribute(ResponseType); respType != nil {
 		record.ResponseType = fmt.Sprint(respType)
 	}
@@ -2042,13 +1753,10 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 		}
 	}
 
-	// Backend upstream address
 	record.BackendUpstreamAddress = ctx.GetStringContext(CtxBackendUpstreamAddress, "")
 
-	// Failure reason
 	record.FailureReason = ctx.GetStringContext(CtxFailureReason, "")
 
-	// Request method and path
 	record.RequestMethod = ""
 	if rm := ctx.GetUserAttribute("request_method"); rm != nil {
 		record.RequestMethod = fmt.Sprint(rm)
@@ -2058,10 +1766,8 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 		record.RequestPath = fmt.Sprint(rp)
 	}
 
-	// Collect AI-specific attributes as ai_log
 	aiLog := make(map[string]interface{})
 
-	// Always include basic info first so it's present even for edge cases
 	collectBasicAILogInfo(ctx, aiLog)
 
 	collectAIAttr := func(key string) {
@@ -2086,7 +1792,6 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 	collectAIAttr("input_token_details")
 	collectAIAttr("output_token_details")
 
-	// Summarize large attributes to prevent oversized logs
 	for key, val := range aiLog {
 		switch key {
 		case "messages":
@@ -2098,32 +1803,23 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 
 	record.AILog = aiLog
 
-	// Enforce total log body size cap
 	enforceSizeCap(record, config.maxLogBodyBytes)
 
-	// Write raw JSON object to filter state so access log can embed it without escaping.
-	// Must be called BEFORE json.Marshal(record) to ensure the map is finalized.
 	writeRawAILogToFilterState(record.AILog)
-
-	// 【新增】写入平级字段到 filter state，供 accessLogFormat 平级引用
 	writeTopLevelFields(record)
 
 	return record
 }
 
-// summarizeAttribute truncates a single large attribute to maxBytes while preserving
-// the head and tail.
 func summarizeAttribute(key string, value interface{}, maxBytes int) interface{} {
 	str := fmt.Sprint(value)
 	if len(str) <= maxBytes {
-		return value // small enough, keep as-is
+		return value
 	}
 	half := maxBytes / 2
 	return str[:half] + " [..." + strconv.Itoa(len(str)-maxBytes) + " bytes truncated...] " + str[len(str)-half:]
 }
 
-// summarizeMessages handles conversation messages specially: when they exceed the byte
-// limit we keep the first 2 rounds and last 2 rounds with a summary marker in between.
 func summarizeMessages(value interface{}, maxBytes int) interface{} {
 	str := fmt.Sprint(value)
 	if len(str) <= maxBytes {
@@ -2161,8 +1857,6 @@ func summarizeMessages(value interface{}, maxBytes int) interface{} {
 	return buf.String()
 }
 
-// enforceSizeCap ensures the final JSON does not exceed maxBytes.
-// If it does, large fields are progressively removed.
 func enforceSizeCap(record *AILogRecord, maxBytes int) {
 	if maxBytes <= 0 || record.AILog == nil {
 		return
@@ -2183,6 +1877,7 @@ func enforceSizeCap(record *AILogRecord, maxBytes int) {
 		record.AILog["_dropped_fields"] = fmt.Sprintf("removed %v to stay under %dKB limit", dropped, maxBytes/1024)
 	}
 }
+
 func convertToUInt(val interface{}) (uint64, bool) {
 	switch v := val.(type) {
 	case float32:
@@ -2207,7 +1902,6 @@ func parseIP(source string) string {
 		return "unknown"
 	}
 
-	// IPv4
 	if strings.Contains(source, ".") {
 		if idx := strings.LastIndex(source, ":"); idx != -1 {
 			return source[:idx]
@@ -2215,7 +1909,6 @@ func parseIP(source string) string {
 		return source
 	}
 
-	// IPv6
 	if strings.Contains(source, "[") && strings.Contains(source, "]") {
 		if start := strings.Index(source, "["); start != -1 {
 			if end := strings.Index(source, "]"); end != -1 {
@@ -2224,7 +1917,6 @@ func parseIP(source string) string {
 		}
 	}
 
-	// May be pure IPv6 address
 	if strings.Count(source, ":") >= 2 {
 		if idx := strings.LastIndex(source, ":"); idx != -1 {
 			return source[:idx]
@@ -2232,12 +1924,11 @@ func parseIP(source string) string {
 	}
 	return source
 }
+
 func isValidIP(ip string) bool {
 	return ip != "" && ip != "unknown" && net.ParseIP(ip) != nil
 }
 
-// collectBasicAILogInfo collects basic request info into the ai_log map.
-// This ensures even failed requests have essential fields for debugging and filtering.
 func collectBasicAILogInfo(ctx wrapper.HttpContext, aiLog map[string]interface{}) {
 	if aiLog == nil {
 		return
