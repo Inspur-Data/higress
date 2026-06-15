@@ -60,6 +60,7 @@ const (
 	ClusterName                = "cluster"
 	APIName                    = "api"
 	ConsumerKey                = "x-mse-consumer"
+	CtxConsumerValue           = "ai_statistics_consumer_value"
 	RequestPath                = "request_path"
 	SkipProcessing             = "skip_processing"
 
@@ -806,11 +807,13 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) ty
 	}
 	consumer := getConsumerFromRequest()
 	if consumer != "" {
-		ctx.SetContext(ConsumerKey, consumer)
+		// Use private key CtxConsumerValue to avoid conflict with other plugins/envoy internals
+		// that may manipulate the "x-mse-consumer" key during response phase
+		ctx.SetContext(CtxConsumerValue, consumer)
 		ctx.SetUserAttribute("consumer", consumer)
-		log.Debugf("[AI-STATISTICS-DEBUG] consumer parsed and set: %s", consumer)
+		log.Infof("[AI-STATISTICS-DEBUG] consumer set: value=%s, privateKey=%s", consumer, CtxConsumerValue)
 	} else {
-		log.Debugf("[AI-STATISTICS-DEBUG] consumer not found in %s or Authorization header", ConsumerKey)
+		log.Infof("[AI-STATISTICS-DEBUG] consumer not found in %s or Authorization header", ConsumerKey)
 	}
 
 	ctx.SetRequestBodyBufferLimit(defaultMaxBodyBytes)
@@ -1464,7 +1467,8 @@ func setSpanAttribute(key string, value interface{}) {
 func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 	var ok bool
 	var route, cluster, model string
-	consumer := ctx.GetStringContext(ConsumerKey, "none")
+	// Use CtxConsumerValue (private key) to avoid key conflicts
+	consumer := ctx.GetStringContext(CtxConsumerValue, "none")
 	route, ok = ctx.GetContext(RouteName).(string)
 	if !ok {
 		log.Info("RouteName type assert failed, skip metric record")
@@ -1810,15 +1814,21 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 		Route:               ctx.GetStringContext(RouteName, "-"),
 		Cluster:             ctx.GetStringContext(ClusterName, "-"),
 		BackendModelCluster: ctx.GetStringContext(ClusterName, "-"),
-		Consumer:            ctx.GetStringContext(ConsumerKey, "none"),
+		// Use CtxConsumerValue (private key) instead of ConsumerKey to avoid key conflicts
+		Consumer:            ctx.GetStringContext(CtxConsumerValue, ""),
 	}
+	log.Infof("[AI-STATISTICS-DEBUG] buildAILogRecord: consumer from private context: '%s'", record.Consumer)
 
 	// Prioritize user attribute for consumer (more reliable than context in fallback route scenarios)
 	if consumer := ctx.GetUserAttribute("consumer"); consumer != nil {
 		record.Consumer = fmt.Sprint(consumer)
-		log.Debugf("[AI-STATISTICS-DEBUG] buildAILogRecord: consumer from user attribute: %s", record.Consumer)
+		log.Infof("[AI-STATISTICS-DEBUG] buildAILogRecord: consumer overridden from user attribute: %s", record.Consumer)
 	} else {
-		log.Debugf("[AI-STATISTICS-DEBUG] buildAILogRecord: consumer from context: %s", record.Consumer)
+		log.Infof("[AI-STATISTICS-DEBUG] buildAILogRecord: no user attribute for consumer, using context value: '%s'", record.Consumer)
+	}
+	if record.Consumer == "" {
+		record.Consumer = "none"
+		log.Infof("[AI-STATISTICS-DEBUG] buildAILogRecord: consumer empty, fallback to 'none'")
 	}
 	if record.PodName == "" {
 		record.PodName = "unknown"
@@ -2041,10 +2051,15 @@ func collectBasicAILogInfo(ctx wrapper.HttpContext, aiLog map[string]interface{}
 	// Prioritize user attribute for consumer (more reliable than context in fallback route scenarios)
 	if consumer := ctx.GetUserAttribute("consumer"); consumer != nil {
 		aiLog["consumer"] = consumer
-		log.Debugf("[AI-STATISTICS-DEBUG] collectBasicAILogInfo: consumer from user attribute: %v", consumer)
+		log.Infof("[AI-STATISTICS-DEBUG] collectBasicAILogInfo: consumer from user attribute: %v", consumer)
 	} else {
-		aiLog["consumer"] = ctx.GetStringContext(ConsumerKey, "none")
-		log.Debugf("[AI-STATISTICS-DEBUG] collectBasicAILogInfo: consumer from context fallback: %v", aiLog["consumer"])
+		// Use CtxConsumerValue (private key) to avoid conflicts with ConsumerKey
+		consumerFromCtx := ctx.GetStringContext(CtxConsumerValue, "")
+		if consumerFromCtx == "" {
+			consumerFromCtx = "none"
+		}
+		aiLog["consumer"] = consumerFromCtx
+		log.Infof("[AI-STATISTICS-DEBUG] collectBasicAILogInfo: consumer from private context: %v", consumerFromCtx)
 	}
 	aiLog["route_name"] = ctx.GetStringContext(RouteName, "-")
 	aiLog["cluster_name"] = ctx.GetStringContext(ClusterName, "-")
