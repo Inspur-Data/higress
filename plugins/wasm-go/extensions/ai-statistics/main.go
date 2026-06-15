@@ -152,6 +152,7 @@ const (
 	CtxUpstreamTransportFailure = "ai_statistics_upstream_transport_failure"
 	CtxBackendUpstreamAddress   = "ai_statistics_backend_upstream_address"
 	CtxFailureReason            = "ai_statistics_failure_reason"
+	CtxIsFallbackRoute          = "ai_statistics_is_fallback_route"
 
 	DefaultMaxLogBodyBytes   = 2 * 1024 * 1024
 	DefaultMaxAttributeBytes = 100 * 1024
@@ -488,24 +489,57 @@ func getClusterName() (string, error) {
 func getConsumerFromRequest() string {
 	// 1. 优先读取 x-mse-consumer 头（consumer-auth插件认证后设置）
 	if consumer, _ := proxywasm.GetHttpRequestHeader(ConsumerKey); consumer != "" {
-		log.Debugf("[AI-STATISTICS-DEBUG] getConsumerFromRequest: found from %s header: %s", ConsumerKey, consumer)
+		log.Infof("[AI-STATISTICS-DEBUG] getConsumerFromRequest: found from %s header: %s", ConsumerKey, consumer)
 		return consumer
 	}
 
-	// 2. Fallback: 从 Authorization 头解析 Bearer token
-	if auth, _ := proxywasm.GetHttpRequestHeader("authorization"); auth != "" {
+	// 2. Fallback: 从 Authorization 头解析 Bearer token（尝试多种大小写变体）
+	// Envoy WASM SDK中header查找可能区分大小写，需尝试所有可能的形式
+	authHeaders := []string{"authorization", "Authorization", "AUTHORIZATION"}
+	for _, headerName := range authHeaders {
+		auth, err := proxywasm.GetHttpRequestHeader(headerName)
+		if err != nil {
+			log.Debugf("[AI-STATISTICS-DEBUG] getConsumerFromRequest: reading %s header failed: %v", headerName, err)
+			continue
+		}
+		if auth == "" {
+			continue
+		}
 		auth = strings.TrimSpace(auth)
+		log.Infof("[AI-STATISTICS-DEBUG] getConsumerFromRequest: found %s header, value length=%d", headerName, len(auth))
 		// 支持 "Bearer <token>" 和 "bearer <token>" 格式
-		if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
-			token := strings.TrimSpace(auth[7:])
+		lowerAuth := strings.ToLower(auth)
+		if idx := strings.Index(lowerAuth, "bearer "); idx != -1 {
+			token := strings.TrimSpace(auth[idx+7:])
 			if token != "" {
-				log.Debugf("[AI-STATISTICS-DEBUG] getConsumerFromRequest: extracted from Authorization Bearer: %s", token)
+				log.Infof("[AI-STATISTICS-DEBUG] getConsumerFromRequest: extracted consumer from %s Bearer: %s", headerName, token)
 				return token
 			}
 		}
+		// 尝试直接作为consumer值返回（如果auth头不是Bearer格式但整体有值）
+		log.Debugf("[AI-STATISTICS-DEBUG] getConsumerFromRequest: %s header is not Bearer format: %s", headerName, auth)
 	}
 
-	log.Debugf("[AI-STATISTICS-DEBUG] getConsumerFromRequest: no consumer found in %s or Authorization header", ConsumerKey)
+	// 3. 最后尝试：列出所有请求头来调试（仅取前几个字符避免敏感信息泄露）
+	if shouldLogDebug() {
+		if headers, err := proxywasm.GetHttpRequestHeaders(); err == nil {
+			log.Debugf("[AI-STATISTICS-DEBUG] getConsumerFromRequest: total headers=%d", len(headers))
+			for _, h := range headers {
+				key := strings.ToLower(h[0])
+				if key == "authorization" || key == "x-api-key" || key == "x-auth-token" || strings.Contains(key, "auth") {
+					valPreview := h[1]
+					if len(valPreview) > 20 {
+						valPreview = valPreview[:20] + "..."
+					}
+					log.Debugf("[AI-STATISTICS-DEBUG] getConsumerFromRequest: found auth-related header %s=%s", h[0], valPreview)
+				}
+			}
+		} else {
+			log.Debugf("[AI-STATISTICS-DEBUG] getConsumerFromRequest: failed to list headers: %v", err)
+		}
+	}
+
+	log.Infof("[AI-STATISTICS-DEBUG] getConsumerFromRequest: no consumer found in %s or Authorization header", ConsumerKey)
 	return ""
 }
 
@@ -751,6 +785,14 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) ty
 	ctx.SetUserAttribute(APIName, api)
 	ctx.SetContext(StatisticsRequestStartTime, time.Now().UnixMilli())
 
+	// Detect fallback route: cluster name contains "fallback" indicates this is a catch-all route
+	if strings.Contains(strings.ToLower(cluster), "fallback") {
+		ctx.SetContext(CtxIsFallbackRoute, true)
+		log.Infof("[AI-STATISTICS-DEBUG] fallback route detected: cluster=%s", cluster)
+	} else {
+		ctx.SetContext(CtxIsFallbackRoute, false)
+	}
+
 	if requestMethod, _ := proxywasm.GetHttpRequestHeader(":method"); requestMethod != "" {
 		ctx.SetUserAttribute("request_method", requestMethod)
 		log.Debugf("[AI-LOG] request method recorded: %s", requestMethod)
@@ -889,11 +931,12 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) t
 				log.Debugf("backend upstream address: %s", upstreamAddress)
 			}
 
-			failureReason := classifyFailure(statusCode, codeDetails, transportFailure)
+			isFallbackRoute := ctx.GetBoolContext(CtxIsFallbackRoute, false)
+			failureReason := classifyFailure(statusCode, codeDetails, transportFailure, isFallbackRoute)
 			if failureReason != "" {
 				ctx.SetContext(CtxFailureReason, failureReason)
 				ctx.SetUserAttribute("failure_reason", failureReason)
-				log.Infof("request failure classified: status=%s, reason=%s", statusCode, failureReason)
+				log.Infof("request failure classified: status=%s, reason=%s, isFallback=%v", statusCode, failureReason, isFallbackRoute)
 			}
 
 			outputAILogFailure(ctx, config)
@@ -1492,7 +1535,7 @@ func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 	}
 }
 
-func classifyFailure(statusCode, codeDetails, transportFailure string) string {
+func classifyFailure(statusCode, codeDetails, transportFailure string, isFallbackRoute bool) string {
 	code, _ := strconv.Atoi(statusCode)
 
 	if code >= 200 && code < 400 {
@@ -1545,6 +1588,11 @@ func classifyFailure(statusCode, codeDetails, transportFailure string) string {
 	}
 
 	if code == 404 {
+		// In fallback route scenario, 404 means the request didn't match any real route
+		// (the catch-all route forwarded to a dummy upstream which returns 404)
+		if isFallbackRoute {
+			return "gateway_no_route"
+		}
 		if strings.Contains(lowerDetails, "no_route") || strings.Contains(lowerDetails, "no cluster") {
 			return "gateway_no_route"
 		}
@@ -2024,5 +2072,9 @@ func collectBasicAILogInfo(ctx wrapper.HttpContext, aiLog map[string]interface{}
 	}
 	if failureReason := ctx.GetStringContext(CtxFailureReason, ""); failureReason != "" {
 		aiLog["failure_reason"] = failureReason
+	}
+	// Mark fallback route scenario in ai_log for easier identification
+	if isFallback := ctx.GetBoolContext(CtxIsFallbackRoute, false); isFallback {
+		aiLog["is_fallback_route"] = true
 	}
 }
