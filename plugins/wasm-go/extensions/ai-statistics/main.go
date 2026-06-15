@@ -947,6 +947,18 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) t
 				log.Infof("request failure classified: status=%s, reason=%s, isFallback=%v", statusCode, failureReason, isFallbackRoute)
 			}
 
+			// Set x-mse-consumer response header so access log can read it via %RESP(X-MSE-CONSUMER)%
+			// This is needed because in fallback route scenarios, consumer-auth plugin doesn't run
+			// and the x-mse-consumer request header is never set.
+			if raw, err := proxywasm.GetProperty([]string{"ai_statistics_consumer"}); err == nil && len(raw) > 0 {
+				consumerVal := string(raw)
+				if err := proxywasm.SetHttpResponseHeader("x-mse-consumer", consumerVal); err != nil {
+					log.Warnf("[AI-STATISTICS-DEBUG] failed to set x-mse-consumer response header: %v", err)
+				} else {
+					log.Infof("[AI-STATISTICS-DEBUG] set x-mse-consumer response header: %s", consumerVal)
+				}
+			}
+
 			outputAILogFailure(ctx, config)
 			ctx.SetContext(CtxAILogOutput, true)
 			log.Infof("[AI-STATISTICS-DEBUG] failure log output complete, CtxAILogOutput=true")
