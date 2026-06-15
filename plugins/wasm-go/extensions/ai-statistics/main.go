@@ -952,7 +952,7 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) t
 			// and the x-mse-consumer request header is never set.
 			if raw, err := proxywasm.GetProperty([]string{"ai_statistics_consumer"}); err == nil && len(raw) > 0 {
 				consumerVal := string(raw)
-				if err := proxywasm.SetHttpResponseHeader("x-mse-consumer", consumerVal); err != nil {
+				if err := proxywasm.ReplaceHttpResponseHeader("x-mse-consumer", consumerVal); err != nil {
 					log.Warnf("[AI-STATISTICS-DEBUG] failed to set x-mse-consumer response header: %v", err)
 				} else {
 					log.Infof("[AI-STATISTICS-DEBUG] set x-mse-consumer response header: %s", consumerVal)
