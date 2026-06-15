@@ -737,6 +737,10 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) ty
 	}
 	if consumer, _ := proxywasm.GetHttpRequestHeader(ConsumerKey); consumer != "" {
 		ctx.SetContext(ConsumerKey, consumer)
+		ctx.SetUserAttribute("consumer", consumer)
+		log.Debugf("[AI-STATISTICS-DEBUG] consumer parsed from header and set: %s", consumer)
+	} else {
+		log.Debugf("[AI-STATISTICS-DEBUG] consumer header %s not found or empty", ConsumerKey)
 	}
 
 	ctx.SetRequestBodyBufferLimit(defaultMaxBodyBytes)
@@ -785,6 +789,9 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body 
 		}
 	}
 	ctx.SetContext(tokenusage.CtxKeyRequestModel, requestModel)
+	ctx.SetUserAttribute("model", requestModel)
+	ctx.SetUserAttribute(tokenusage.CtxKeyModel, requestModel)
+	log.Debugf("[AI-STATISTICS-DEBUG] model parsed and set to user attribute: %s", requestModel)
 	setSpanAttribute(ArmsRequestModel, requestModel)
 
 	userPromptCount := 0
@@ -1331,6 +1338,9 @@ func debugLogAiLog(ctx wrapper.HttpContext) {
 	if model := ctx.GetUserAttribute("model"); model != nil {
 		userAttrs["model"] = model
 	}
+	if consumer := ctx.GetUserAttribute("consumer"); consumer != nil {
+		userAttrs["consumer"] = consumer
+	}
 	if inputToken := ctx.GetUserAttribute("input_token"); inputToken != nil {
 		userAttrs["input_token"] = inputToken
 	}
@@ -1683,7 +1693,7 @@ func writeTopLevelFields(record *AILogRecord) {
 func outputAILog(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 	log.Debugf("[AI-LOG] building success log record...")
 	record := buildAILogRecord(ctx, config)
-	log.Debugf("[AI-LOG] record built: status=%d model=%s success=%v", record.StatusCode, record.Model, record.RequestSuccess)
+	log.Debugf("[AI-LOG] record built: status=%d model=%s consumer=%s success=%v", record.StatusCode, record.Model, record.Consumer, record.RequestSuccess)
 
 	// buildAILogRecord 内部已统一调用 writeRawAILogToFilterState 和 writeTopLevelFields，
 	// 这里直接序列化输出即可，无需重复写入 filter state。
@@ -1708,6 +1718,7 @@ func outputAILogFailure(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 			record.StatusCode, _ = strconv.Atoi(sc)
 		}
 	}
+	log.Debugf("[AI-STATISTICS-DEBUG] outputAILogFailure: model=%s consumer=%s status=%d", record.Model, record.Consumer, record.StatusCode)
 	if recordBytes, err := json.Marshal(record); err == nil {
 		log.Infof("[AILOG] %s", string(recordBytes))
 		log.Debugf("[AI-LOG] failure log output complete: status=%d reason=%s size=%d bytes", record.StatusCode, record.FailureReason, len(recordBytes))
@@ -1725,6 +1736,14 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 		BackendModelCluster: ctx.GetStringContext(ClusterName, "-"),
 		Consumer:            ctx.GetStringContext(ConsumerKey, "none"),
 	}
+
+	// Prioritize user attribute for consumer (more reliable than context in fallback route scenarios)
+	if consumer := ctx.GetUserAttribute("consumer"); consumer != nil {
+		record.Consumer = fmt.Sprint(consumer)
+		log.Debugf("[AI-STATISTICS-DEBUG] buildAILogRecord: consumer from user attribute: %s", record.Consumer)
+	} else {
+		log.Debugf("[AI-STATISTICS-DEBUG] buildAILogRecord: consumer from context: %s", record.Consumer)
+	}
 	if record.PodName == "" {
 		record.PodName = "unknown"
 	}
@@ -1735,8 +1754,12 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 
 	if model := ctx.GetUserAttribute("model"); model != nil {
 		record.Model = fmt.Sprint(model)
+		log.Debugf("[AI-STATISTICS-DEBUG] buildAILogRecord: model from user attribute: %s", record.Model)
 	} else if requestModel := ctx.GetContext(tokenusage.CtxKeyRequestModel); requestModel != nil {
 		record.Model = fmt.Sprint(requestModel)
+		log.Debugf("[AI-STATISTICS-DEBUG] buildAILogRecord: model from context fallback: %s", record.Model)
+	} else {
+		log.Debugf("[AI-STATISTICS-DEBUG] buildAILogRecord: model not found in user attribute or context")
 	}
 
 	record.SourceIP = getSourceIP(ctx)
@@ -1939,13 +1962,24 @@ func collectBasicAILogInfo(ctx wrapper.HttpContext, aiLog map[string]interface{}
 	if aiLog == nil {
 		return
 	}
-	aiLog["consumer"] = ctx.GetStringContext(ConsumerKey, "none")
+	// Prioritize user attribute for consumer (more reliable than context in fallback route scenarios)
+	if consumer := ctx.GetUserAttribute("consumer"); consumer != nil {
+		aiLog["consumer"] = consumer
+		log.Debugf("[AI-STATISTICS-DEBUG] collectBasicAILogInfo: consumer from user attribute: %v", consumer)
+	} else {
+		aiLog["consumer"] = ctx.GetStringContext(ConsumerKey, "none")
+		log.Debugf("[AI-STATISTICS-DEBUG] collectBasicAILogInfo: consumer from context fallback: %v", aiLog["consumer"])
+	}
 	aiLog["route_name"] = ctx.GetStringContext(RouteName, "-")
 	aiLog["cluster_name"] = ctx.GetStringContext(ClusterName, "-")
 	if model := ctx.GetUserAttribute("model"); model != nil {
 		aiLog["model"] = model
+		log.Debugf("[AI-STATISTICS-DEBUG] collectBasicAILogInfo: model from user attribute: %v", model)
 	} else if requestModel := ctx.GetContext(tokenusage.CtxKeyRequestModel); requestModel != nil {
 		aiLog["model"] = requestModel
+		log.Debugf("[AI-STATISTICS-DEBUG] collectBasicAILogInfo: model from context fallback: %v", requestModel)
+	} else {
+		log.Debugf("[AI-STATISTICS-DEBUG] collectBasicAILogInfo: model not found in user attribute or context")
 	}
 	if rm := ctx.GetUserAttribute("request_method"); rm != nil {
 		aiLog["request_method"] = rm
