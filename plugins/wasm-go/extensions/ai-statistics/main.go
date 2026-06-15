@@ -482,6 +482,33 @@ func getClusterName() (string, error) {
 	}
 }
 
+// getConsumerFromRequest 尝试从请求中获取consumer标识。
+// 优先从 x-mse-consumer 请求头获取（由consumer-auth插件设置），
+// 如果不存在则尝试从 Authorization 头的Bearer token中提取。
+func getConsumerFromRequest() string {
+	// 1. 优先读取 x-mse-consumer 头（consumer-auth插件认证后设置）
+	if consumer, _ := proxywasm.GetHttpRequestHeader(ConsumerKey); consumer != "" {
+		log.Debugf("[AI-STATISTICS-DEBUG] getConsumerFromRequest: found from %s header: %s", ConsumerKey, consumer)
+		return consumer
+	}
+
+	// 2. Fallback: 从 Authorization 头解析 Bearer token
+	if auth, _ := proxywasm.GetHttpRequestHeader("authorization"); auth != "" {
+		auth = strings.TrimSpace(auth)
+		// 支持 "Bearer <token>" 和 "bearer <token>" 格式
+		if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+			token := strings.TrimSpace(auth[7:])
+			if token != "" {
+				log.Debugf("[AI-STATISTICS-DEBUG] getConsumerFromRequest: extracted from Authorization Bearer: %s", token)
+				return token
+			}
+		}
+	}
+
+	log.Debugf("[AI-STATISTICS-DEBUG] getConsumerFromRequest: no consumer found in %s or Authorization header", ConsumerKey)
+	return ""
+}
+
 func (config *AIStatisticsConfig) incrementCounter(metricName string, inc uint64) {
 	if inc == 0 {
 		return
@@ -735,12 +762,13 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) ty
 	if requestPath, _ := proxywasm.GetHttpRequestHeader(":path"); requestPath != "" {
 		ctx.SetContext(RequestPath, requestPath)
 	}
-	if consumer, _ := proxywasm.GetHttpRequestHeader(ConsumerKey); consumer != "" {
+	consumer := getConsumerFromRequest()
+	if consumer != "" {
 		ctx.SetContext(ConsumerKey, consumer)
 		ctx.SetUserAttribute("consumer", consumer)
-		log.Debugf("[AI-STATISTICS-DEBUG] consumer parsed from header and set: %s", consumer)
+		log.Debugf("[AI-STATISTICS-DEBUG] consumer parsed and set: %s", consumer)
 	} else {
-		log.Debugf("[AI-STATISTICS-DEBUG] consumer header %s not found or empty", ConsumerKey)
+		log.Debugf("[AI-STATISTICS-DEBUG] consumer not found in %s or Authorization header", ConsumerKey)
 	}
 
 	ctx.SetRequestBodyBufferLimit(defaultMaxBodyBytes)
