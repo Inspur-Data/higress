@@ -808,13 +808,15 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) ty
 	consumer := getConsumerFromRequest()
 	if consumer != "" {
 		// Store consumer in Envoy property (filter state) for reliable cross-phase access.
-		// ctx.SetContext/SetUserAttribute may lose values between request and response phases
-		// in fallback route scenarios. Property is the official Envoy mechanism for this.
+		// Also backup to context for writeMetric which runs before buildAILogRecord.
 		if err := proxywasm.SetProperty([]string{"ai_statistics_consumer"}, []byte(consumer)); err != nil {
 			log.Warnf("[AI-STATISTICS-DEBUG] failed to set consumer property: %v", err)
 		} else {
 			log.Infof("[AI-STATISTICS-DEBUG] consumer stored in property: %s", consumer)
 		}
+		// Backup to context for writeMetric (property may have issues with repeated reads)
+		ctx.SetContext(CtxConsumerValue, consumer)
+		log.Infof("[AI-STATISTICS-DEBUG] consumer backed up to context: %s", consumer)
 	} else {
 		log.Infof("[AI-STATISTICS-DEBUG] consumer not found in %s or Authorization header", ConsumerKey)
 	}
@@ -1470,10 +1472,16 @@ func setSpanAttribute(key string, value interface{}) {
 func writeMetric(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 	var ok bool
 	var route, cluster, model string
-	// Read consumer from Envoy property (stored in request phase)
-	consumer := "none"
-	if raw, err := proxywasm.GetProperty([]string{"ai_statistics_consumer"}); err == nil && len(raw) > 0 {
-		consumer = string(raw)
+	// Read consumer from context (backed up in request phase).
+	// Fallback to property if context value is missing.
+	consumer := ctx.GetStringContext(CtxConsumerValue, "")
+	if consumer == "" {
+		if raw, err := proxywasm.GetProperty([]string{"ai_statistics_consumer"}); err == nil && len(raw) > 0 {
+			consumer = string(raw)
+		}
+	}
+	if consumer == "" {
+		consumer = "none"
 	}
 	route, ok = ctx.GetContext(RouteName).(string)
 	if !ok {
@@ -1886,7 +1894,7 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 
 	aiLog := make(map[string]interface{})
 
-	collectBasicAILogInfo(ctx, aiLog)
+	collectBasicAILogInfo(ctx, aiLog, record.Consumer)
 
 	collectAIAttr := func(key string) {
 		if v := ctx.GetUserAttribute(key); v != nil {
@@ -2047,19 +2055,16 @@ func isValidIP(ip string) bool {
 	return ip != "" && ip != "unknown" && net.ParseIP(ip) != nil
 }
 
-func collectBasicAILogInfo(ctx wrapper.HttpContext, aiLog map[string]interface{}) {
+func collectBasicAILogInfo(ctx wrapper.HttpContext, aiLog map[string]interface{}, consumer string) {
 	if aiLog == nil {
 		return
 	}
-	// Read consumer from Envoy property (stored in request phase).
-	consumer := "none"
-	if raw, err := proxywasm.GetProperty([]string{"ai_statistics_consumer"}); err == nil && len(raw) > 0 {
-		consumer = string(raw)
-		log.Infof("[AI-STATISTICS-DEBUG] collectBasicAILogInfo: consumer from property: %v", consumer)
-	} else {
-		log.Infof("[AI-STATISTICS-DEBUG] collectBasicAILogInfo: consumer property not found, err=%v", err)
-	}
+	// Use the consumer value already extracted in buildAILogRecord.
+	// Do NOT call proxywasm.GetProperty here - repeated GetProperty calls
+	// for the same key within the same function call chain may return empty
+	// values due to Envoy WASM SDK internal caching/lifecycle.
 	aiLog["consumer"] = consumer
+	log.Infof("[AI-STATISTICS-DEBUG] collectBasicAILogInfo: consumer set to: %v", consumer)
 	aiLog["route_name"] = ctx.GetStringContext(RouteName, "-")
 	aiLog["cluster_name"] = ctx.GetStringContext(ClusterName, "-")
 	if model := ctx.GetUserAttribute("model"); model != nil {
