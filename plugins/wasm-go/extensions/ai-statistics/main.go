@@ -155,8 +155,13 @@ const (
 	CtxFailureReason            = "ai_statistics_failure_reason"
 	CtxIsFallbackRoute          = "ai_statistics_is_fallback_route"
 
-	DefaultMaxLogBodyBytes   = 2 * 1024 * 1024
-	DefaultMaxAttributeBytes = 100 * 1024
+	// DefaultMaxLogBodyBytes 默认 128KB，确保 ai_log JSON 不超过此大小。
+	// 外层 access log（含 ai_log 转义后的字符串）通常增长 1.3~1.5 倍，
+	// 因此 128KB ai_log → 约 180KB 总日志，远低于 fluentd chunk_limit_size（1M）。
+	DefaultMaxLogBodyBytes = 128 * 1024
+	// DefaultMaxAttributeBytes 默认 8KB，单个属性（question/answer/messages）最多保留 8KB。
+	// 长文本先在此处截断，避免多个大字段叠加超过总限制。
+	DefaultMaxAttributeBytes = 8 * 1024
 )
 
 func getDefaultAttributes() []Attribute {
@@ -474,6 +479,24 @@ func getAPIName() (string, error) {
 			return strings.Join(parts[:3], "@"), nil
 		}
 	}
+}
+
+// extractModelFromURLPath 从 URL path 中尝试提取 model 名称。
+// 支持 Gemini API 格式: /v1/models/{model}:generateContent
+// 对于 OpenAI 格式 /v1/chat/completions，model 在 body 中，返回空字符串。
+func extractModelFromURLPath(requestPath string) string {
+	if requestPath == "" {
+		return ""
+	}
+	// Gemini API: /v1/models/{model}:generateContent 或 /v1/models/{model}:streamGenerateContent
+	if strings.Contains(requestPath, "/models/") {
+		reg := regexp.MustCompile(`^.*/models/([^:]+):\w+Content$`)
+		matches := reg.FindStringSubmatch(requestPath)
+		if len(matches) == 2 {
+			return matches[1]
+		}
+	}
+	return ""
 }
 
 func getClusterName() (string, error) {
@@ -808,7 +831,6 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) ty
 	consumer := getConsumerFromRequest()
 	if consumer != "" {
 		// Store consumer in Envoy property (filter state) for reliable cross-phase access.
-		// Also backup to context for writeMetric which runs before buildAILogRecord.
 		if err := proxywasm.SetProperty([]string{"ai_statistics_consumer"}, []byte(consumer)); err != nil {
 			log.Warnf("[AI-STATISTICS-DEBUG] failed to set consumer property: %v", err)
 		} else {
@@ -817,8 +839,32 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) ty
 		// Backup to context for writeMetric (property may have issues with repeated reads)
 		ctx.SetContext(CtxConsumerValue, consumer)
 		log.Infof("[AI-STATISTICS-DEBUG] consumer backed up to context: %s", consumer)
+		// Pre-build ai_log with consumer in request phase so 500/error scenarios
+		// still have ai_log data even if response-phase GetProperty fails
+		appendToAILogFilterState(map[string]interface{}{"consumer": consumer})
+		log.Infof("[AI-STATISTICS-DEBUG] consumer pre-written to ai_log filter state")
 	} else {
 		log.Infof("[AI-STATISTICS-DEBUG] consumer not found in %s or Authorization header", ConsumerKey)
+	}
+
+	// Extract model from URL path in request phase (for APIs where model is in path).
+	// This ensures model is available even if onHttpRequestBody is not executed
+	// (e.g., 500 direct_response scenarios where upstream cluster doesn't exist).
+	// Body-phase model extraction will override this if body is available.
+	requestPath := ctx.GetStringContext(RequestPath, "")
+	urlModel := extractModelFromURLPath(requestPath)
+	if urlModel != "" {
+		ctx.SetContext(tokenusage.CtxKeyRequestModel, urlModel)
+		ctx.SetUserAttribute("model", urlModel)
+		ctx.SetUserAttribute(tokenusage.CtxKeyModel, urlModel)
+		// Store in property for reliable cross-phase access (same as consumer)
+		if err := proxywasm.SetProperty([]string{"ai_statistics_model"}, []byte(urlModel)); err != nil {
+			log.Warnf("[AI-STATISTICS-DEBUG] failed to set model property: %v", err)
+		}
+		appendToAILogFilterState(map[string]interface{}{"model": urlModel})
+		log.Infof("[AI-STATISTICS-DEBUG] model extracted from URL path: %s", urlModel)
+	} else {
+		log.Debugf("[AI-STATISTICS-DEBUG] model not found in URL path: %s", requestPath)
 	}
 
 	ctx.SetRequestBodyBufferLimit(defaultMaxBodyBytes)
@@ -872,6 +918,15 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body 
 	log.Debugf("[AI-STATISTICS-DEBUG] model parsed and set to user attribute: %s", requestModel)
 	setSpanAttribute(ArmsRequestModel, requestModel)
 
+	// Update property and ai_log filter state with body-extracted model (overrides URL path model)
+	if requestModel != "UNKNOWN" {
+		if err := proxywasm.SetProperty([]string{"ai_statistics_model"}, []byte(requestModel)); err != nil {
+			log.Warnf("[AI-STATISTICS-DEBUG] failed to update model property from body: %v", err)
+		}
+		appendToAILogFilterState(map[string]interface{}{"model": requestModel})
+		log.Infof("[AI-STATISTICS-DEBUG] model updated in property and ai_log from body: %s", requestModel)
+	}
+
 	userPromptCount := 0
 	if len(body) > 0 {
 		if messages := gjson.GetBytes(body, "messages"); messages.Exists() && messages.IsArray() {
@@ -898,6 +953,22 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body 
 
 	debugLogAiLog(ctx)
 	_ = ctx.WriteUserAttributeToLogWithKey(wrapper.AILogKey)
+
+	// Pre-build ai_log with request-phase data (model, question) so 500/error
+	// scenarios still have ai_log data. Response-phase data (answer, tokens)
+	// will be added later if response processing succeeds.
+	requestPhaseAILog := make(map[string]interface{})
+	if requestModel != "UNKNOWN" {
+		requestPhaseAILog["model"] = requestModel
+	}
+	if q := ctx.GetUserAttribute("question"); q != nil {
+		requestPhaseAILog["question"] = q
+	}
+	if len(requestPhaseAILog) > 0 {
+		appendToAILogFilterState(requestPhaseAILog)
+		log.Infof("[AI-STATISTICS-DEBUG] request-phase data pre-written to ai_log filter state: %v", requestPhaseAILog)
+	}
+
 	return types.ActionContinue
 }
 
@@ -1626,7 +1697,7 @@ func classifyFailure(statusCode, codeDetails, transportFailure string, isFallbac
 		if strings.Contains(lowerDetails, "no_route") || strings.Contains(lowerDetails, "no cluster") {
 			return "gateway_no_route"
 		}
-		return "not_found"
+		return "gateway_no_route"
 	}
 
 	if code == 408 {
@@ -1705,6 +1776,24 @@ func writeRawAILogToFilterState(aiLog map[string]interface{}) {
 	if err := proxywasm.SetProperty([]string{"wasm", "ai_log"}, rawJSON); err != nil {
 		log.Warnf("failed to set wasm.ai_log filter state: %v", err)
 	}
+}
+
+// appendToAILogFilterState 增量更新 wasm.ai_log filter state。
+// 先读取已有的 ai_log，合并新字段后再写回。用于在 request 阶段逐步构建 ai_log，
+// 确保 500/error 场景下 ai_log 至少有 request 阶段能获取的数据。
+func appendToAILogFilterState(updates map[string]interface{}) {
+	merged := make(map[string]interface{})
+	// 先读取已有的 ai_log（如果存在）
+	if raw, err := proxywasm.GetProperty([]string{"wasm", "ai_log"}); err == nil && len(raw) > 0 {
+		if err := json.Unmarshal(raw, &merged); err != nil {
+			log.Debugf("appendToAILogFilterState: failed to unmarshal existing ai_log: %v", err)
+		}
+	}
+	// 合并新字段
+	for k, v := range updates {
+		merged[k] = v
+	}
+	writeRawAILogToFilterState(merged)
 }
 
 // writeStringToFilterState 将字段包装为单键 JSON 对象写入 Envoy filter state。
@@ -1868,7 +1957,14 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 		record.Model = fmt.Sprint(requestModel)
 		log.Debugf("[AI-STATISTICS-DEBUG] buildAILogRecord: model from context fallback: %s", record.Model)
 	} else {
-		log.Debugf("[AI-STATISTICS-DEBUG] buildAILogRecord: model not found in user attribute or context")
+		// Final fallback: read from property (set in onHttpRequestHeaders from URL path)
+		if raw, err := proxywasm.GetProperty([]string{"ai_statistics_model"}); err == nil && len(raw) > 0 {
+			record.Model = string(raw)
+			log.Infof("[AI-STATISTICS-DEBUG] buildAILogRecord: model from property fallback: %s", record.Model)
+		} else {
+			record.Model = "UNKNOWN"
+			log.Debugf("[AI-STATISTICS-DEBUG] buildAILogRecord: model not found anywhere, using UNKNOWN")
+		}
 	}
 
 	record.SourceIP = getSourceIP(ctx)
@@ -1904,7 +2000,19 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 		record.RequestPath = fmt.Sprint(rp)
 	}
 
+	// Start with request-phase ai_log data pre-built in onHttpRequestHeaders/onHttpRequestBody.
+	// This ensures 500/error scenarios still have consumer, model, question even if
+	// response-phase GetProperty calls fail.
 	aiLog := make(map[string]interface{})
+	if raw, err := proxywasm.GetProperty([]string{"wasm", "ai_log"}); err == nil && len(raw) > 0 {
+		if err := json.Unmarshal(raw, &aiLog); err == nil {
+			log.Infof("[AI-STATISTICS-DEBUG] buildAILogRecord: loaded request-phase ai_log with %d fields", len(aiLog))
+		} else {
+			log.Warnf("[AI-STATISTICS-DEBUG] buildAILogRecord: failed to unmarshal request-phase ai_log: %v", err)
+		}
+	} else {
+		log.Infof("[AI-STATISTICS-DEBUG] buildAILogRecord: no request-phase ai_log found, err=%v", err)
+	}
 
 	collectBasicAILogInfo(ctx, aiLog, record.Consumer)
 
@@ -1936,6 +2044,15 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 			aiLog[key] = summarizeMessages(val, config.maxAttributeBytes)
 		case "question", "answer", "reasoning", "tool_calls":
 			aiLog[key] = summarizeAttribute(key, val, config.maxAttributeBytes)
+		default:
+			// 对其他可能包含 base64 图片的字段也进行截断
+			if str, ok := val.(string); ok && len(str) > 500 {
+				truncated := truncateBase64Images(str, 100)
+				if truncated != str {
+					aiLog[key] = truncated
+					log.Debugf("[buildAILogRecord] truncated base64 images in %s: %d -> %d bytes", key, len(str), len(truncated))
+				}
+			}
 		}
 	}
 
@@ -1949,10 +2066,42 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 	return record
 }
 
+// base64ImagePattern 匹配常见的 base64 图片数据 URI
+// 例如: data:image/jpeg;base64,/9j/4AAQ... 或纯 base64 字符串
+var base64ImagePattern = regexp.MustCompile(`(?i)data:image/\w+;base64,[A-Za-z0-9+/]{100,}={0,2}`)
+var rawBase64Pattern = regexp.MustCompile(`(?i)["']([A-Za-z0-9+/]{1000,}={0,2})["']`)
+
+// truncateBase64Images 检测并截断字符串中的 base64 图片内容
+// 返回截断后的字符串和是否发生了截断
+func truncateBase64Images(str string, maxImageBytes int) string {
+	// 1. 截断 data URI 格式的 base64 图片
+	str = base64ImagePattern.ReplaceAllStringFunc(str, func(match string) string {
+		// 保留 data URI 前缀，截断 base64 内容
+		if idx := strings.Index(match, "base64,"); idx != -1 {
+			prefix := match[:idx+7] // "data:image/xxx;base64,"
+			return prefix + fmt.Sprintf("[...%d bytes image data truncated...]", len(match)-len(prefix))
+		}
+		return "[base64 image data truncated]"
+	})
+
+	// 2. 截断纯 base64 长字符串（可能是图片内容）
+	str = rawBase64Pattern.ReplaceAllStringFunc(str, func(match string) string {
+		// match 包含引号，提取内部内容
+		inner := match[1 : len(match)-1]
+		return fmt.Sprintf("\"[...%d bytes base64 data truncated...]\"", len(inner))
+	})
+
+	return str
+}
+
 func summarizeAttribute(key string, value interface{}, maxBytes int) interface{} {
 	str := fmt.Sprint(value)
+
+	// 先截断 base64 图片内容（不占用 maxBytes 额度）
+	str = truncateBase64Images(str, 100)
+
 	if len(str) <= maxBytes {
-		return value
+		return str
 	}
 	half := maxBytes / 2
 	return str[:half] + " [..." + strconv.Itoa(len(str)-maxBytes) + " bytes truncated...] " + str[len(str)-half:]
@@ -1960,20 +2109,24 @@ func summarizeAttribute(key string, value interface{}, maxBytes int) interface{}
 
 func summarizeMessages(value interface{}, maxBytes int) interface{} {
 	str := fmt.Sprint(value)
+
+	// 先截断 base64 图片内容
+	str = truncateBase64Images(str, 100)
+
 	if len(str) <= maxBytes {
-		return value
+		return str
 	}
 	raw, ok := value.(string)
 	if !ok {
-		return summarizeAttribute("messages", value, maxBytes)
+		return summarizeAttribute("messages", str, maxBytes)
 	}
 	result := gjson.Parse(raw)
 	if !result.IsArray() {
-		return summarizeAttribute("messages", value, maxBytes)
+		return summarizeAttribute("messages", str, maxBytes)
 	}
 	arr := result.Array()
 	if len(arr) <= 4 {
-		return summarizeAttribute("messages", value, maxBytes)
+		return summarizeAttribute("messages", str, maxBytes)
 	}
 	var buf bytes.Buffer
 	buf.WriteString("[")
@@ -1981,14 +2134,17 @@ func summarizeMessages(value interface{}, maxBytes int) interface{} {
 		if i > 0 {
 			buf.WriteString(",")
 		}
-		buf.WriteString(arr[i].Raw)
+		// 截断每条消息中的图片
+		truncatedMsg := truncateBase64Images(arr[i].Raw, 100)
+		buf.WriteString(truncatedMsg)
 	}
 	truncatedCount := len(arr) - 4
 	buf.WriteString(fmt.Sprintf(`,"[ ... %d conversation rounds truncated (original %d rounds, %d bytes) ... ]"`, truncatedCount, len(arr), len(str)))
 	for i := len(arr) - 2; i < len(arr); i++ {
 		if i >= 0 {
 			buf.WriteString(",")
-			buf.WriteString(arr[i].Raw)
+			truncatedMsg := truncateBase64Images(arr[i].Raw, 100)
+			buf.WriteString(truncatedMsg)
 		}
 	}
 	buf.WriteString("]")
@@ -1999,21 +2155,131 @@ func enforceSizeCap(record *AILogRecord, maxBytes int) {
 	if maxBytes <= 0 || record.AILog == nil {
 		return
 	}
-	dropCandidates := []string{"messages", "answer", "reasoning", "tool_calls", "question", "system"}
-	dropped := []string{}
-	for _, key := range dropCandidates {
+
+	// ========== Step 1: 截断 base64 图片（最优先，因为膨胀最厉害） ==========
+	for key, val := range record.AILog {
+		if str, ok := val.(string); ok && len(str) > 500 {
+			truncated := truncateBase64Images(str, 100)
+			if truncated != str {
+				record.AILog[key] = truncated
+				log.Debugf("[enforceSizeCap] truncated base64 in %s: %d -> %d bytes",
+					key, len(str), len(truncated))
+			}
+		}
+	}
+
+	// ========== Step 2: 智能截断 —— 按字段大小排序，从大到小截断 ==========
+	// 收集所有可截断的非关键字段，按大小降序排列
+	type fieldSize struct {
+		key  string
+		size int
+	}
+	var fields []fieldSize
+	for key, val := range record.AILog {
+		if isCriticalField(key) {
+			continue // 关键字段永不截断
+		}
+		size := len(fmt.Sprint(val))
+		if size > 200 { // 只处理大于 200 字节的字段
+			fields = append(fields, fieldSize{key, size})
+		}
+	}
+	// 按大小降序排序
+	for i := 0; i < len(fields); i++ {
+		for j := i + 1; j < len(fields); j++ {
+			if fields[j].size > fields[i].size {
+				fields[i], fields[j] = fields[j], fields[i]
+			}
+		}
+	}
+
+	truncated := []string{}
+	for _, f := range fields {
+		trial, _ := json.Marshal(record)
+		if len(trial) <= maxBytes {
+			break // 已满足限制
+		}
+		val := record.AILog[f.key]
+		str := fmt.Sprint(val)
+		if len(str) <= 200 {
+			continue
+		}
+
+		// 动态计算截断后长度：目标是把当前日志压缩到 maxBytes 的 80%
+		overhead := len(trial) - maxBytes
+		targetLen := len(str) - overhead - 50 // 留 50 字节余量给截断标记
+		if targetLen < 100 {
+			targetLen = 100 // 最少保留 100 字节
+		}
+		if targetLen > len(str) {
+			continue // 不需要截断
+		}
+
+		half := targetLen / 2
+		record.AILog[f.key] = str[:half] +
+			fmt.Sprintf(" [...%d bytes truncated...]", len(str)-targetLen) +
+			str[len(str)-half:]
+		truncated = append(truncated, f.key)
+		log.Debugf("[enforceSizeCap] truncated %s: %d -> ~%d bytes",
+			f.key, len(str), targetLen)
+	}
+
+	// ========== Step 3: 如果仍然超限，删除已截断的字段（最后手段） ==========
+	for _, f := range fields {
 		trial, _ := json.Marshal(record)
 		if len(trial) <= maxBytes {
 			break
 		}
-		if _, exists := record.AILog[key]; exists {
-			delete(record.AILog, key)
-			dropped = append(dropped, key)
+		if _, exists := record.AILog[f.key]; exists {
+			delete(record.AILog, f.key)
+			log.Debugf("[enforceSizeCap] dropped %s to stay under %dKB", f.key, maxBytes/1024)
 		}
 	}
-	if len(dropped) > 0 {
-		record.AILog["_dropped_fields"] = fmt.Sprintf("removed %v to stay under %dKB limit", dropped, maxBytes/1024)
+
+	// 记录截断操作
+	if len(truncated) > 0 {
+		record.AILog["_truncated_fields"] =
+			fmt.Sprintf("truncated %v under %dKB", truncated, maxBytes/1024)
 	}
+
+	// ========== Step 4: 最终兜底 —— 强制硬上限 ==========
+	for {
+		finalBytes, _ := json.Marshal(record)
+		if len(finalBytes) <= maxBytes {
+			break
+		}
+		log.Warnf("[enforceSizeCap] hard cap: %d > %d bytes", len(finalBytes), maxBytes)
+		// 找到最大的非关键字段并删除
+		maxSize := 0
+		maxKey := ""
+		for key, val := range record.AILog {
+			if isCriticalField(key) {
+				continue
+			}
+			if size := len(fmt.Sprint(val)); size > maxSize {
+				maxSize = size
+				maxKey = key
+			}
+		}
+		if maxKey == "" {
+			break // 没有可删除的字段了
+		}
+		delete(record.AILog, maxKey)
+		log.Warnf("[enforceSizeCap] hard cap dropped: %s", maxKey)
+	}
+}
+
+// isCriticalField 判断字段是否为关键字段（不可删除）
+func isCriticalField(key string) bool {
+	switch key {
+	case "consumer", "model", "input_token", "output_token", "total_token",
+		"llm_service_duration", "llm_first_token_duration",
+		"status_code", "failure_reason", "route_name", "cluster_name",
+		"request_method", "request_path", "source_ip",
+		"is_fallback_route", "_truncated_fields":
+		return true
+	}
+	return false
 }
 
 func convertToUInt(val interface{}) (uint64, bool) {
