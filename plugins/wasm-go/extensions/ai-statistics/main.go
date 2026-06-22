@@ -851,7 +851,7 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) ty
 	// This ensures model is available even if onHttpRequestBody is not executed
 	// (e.g., 500 direct_response scenarios where upstream cluster doesn't exist).
 	// Body-phase model extraction will override this if body is available.
-	requestPath := ctx.GetStringContext(RequestPath, "")
+	requestPath = ctx.GetStringContext(RequestPath, "")
 	urlModel := extractModelFromURLPath(requestPath)
 	if urlModel != "" {
 		ctx.SetContext(tokenusage.CtxKeyRequestModel, urlModel)
@@ -1697,7 +1697,7 @@ func classifyFailure(statusCode, codeDetails, transportFailure string, isFallbac
 		if strings.Contains(lowerDetails, "no_route") || strings.Contains(lowerDetails, "no cluster") {
 			return "gateway_no_route"
 		}
-		return "gateway_no_route"
+		return "not_found"
 	}
 
 	if code == 408 {
