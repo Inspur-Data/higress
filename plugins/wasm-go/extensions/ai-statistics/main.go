@@ -1749,7 +1749,7 @@ func classifyFailure(statusCode, codeDetails, transportFailure string, isFallbac
 		if strings.Contains(lowerDetails, "no_route") || strings.Contains(lowerDetails, "no cluster") {
 			return "gateway_no_route"
 		}
-		return "not_found"
+		return "route_not_found"
 	}
 
 	if code == 408 {
