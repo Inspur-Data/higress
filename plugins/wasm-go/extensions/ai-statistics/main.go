@@ -160,10 +160,10 @@ const (
 	// 因此 ai_log 必须控制在 10KB 以内，给 access log 其他字段留 ~6KB 余量，
 	// 确保单条总日志不超过 16KB 截断线。
 	DefaultMaxLogBodyBytes = 10 * 1024
-	// DefaultMaxAttributeBytes 默认 3KB。
-	// 单个属性（question/answer/messages）最多保留 3KB，
+	// DefaultMaxAttributeBytes 默认 2KB。
+	// 单个属性（question/answer/messages）最多保留 2KB（与 hard cap 一致），
 	// 超长时先替换多模态占位符，再两端截断。
-	DefaultMaxAttributeBytes = 3 * 1024
+	DefaultMaxAttributeBytes = 2 * 1024
 
 	// Embedding & Rerank paths
 	QuestionPathEmbedding = "input"
@@ -755,6 +755,26 @@ func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
 		config.maxAttributeBytes = int(configJson.Get("max_attribute_bytes").Int())
 	} else {
 		config.maxAttributeBytes = DefaultMaxAttributeBytes
+	}
+
+	// Hard cap: 无论用户配置多大，都不能超过实测安全上限。
+	// 实测日志内容 35KB 时 log-pilot 报 chunk 超限，最终截断到 16KB。
+	// ai_log 必须 ≤ 10KB，单个属性 ≤ 2KB，确保单条总日志安全。
+	const hardCapLogBodyBytes = 10 * 1024
+	const hardCapAttributeBytes = 2 * 1024
+	if config.maxLogBodyBytes > hardCapLogBodyBytes || config.maxLogBodyBytes <= 0 {
+		if config.maxLogBodyBytes > hardCapLogBodyBytes {
+			log.Warnf("max_log_body_bytes %d exceeds hard cap %d, forcing to hard cap",
+				config.maxLogBodyBytes, hardCapLogBodyBytes)
+		}
+		config.maxLogBodyBytes = hardCapLogBodyBytes
+	}
+	if config.maxAttributeBytes > hardCapAttributeBytes || config.maxAttributeBytes <= 0 {
+		if config.maxAttributeBytes > hardCapAttributeBytes {
+			log.Warnf("max_attribute_bytes %d exceeds hard cap %d, forcing to hard cap",
+				config.maxAttributeBytes, hardCapAttributeBytes)
+		}
+		config.maxAttributeBytes = hardCapAttributeBytes
 	}
 
 	return nil
@@ -2144,18 +2164,23 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 	return record
 }
 
-// dataURIPattern 匹配 data URI 格式的多媒体内容
+// dataURIPattern 匹配 data URI 格式的多媒体内容（OpenAI 等标准格式）
 // 例如: data:image/jpeg;base64,/9j/4AAQ... 或 data:video/mp4;base64,...
 var dataURIPattern = regexp.MustCompile(`(?i)data:([a-z]+)/[a-z0-9+-]+;base64,[A-Za-z0-9+/]{100,}={0,2}`)
 
-// pureBase64Pattern 匹配纯 base64 长字符串（可能是内嵌的多模态内容）
-var pureBase64Pattern = regexp.MustCompile(`(?i)["']([A-Za-z0-9+/]{1000,}={0,2})["']`)
+// jsonBase64Pattern 匹配 JSON 中带引号的纯 base64 长字符串
+var jsonBase64Pattern = regexp.MustCompile(`(?i)["']([A-Za-z0-9+/]{800,}={0,2})["']`)
+
+// standaloneBase64Pattern 匹配 Go fmt 输出、Anthropic 格式等非 data URI 的独立 base64 块
+// 前后必须是分隔符（空白、标点、map key 等），避免误匹配普通长单词
+// Anthropic 格式: source:map[type:base64 media_type:image/jpeg data:AAAA...]
+var standaloneBase64Pattern = regexp.MustCompile(`(?i)\b(data:)([A-Za-z0-9+/]{500,}={0,2})\b`)
 
 // replaceMultimediaWithPlaceholders 将多模态 base64 内容替换为短占位符，
 // 最大化保留文字内容。image/video/audio 分别替换为 [image]/[video]/[audio]，
-// 其他类型替换为 [file]。纯 base64 长字符串替换为 [base64 data]。
+// 其他类型替换为 [file] 或 [base64 data]。
 func replaceMultimediaWithPlaceholders(str string) string {
-	// 1. 替换 data URI 格式的多媒体内容
+	// 1. 替换 data URI 格式的多媒体内容（OpenAI 标准格式）
 	str = dataURIPattern.ReplaceAllStringFunc(str, func(match string) string {
 		parts := strings.SplitN(match, ":", 2)
 		if len(parts) < 2 {
@@ -2175,9 +2200,15 @@ func replaceMultimediaWithPlaceholders(str string) string {
 		}
 	})
 
-	// 2. 替换纯 base64 长字符串
-	str = pureBase64Pattern.ReplaceAllStringFunc(str, func(match string) string {
+	// 2. 替换 JSON 中带引号的纯 base64 长字符串
+	str = jsonBase64Pattern.ReplaceAllStringFunc(str, func(match string) string {
 		return `"[base64 data]"`
+	})
+
+	// 3. 替换 Anthropic / Go fmt 等非 data URI 的独立 base64 块
+	// 保留 "data:" 前缀，替换 base64 内容为占位符
+	str = standaloneBase64Pattern.ReplaceAllStringFunc(str, func(match string) string {
+		return "data:[base64 data]"
 	})
 
 	return str
