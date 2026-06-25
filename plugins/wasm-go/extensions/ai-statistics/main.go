@@ -159,9 +159,18 @@ const (
 	// 外层 access log（含 ai_log 转义后的字符串）通常增长 1.3~1.5 倍，
 	// 因此 128KB ai_log → 约 180KB 总日志，远低于 fluentd chunk_limit_size（1M）。
 	DefaultMaxLogBodyBytes = 128 * 1024
-	// DefaultMaxAttributeBytes 默认 8KB，单个属性（question/answer/messages）最多保留 8KB。
-	// 长文本先在此处截断，避免多个大字段叠加超过总限制。
-	DefaultMaxAttributeBytes = 8 * 1024
+	// DefaultMaxAttributeBytes 默认 32KB，单个属性（question/answer/messages）最多保留 32KB。
+	// 多模态内容（image/video/audio）会先替换为短占位符，最大化保留文字。
+	// 长文本再在此处截断，避免多个大字段叠加超过总限制。
+	DefaultMaxAttributeBytes = 32 * 1024
+
+	// Embedding & Rerank paths
+	QuestionPathEmbedding = "input"
+	QuestionPathRerank    = "query"
+	RerankDocumentsPath   = "documents"
+
+	AnswerPathEmbeddingData = "data"
+	AnswerPathRerank        = "results"
 )
 
 func getDefaultAttributes() []Attribute {
@@ -1332,11 +1341,46 @@ func shouldProcessBuiltinAttribute(key, configuredSource, currentSource string) 
 	return false
 }
 
+// extractEmbeddingAnswer 从 Embedding 模型响应中提取摘要信息。
+// 返回格式: "N embedding(s) of dimension D, tokens: prompt=X total=Y"
+func extractEmbeddingAnswer(body []byte) interface{} {
+	data := gjson.GetBytes(body, AnswerPathEmbeddingData)
+	if !data.Exists() || !data.IsArray() {
+		return nil
+	}
+	arr := data.Array()
+	if len(arr) == 0 {
+		return nil
+	}
+
+	// 获取 embedding 维度
+	dim := 0
+	if emb := arr[0].Get("embedding"); emb.Exists() && emb.IsArray() {
+		dim = len(emb.Array())
+	}
+
+	// 获取 usage
+	promptTokens := gjson.GetBytes(body, "usage.prompt_tokens").Int()
+	totalTokens := gjson.GetBytes(body, "usage.total_tokens").Int()
+
+	return fmt.Sprintf("%d embedding(s) of dimension %d, tokens: prompt=%d total=%d",
+		len(arr), dim, promptTokens, totalTokens)
+}
+
 func getBuiltinAttributeFallback(ctx wrapper.HttpContext, config AIStatisticsConfig, key, source string, body []byte, rule string) interface{} {
 	switch key {
 	case BuiltinQuestionKey:
 		if source == RequestBody {
+			// 优先尝试通用 chat/completions 路径
 			if value := gjson.GetBytes(body, QuestionPathOpenAI).Value(); value != nil && value != "" {
+				return value
+			}
+			// Embedding 模型: input 字段（string 或 string array）
+			if value := gjson.GetBytes(body, QuestionPathEmbedding).Value(); value != nil && value != "" {
+				return value
+			}
+			// Rerank 模型: query 字段
+			if value := gjson.GetBytes(body, QuestionPathRerank).Value(); value != nil && value != "" {
 				return value
 			}
 		}
@@ -1359,6 +1403,14 @@ func getBuiltinAttributeFallback(ctx wrapper.HttpContext, config AIStatisticsCon
 				return value
 			}
 			if value := gjson.GetBytes(body, AnswerPathClaudeNonStreaming).Value(); value != nil && value != "" {
+				return value
+			}
+			// Embedding 模型: 提取 data 摘要和 usage
+			if value := extractEmbeddingAnswer(body); value != nil && value != "" {
+				return value
+			}
+			// Rerank 模型: results 字段
+			if value := gjson.GetBytes(body, AnswerPathRerank).Value(); value != nil && value != "" {
 				return value
 			}
 		}
@@ -2045,12 +2097,12 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 		case "question", "answer", "reasoning", "tool_calls":
 			aiLog[key] = summarizeAttribute(key, val, config.maxAttributeBytes)
 		default:
-			// 对其他可能包含 base64 图片的字段也进行截断
+			// 对其他可能包含多模态内容的字段也进行占位符替换
 			if str, ok := val.(string); ok && len(str) > 500 {
-				truncated := truncateBase64Images(str, 100)
-				if truncated != str {
-					aiLog[key] = truncated
-					log.Debugf("[buildAILogRecord] truncated base64 images in %s: %d -> %d bytes", key, len(str), len(truncated))
+				replaced := replaceMultimediaWithPlaceholders(str)
+				if replaced != str {
+					aiLog[key] = replaced
+					log.Debugf("[buildAILogRecord] replaced multimedia in %s: %d -> %d bytes", key, len(str), len(replaced))
 				}
 			}
 		}
@@ -2066,29 +2118,40 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 	return record
 }
 
-// base64ImagePattern 匹配常见的 base64 图片数据 URI
-// 例如: data:image/jpeg;base64,/9j/4AAQ... 或纯 base64 字符串
-var base64ImagePattern = regexp.MustCompile(`(?i)data:image/\w+;base64,[A-Za-z0-9+/]{100,}={0,2}`)
-var rawBase64Pattern = regexp.MustCompile(`(?i)["']([A-Za-z0-9+/]{1000,}={0,2})["']`)
+// dataURIPattern 匹配 data URI 格式的多媒体内容
+// 例如: data:image/jpeg;base64,/9j/4AAQ... 或 data:video/mp4;base64,...
+var dataURIPattern = regexp.MustCompile(`(?i)data:([a-z]+)/[a-z0-9+-]+;base64,[A-Za-z0-9+/]{100,}={0,2}`)
 
-// truncateBase64Images 检测并截断字符串中的 base64 图片内容
-// 返回截断后的字符串和是否发生了截断
-func truncateBase64Images(str string, maxImageBytes int) string {
-	// 1. 截断 data URI 格式的 base64 图片
-	str = base64ImagePattern.ReplaceAllStringFunc(str, func(match string) string {
-		// 保留 data URI 前缀，截断 base64 内容
-		if idx := strings.Index(match, "base64,"); idx != -1 {
-			prefix := match[:idx+7] // "data:image/xxx;base64,"
-			return prefix + fmt.Sprintf("[...%d bytes image data truncated...]", len(match)-len(prefix))
+// pureBase64Pattern 匹配纯 base64 长字符串（可能是内嵌的多模态内容）
+var pureBase64Pattern = regexp.MustCompile(`(?i)["']([A-Za-z0-9+/]{1000,}={0,2})["']`)
+
+// replaceMultimediaWithPlaceholders 将多模态 base64 内容替换为短占位符，
+// 最大化保留文字内容。image/video/audio 分别替换为 [image]/[video]/[audio]，
+// 其他类型替换为 [file]。纯 base64 长字符串替换为 [base64 data]。
+func replaceMultimediaWithPlaceholders(str string) string {
+	// 1. 替换 data URI 格式的多媒体内容
+	str = dataURIPattern.ReplaceAllStringFunc(str, func(match string) string {
+		parts := strings.SplitN(match, ":", 2)
+		if len(parts) < 2 {
+			return "[media]"
 		}
-		return "[base64 image data truncated]"
+		mediaPart := strings.SplitN(parts[1], ";", 2)[0]
+		mediaType := strings.SplitN(mediaPart, "/", 2)[0]
+		switch strings.ToLower(mediaType) {
+		case "image":
+			return "[image]"
+		case "video":
+			return "[video]"
+		case "audio":
+			return "[audio]"
+		default:
+			return "[file]"
+		}
 	})
 
-	// 2. 截断纯 base64 长字符串（可能是图片内容）
-	str = rawBase64Pattern.ReplaceAllStringFunc(str, func(match string) string {
-		// match 包含引号，提取内部内容
-		inner := match[1 : len(match)-1]
-		return fmt.Sprintf("\"[...%d bytes base64 data truncated...]\"", len(inner))
+	// 2. 替换纯 base64 长字符串
+	str = pureBase64Pattern.ReplaceAllStringFunc(str, func(match string) string {
+		return `"[base64 data]"`
 	})
 
 	return str
@@ -2097,9 +2160,11 @@ func truncateBase64Images(str string, maxImageBytes int) string {
 func summarizeAttribute(key string, value interface{}, maxBytes int) interface{} {
 	str := fmt.Sprint(value)
 
-	// 先截断 base64 图片内容（不占用 maxBytes 额度）
-	str = truncateBase64Images(str, 100)
+	// 1. 先将多模态内容（image/video/audio/file）替换为短占位符，
+	//    不占用 maxBytes 额度，最大化保留文字内容
+	str = replaceMultimediaWithPlaceholders(str)
 
+	// 2. 如果替换后仍然超长，再截断
 	if len(str) <= maxBytes {
 		return str
 	}
@@ -2110,8 +2175,8 @@ func summarizeAttribute(key string, value interface{}, maxBytes int) interface{}
 func summarizeMessages(value interface{}, maxBytes int) interface{} {
 	str := fmt.Sprint(value)
 
-	// 先截断 base64 图片内容
-	str = truncateBase64Images(str, 100)
+	// 先将多模态内容替换为短占位符，最大化保留文字
+	str = replaceMultimediaWithPlaceholders(str)
 
 	if len(str) <= maxBytes {
 		return str
@@ -2134,8 +2199,8 @@ func summarizeMessages(value interface{}, maxBytes int) interface{} {
 		if i > 0 {
 			buf.WriteString(",")
 		}
-		// 截断每条消息中的图片
-		truncatedMsg := truncateBase64Images(arr[i].Raw, 100)
+		// 替换每条消息中的多模态内容为占位符
+		truncatedMsg := replaceMultimediaWithPlaceholders(arr[i].Raw)
 		buf.WriteString(truncatedMsg)
 	}
 	truncatedCount := len(arr) - 4
@@ -2143,7 +2208,7 @@ func summarizeMessages(value interface{}, maxBytes int) interface{} {
 	for i := len(arr) - 2; i < len(arr); i++ {
 		if i >= 0 {
 			buf.WriteString(",")
-			truncatedMsg := truncateBase64Images(arr[i].Raw, 100)
+			truncatedMsg := replaceMultimediaWithPlaceholders(arr[i].Raw)
 			buf.WriteString(truncatedMsg)
 		}
 	}
@@ -2156,14 +2221,16 @@ func enforceSizeCap(record *AILogRecord, maxBytes int) {
 		return
 	}
 
-	// ========== Step 1: 截断 base64 图片（最优先，因为膨胀最厉害） ==========
+	// ========== Step 1: 将多模态内容替换为短占位符（最优先，因为膨胀最厉害） ==========
+	// image/video/audio 的 base64 内容替换为 [image]/[video]/[audio]，
+	// 大幅减少体积的同时最大化保留文字内容
 	for key, val := range record.AILog {
 		if str, ok := val.(string); ok && len(str) > 500 {
-			truncated := truncateBase64Images(str, 100)
-			if truncated != str {
-				record.AILog[key] = truncated
-				log.Debugf("[enforceSizeCap] truncated base64 in %s: %d -> %d bytes",
-					key, len(str), len(truncated))
+			replaced := replaceMultimediaWithPlaceholders(str)
+			if replaced != str {
+				record.AILog[key] = replaced
+				log.Debugf("[enforceSizeCap] replaced multimedia in %s: %d -> %d bytes",
+					key, len(str), len(replaced))
 			}
 		}
 	}
