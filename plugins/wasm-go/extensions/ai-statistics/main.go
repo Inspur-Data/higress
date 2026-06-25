@@ -1367,6 +1367,31 @@ func extractEmbeddingAnswer(body []byte) interface{} {
 		len(arr), dim, promptTokens, totalTokens)
 }
 
+// extractRerankQuestion 从 Rerank 请求中提取 query 和 documents 组合成 question。
+// 格式: "query: <query>\ndocuments: <N> items\n[0] <doc0>\n[1] <doc1> ..."
+func extractRerankQuestion(body []byte) interface{} {
+	query := gjson.GetBytes(body, QuestionPathRerank)
+	if !query.Exists() || query.String() == "" {
+		return nil
+	}
+
+	var buf bytes.Buffer
+	buf.WriteString("query: ")
+	buf.WriteString(query.String())
+
+	docs := gjson.GetBytes(body, RerankDocumentsPath)
+	if docs.Exists() && docs.IsArray() {
+		arr := docs.Array()
+		buf.WriteString(fmt.Sprintf("\ndocuments: %d items", len(arr)))
+		for i, doc := range arr {
+			buf.WriteString(fmt.Sprintf("\n[%d] ", i))
+			buf.WriteString(doc.String())
+		}
+	}
+
+	return buf.String()
+}
+
 func getBuiltinAttributeFallback(ctx wrapper.HttpContext, config AIStatisticsConfig, key, source string, body []byte, rule string) interface{} {
 	switch key {
 	case BuiltinQuestionKey:
@@ -1379,8 +1404,8 @@ func getBuiltinAttributeFallback(ctx wrapper.HttpContext, config AIStatisticsCon
 			if value := gjson.GetBytes(body, QuestionPathEmbedding).Value(); value != nil && value != "" {
 				return value
 			}
-			// Rerank 模型: query 字段
-			if value := gjson.GetBytes(body, QuestionPathRerank).Value(); value != nil && value != "" {
+			// Rerank 模型: 组合 query + documents
+			if value := extractRerankQuestion(body); value != nil && value != "" {
 				return value
 			}
 		}
@@ -1749,7 +1774,7 @@ func classifyFailure(statusCode, codeDetails, transportFailure string, isFallbac
 		if strings.Contains(lowerDetails, "no_route") || strings.Contains(lowerDetails, "no cluster") {
 			return "gateway_no_route"
 		}
-		return "route_not_found"
+		return "not_found"
 	}
 
 	if code == 408 {
@@ -2097,8 +2122,8 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 		case "question", "answer", "reasoning", "tool_calls":
 			aiLog[key] = summarizeAttribute(key, val, config.maxAttributeBytes)
 		default:
-			// 对其他可能包含多模态内容的字段也进行占位符替换
-			if str, ok := val.(string); ok && len(str) > 500 {
+			// 对其他可能包含多模态内容的字段，超长后才替换占位符
+			if str, ok := val.(string); ok && len(str) > config.maxAttributeBytes {
 				replaced := replaceMultimediaWithPlaceholders(str)
 				if replaced != str {
 					aiLog[key] = replaced
@@ -2160,11 +2185,15 @@ func replaceMultimediaWithPlaceholders(str string) string {
 func summarizeAttribute(key string, value interface{}, maxBytes int) interface{} {
 	str := fmt.Sprint(value)
 
-	// 1. 先将多模态内容（image/video/audio/file）替换为短占位符，
-	//    不占用 maxBytes 额度，最大化保留文字内容
+	// 如果不超过限制，保留原始内容
+	if len(str) <= maxBytes {
+		return str
+	}
+
+	// 超长：先将多模态内容替换为短占位符，腾出空间保留文字
 	str = replaceMultimediaWithPlaceholders(str)
 
-	// 2. 如果替换后仍然超长，再截断
+	// 替换后仍超长，再截断
 	if len(str) <= maxBytes {
 		return str
 	}
@@ -2175,23 +2204,22 @@ func summarizeAttribute(key string, value interface{}, maxBytes int) interface{}
 func summarizeMessages(value interface{}, maxBytes int) interface{} {
 	str := fmt.Sprint(value)
 
-	// 先将多模态内容替换为短占位符，最大化保留文字
-	str = replaceMultimediaWithPlaceholders(str)
-
+	// 如果不超过限制，保留原始内容
 	if len(str) <= maxBytes {
 		return str
 	}
+
 	raw, ok := value.(string)
 	if !ok {
-		return summarizeAttribute("messages", str, maxBytes)
+		return summarizeAttribute("messages", value, maxBytes)
 	}
 	result := gjson.Parse(raw)
 	if !result.IsArray() {
-		return summarizeAttribute("messages", str, maxBytes)
+		return summarizeAttribute("messages", value, maxBytes)
 	}
 	arr := result.Array()
 	if len(arr) <= 4 {
-		return summarizeAttribute("messages", str, maxBytes)
+		return summarizeAttribute("messages", value, maxBytes)
 	}
 	var buf bytes.Buffer
 	buf.WriteString("[")
@@ -2199,7 +2227,7 @@ func summarizeMessages(value interface{}, maxBytes int) interface{} {
 		if i > 0 {
 			buf.WriteString(",")
 		}
-		// 替换每条消息中的多模态内容为占位符
+		// 超长时才替换每条消息中的多模态内容为占位符
 		truncatedMsg := replaceMultimediaWithPlaceholders(arr[i].Raw)
 		buf.WriteString(truncatedMsg)
 	}
@@ -2221,16 +2249,17 @@ func enforceSizeCap(record *AILogRecord, maxBytes int) {
 		return
 	}
 
-	// ========== Step 1: 将多模态内容替换为短占位符（最优先，因为膨胀最厉害） ==========
-	// image/video/audio 的 base64 内容替换为 [image]/[video]/[audio]，
-	// 大幅减少体积的同时最大化保留文字内容
-	for key, val := range record.AILog {
-		if str, ok := val.(string); ok && len(str) > 500 {
-			replaced := replaceMultimediaWithPlaceholders(str)
-			if replaced != str {
-				record.AILog[key] = replaced
-				log.Debugf("[enforceSizeCap] replaced multimedia in %s: %d -> %d bytes",
-					key, len(str), len(replaced))
+	// ========== Step 1: 日志整体超长时，才将多模态内容替换为短占位符 ==========
+	// 先检查总大小，只有在超过限制后才进行替换，避免不超长时破坏原始内容
+	if trial, _ := json.Marshal(record); len(trial) > maxBytes {
+		for key, val := range record.AILog {
+			if str, ok := val.(string); ok && len(str) > 500 {
+				replaced := replaceMultimediaWithPlaceholders(str)
+				if replaced != str {
+					record.AILog[key] = replaced
+					log.Debugf("[enforceSizeCap] replaced multimedia in %s: %d -> %d bytes",
+						key, len(str), len(replaced))
+				}
 			}
 		}
 	}
