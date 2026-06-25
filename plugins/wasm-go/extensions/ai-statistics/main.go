@@ -1770,12 +1770,12 @@ func classifyFailure(statusCode, codeDetails, transportFailure string, isFallbac
 		// In fallback route scenario, 404 means the request didn't match any real route
 		// (the catch-all route forwarded to a dummy upstream which returns 404)
 		if isFallbackRoute {
-			return "gateway_no_route"
+			return "route_not_found"
 		}
 		if strings.Contains(lowerDetails, "no_route") || strings.Contains(lowerDetails, "no cluster") {
-			return "gateway_no_route"
+			return "route_not_found"
 		}
-		return "not_found"
+		return "route_not_found"
 	}
 
 	if code == 408 {
