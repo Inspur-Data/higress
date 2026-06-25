@@ -155,14 +155,15 @@ const (
 	CtxFailureReason            = "ai_statistics_failure_reason"
 	CtxIsFallbackRoute          = "ai_statistics_is_fallback_route"
 
-	// DefaultMaxLogBodyBytes 默认 128KB，确保 ai_log JSON 不超过此大小。
-	// 外层 access log（含 ai_log 转义后的字符串）通常增长 1.3~1.5 倍，
-	// 因此 128KB ai_log → 约 180KB 总日志，远低于 fluentd chunk_limit_size（1M）。
-	DefaultMaxLogBodyBytes = 128 * 1024
-	// DefaultMaxAttributeBytes 默认 32KB，单个属性（question/answer/messages）最多保留 32KB。
-	// 多模态内容（image/video/audio）会先替换为短占位符，最大化保留文字。
-	// 长文本再在此处截断，避免多个大字段叠加超过总限制。
-	DefaultMaxAttributeBytes = 32 * 1024
+	// DefaultMaxLogBodyBytes 默认 10KB。
+	// 实测：日志内容 35KB 时 log-pilot 报 chunk 超限(>1MB)，最终截断到 16KB。
+	// 因此 ai_log 必须控制在 10KB 以内，给 access log 其他字段留 ~6KB 余量，
+	// 确保单条总日志不超过 16KB 截断线。
+	DefaultMaxLogBodyBytes = 10 * 1024
+	// DefaultMaxAttributeBytes 默认 3KB。
+	// 单个属性（question/answer/messages）最多保留 3KB，
+	// 超长时先替换多模态占位符，再两端截断。
+	DefaultMaxAttributeBytes = 3 * 1024
 
 	// Embedding & Rerank paths
 	QuestionPathEmbedding = "input"
@@ -2198,7 +2199,7 @@ func summarizeAttribute(key string, value interface{}, maxBytes int) interface{}
 		return str
 	}
 	half := maxBytes / 2
-	return str[:half] + " [..." + strconv.Itoa(len(str)-maxBytes) + " bytes truncated...] " + str[len(str)-half:]
+	return str[:half] + "..." + strconv.Itoa(len(str)-maxBytes) + "B>" + str[len(str)-half:]
 }
 
 func summarizeMessages(value interface{}, maxBytes int) interface{} {
@@ -2313,7 +2314,7 @@ func enforceSizeCap(record *AILogRecord, maxBytes int) {
 
 		half := targetLen / 2
 		record.AILog[f.key] = str[:half] +
-			fmt.Sprintf(" [...%d bytes truncated...]", len(str)-targetLen) +
+			fmt.Sprintf("...%dB>", len(str)-targetLen) +
 			str[len(str)-half:]
 		truncated = append(truncated, f.key)
 		log.Debugf("[enforceSizeCap] truncated %s: %d -> ~%d bytes",
