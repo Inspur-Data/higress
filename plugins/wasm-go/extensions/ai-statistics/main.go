@@ -636,19 +636,19 @@ func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
 	if configJson.Get("value_length_limit").Exists() {
 		config.valueLengthLimit = int(configJson.Get("value_length_limit").Int())
 	} else {
-		config.valueLengthLimit = 32000
+		config.valueLengthLimit = 4 * 1024
 	}
 
 	if useDefaultAttributes {
 		config.attributes = getDefaultAttributes()
 		if !configJson.Get("value_length_limit").Exists() {
-			config.valueLengthLimit = 10485760
+			config.valueLengthLimit = 4 * 1024
 		}
 		log.Infof("Using default attributes configuration")
 	} else if useDefaultResponseAttributes {
 		config.attributes = getDefaultResponseAttributes()
 		if !configJson.Get("value_length_limit").Exists() {
-			config.valueLengthLimit = 4000
+			config.valueLengthLimit = 4 * 1024
 		}
 		log.Infof("Using default response attributes configuration (lightweight mode)")
 	} else {
@@ -757,25 +757,40 @@ func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
 		config.maxAttributeBytes = DefaultMaxAttributeBytes
 	}
 
-	// Hard cap: 无论用户配置多大，都不能超过实测安全上限。
-	// 实测日志内容 35KB 时 log-pilot 报 chunk 超限，最终截断到 16KB。
-	// ai_log 必须 ≤ 10KB，单个属性 ≤ 2KB，确保单条总日志安全。
-	const hardCapLogBodyBytes = 10 * 1024
-	const hardCapAttributeBytes = 2 * 1024
-	if config.maxLogBodyBytes > hardCapLogBodyBytes || config.maxLogBodyBytes <= 0 {
-		if config.maxLogBodyBytes > hardCapLogBodyBytes {
-			log.Warnf("max_log_body_bytes %d exceeds hard cap %d, forcing to hard cap",
-				config.maxLogBodyBytes, hardCapLogBodyBytes)
-		}
-		config.maxLogBodyBytes = hardCapLogBodyBytes
+	// 安全建议值：实测日志 35KB 时 log-pilot 报 chunk 超限，最终截断到 16KB。
+	// 如果配置值超过安全建议值，打印 warning 但不强制覆盖（配置优先）。
+	const suggestMaxLogBodyBytes = 10 * 1024
+	const suggestMaxAttributeBytes = 2 * 1024
+	const suggestValueLengthLimit = 4 * 1024
+	if config.maxLogBodyBytes > suggestMaxLogBodyBytes {
+		log.Warnf("max_log_body_bytes=%d exceeds suggested safe value %d, "+
+			"log-pilot may truncate logs exceeding ~16KB",
+			config.maxLogBodyBytes, suggestMaxLogBodyBytes)
 	}
-	if config.maxAttributeBytes > hardCapAttributeBytes || config.maxAttributeBytes <= 0 {
-		if config.maxAttributeBytes > hardCapAttributeBytes {
-			log.Warnf("max_attribute_bytes %d exceeds hard cap %d, forcing to hard cap",
-				config.maxAttributeBytes, hardCapAttributeBytes)
-		}
-		config.maxAttributeBytes = hardCapAttributeBytes
+	if config.maxAttributeBytes > suggestMaxAttributeBytes {
+		log.Warnf("max_attribute_bytes=%d exceeds suggested safe value %d, "+
+			"large fields may cause total log size to exceed limit",
+			config.maxAttributeBytes, suggestMaxAttributeBytes)
 	}
+	if config.valueLengthLimit > suggestValueLengthLimit {
+		log.Warnf("value_length_limit=%d exceeds suggested safe value %d, "+
+			"base64 data may escape replacement if truncated before processing",
+			config.valueLengthLimit, suggestValueLengthLimit)
+	}
+
+	// 无效值（≤0）回退到默认值
+	if config.maxLogBodyBytes <= 0 {
+		config.maxLogBodyBytes = DefaultMaxLogBodyBytes
+	}
+	if config.maxAttributeBytes <= 0 {
+		config.maxAttributeBytes = DefaultMaxAttributeBytes
+	}
+	if config.valueLengthLimit <= 0 {
+		config.valueLengthLimit = suggestValueLengthLimit
+	}
+
+	log.Infof("[AI-STAT-DEBUG] parseConfig final: maxLogBodyBytes=%d maxAttributeBytes=%d valueLengthLimit=%d",
+		config.maxLogBodyBytes, config.maxAttributeBytes, config.valueLengthLimit)
 
 	return nil
 }
@@ -1292,10 +1307,20 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 				formattedValue = string(jsonBytes)
 			}
 		default:
-			formattedValue = value
-			if len(fmt.Sprint(value)) > config.valueLengthLimit {
-				formattedValue = fmt.Sprint(value)[:config.valueLengthLimit/2] + " [truncated] " + fmt.Sprint(value)[len(fmt.Sprint(value))-config.valueLengthLimit/2:]
+			// 先替换多模态占位符，再检查长度限制。
+			// 必须在 valueLengthLimit 截断之前替换，否则截断会破坏
+			// data URI 完整性，导致 base64 数据逃过替换。
+			strValue := fmt.Sprint(value)
+			log.Infof("[AI-STAT-DEBUG] setAttr BEFORE replace: key=%s len=%d vll=%d", key, len(strValue), config.valueLengthLimit)
+			strValue = replaceMultimediaWithPlaceholders(strValue)
+			log.Infof("[AI-STAT-DEBUG] setAttr AFTER replace: key=%s len=%d", key, len(strValue))
+			if len(strValue) > config.valueLengthLimit {
+				origLen := len(strValue)
+				strValue = strValue[:config.valueLengthLimit/2] + "..." + strconv.Itoa(len(strValue)-config.valueLengthLimit) + "B>" + strValue[len(strValue)-config.valueLengthLimit/2:]
+				log.Infof("[AI-STAT-DEBUG] setAttr VLL truncate: key=%s %d->%d vll=%d", key, origLen, len(strValue), config.valueLengthLimit)
 			}
+			formattedValue = strValue
+			log.Infof("[AI-STAT-DEBUG] setAttr FINAL: key=%s len=%d type=%T", key, len(fmt.Sprint(formattedValue)), formattedValue)
 		}
 
 		log.Debugf("[attribute] source type: %s, key: %s, value: %+v", source, key, formattedValue)
@@ -1414,21 +1439,26 @@ func extractRerankQuestion(body []byte) interface{} {
 }
 
 func getBuiltinAttributeFallback(ctx wrapper.HttpContext, config AIStatisticsConfig, key, source string, body []byte, rule string) interface{} {
+	log.Infof("[AI-STAT-DEBUG] getBuiltinFallback START: key=%s source=%s bodyLen=%d", key, source, len(body))
 	switch key {
 	case BuiltinQuestionKey:
 		if source == RequestBody {
 			// 优先尝试通用 chat/completions 路径
 			if value := gjson.GetBytes(body, QuestionPathOpenAI).Value(); value != nil && value != "" {
+				log.Infof("[AI-STAT-DEBUG] question extracted from QuestionPathOpenAI, type=%T len=%d", value, len(fmt.Sprint(value)))
 				return value
 			}
 			// Embedding 模型: input 字段（string 或 string array）
 			if value := gjson.GetBytes(body, QuestionPathEmbedding).Value(); value != nil && value != "" {
+				log.Infof("[AI-STAT-DEBUG] question extracted from QuestionPathEmbedding, type=%T len=%d", value, len(fmt.Sprint(value)))
 				return value
 			}
 			// Rerank 模型: 组合 query + documents
 			if value := extractRerankQuestion(body); value != nil && value != "" {
+				log.Infof("[AI-STAT-DEBUG] question extracted from extractRerankQuestion, type=%T len=%d", value, len(fmt.Sprint(value)))
 				return value
 			}
+			log.Infof("[AI-STAT-DEBUG] question: all extraction paths failed")
 		}
 	case BuiltinSystemKey:
 		if source == RequestBody {
@@ -1439,26 +1469,33 @@ func getBuiltinAttributeFallback(ctx wrapper.HttpContext, config AIStatisticsCon
 	case BuiltinAnswerKey:
 		if source == ResponseStreamingBody {
 			if value := extractStreamingBodyByJsonPath(body, AnswerPathOpenAIStreaming, rule); value != nil && value != "" {
+				log.Infof("[AI-STAT-DEBUG] answer extracted from OpenAI streaming, type=%T len=%d", value, len(fmt.Sprint(value)))
 				return value
 			}
 			if value := extractStreamingBodyByJsonPath(body, AnswerPathClaudeStreaming, rule); value != nil && value != "" {
+				log.Infof("[AI-STAT-DEBUG] answer extracted from Claude streaming, type=%T len=%d", value, len(fmt.Sprint(value)))
 				return value
 			}
 		} else if source == ResponseBody {
 			if value := gjson.GetBytes(body, AnswerPathOpenAINonStreaming).Value(); value != nil && value != "" {
+				log.Infof("[AI-STAT-DEBUG] answer extracted from OpenAI non-streaming, type=%T len=%d", value, len(fmt.Sprint(value)))
 				return value
 			}
 			if value := gjson.GetBytes(body, AnswerPathClaudeNonStreaming).Value(); value != nil && value != "" {
+				log.Infof("[AI-STAT-DEBUG] answer extracted from Claude non-streaming, type=%T len=%d", value, len(fmt.Sprint(value)))
 				return value
 			}
 			// Embedding 模型: 提取 data 摘要和 usage
 			if value := extractEmbeddingAnswer(body); value != nil && value != "" {
+				log.Infof("[AI-STAT-DEBUG] answer extracted from Embedding, type=%T len=%d", value, len(fmt.Sprint(value)))
 				return value
 			}
 			// Rerank 模型: results 字段
 			if value := gjson.GetBytes(body, AnswerPathRerank).Value(); value != nil && value != "" {
+				log.Infof("[AI-STAT-DEBUG] answer extracted from Rerank, type=%T len=%d", value, len(fmt.Sprint(value)))
 				return value
 			}
+			log.Infof("[AI-STAT-DEBUG] answer: all extraction paths failed for source=%s", source)
 		}
 	case BuiltinToolCallsKey:
 		if source == ResponseStreamingBody {
@@ -2116,7 +2153,11 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 
 	collectAIAttr := func(key string) {
 		if v := ctx.GetUserAttribute(key); v != nil {
+			vLen := len(fmt.Sprint(v))
+			log.Infof("[AI-STAT-DEBUG] collectAIAttr: key=%s type=%T len=%d", key, v, vLen)
 			aiLog[key] = v
+		} else {
+			log.Infof("[AI-STAT-DEBUG] collectAIAttr: key=%s NOT FOUND", key)
 		}
 	}
 	collectAIAttr("question")
@@ -2136,7 +2177,9 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 	collectAIAttr("input_token_details")
 	collectAIAttr("output_token_details")
 
+	log.Infof("[AI-STAT-DEBUG] before summarize: maxAttributeBytes=%d", config.maxAttributeBytes)
 	for key, val := range aiLog {
+		origLen := len(fmt.Sprint(val))
 		switch key {
 		case "messages":
 			aiLog[key] = summarizeMessages(val, config.maxAttributeBytes)
@@ -2152,11 +2195,21 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 				}
 			}
 		}
+		newLen := len(fmt.Sprint(aiLog[key]))
+		if origLen != newLen {
+			log.Infof("[AI-STAT-DEBUG] summarize: key=%s %d->%d bytes", key, origLen, newLen)
+		}
 	}
 
 	record.AILog = aiLog
 
+	// 记录 enforceSizeCap 前后的总大小
+	beforeBytes, _ := json.Marshal(record)
+	log.Infof("[AI-STAT-DEBUG] enforceSizeCap BEFORE: record=%d bytes maxLogBodyBytes=%d", len(beforeBytes), config.maxLogBodyBytes)
 	enforceSizeCap(record, config.maxLogBodyBytes)
+
+	afterBytes, _ := json.Marshal(record)
+	log.Infof("[AI-STAT-DEBUG] enforceSizeCap AFTER: record=%d bytes", len(afterBytes))
 
 	writeRawAILogToFilterState(record.AILog)
 	writeTopLevelFields(record)
@@ -2216,28 +2269,36 @@ func replaceMultimediaWithPlaceholders(str string) string {
 
 func summarizeAttribute(key string, value interface{}, maxBytes int) interface{} {
 	str := fmt.Sprint(value)
+	log.Infof("[AI-STAT-DEBUG] summarizeAttribute START: key=%s len=%d maxBytes=%d", key, len(str), maxBytes)
 
 	// 如果不超过限制，保留原始内容
 	if len(str) <= maxBytes {
+		log.Infof("[AI-STAT-DEBUG] summarizeAttribute SKIP: key=%s %d<=%d", key, len(str), maxBytes)
 		return str
 	}
 
 	// 超长：先将多模态内容替换为短占位符，腾出空间保留文字
 	str = replaceMultimediaWithPlaceholders(str)
+	log.Infof("[AI-STAT-DEBUG] summarizeAttribute AFTER replaceMM: key=%s len=%d", key, len(str))
 
 	// 替换后仍超长，再截断
 	if len(str) <= maxBytes {
+		log.Infof("[AI-STAT-DEBUG] summarizeAttribute RETURN replaced: key=%s %d<=%d", key, len(str), maxBytes)
 		return str
 	}
 	half := maxBytes / 2
-	return str[:half] + "..." + strconv.Itoa(len(str)-maxBytes) + "B>" + str[len(str)-half:]
+	truncated := str[:half] + "..." + strconv.Itoa(len(str)-maxBytes) + "B>" + str[len(str)-half:]
+	log.Infof("[AI-STAT-DEBUG] summarizeAttribute TRUNCATED: key=%s %d->%d", key, len(str), len(truncated))
+	return truncated
 }
 
 func summarizeMessages(value interface{}, maxBytes int) interface{} {
 	str := fmt.Sprint(value)
+	log.Infof("[AI-STAT-DEBUG] summarizeMessages START: len=%d maxBytes=%d", len(str), maxBytes)
 
 	// 如果不超过限制，保留原始内容
 	if len(str) <= maxBytes {
+		log.Infof("[AI-STAT-DEBUG] summarizeMessages SKIP: %d<=%d", len(str), maxBytes)
 		return str
 	}
 
@@ -2278,22 +2339,28 @@ func summarizeMessages(value interface{}, maxBytes int) interface{} {
 
 func enforceSizeCap(record *AILogRecord, maxBytes int) {
 	if maxBytes <= 0 || record.AILog == nil {
+		log.Infof("[AI-STAT-DEBUG] enforceSizeCap SKIP: maxBytes=%d aiLogNil=%v", maxBytes, record.AILog == nil)
 		return
 	}
 
+	trial, _ := json.Marshal(record)
+	log.Infof("[AI-STAT-DEBUG] enforceSizeCap START: record=%d bytes maxBytes=%d overLimit=%v", len(trial), maxBytes, len(trial) > maxBytes)
+
 	// ========== Step 1: 日志整体超长时，才将多模态内容替换为短占位符 ==========
 	// 先检查总大小，只有在超过限制后才进行替换，避免不超长时破坏原始内容
-	if trial, _ := json.Marshal(record); len(trial) > maxBytes {
+	if len(trial) > maxBytes {
+		log.Infof("[AI-STAT-DEBUG] enforceSizeCap Step1: total %d > %d, replacing multimedia", len(trial), maxBytes)
 		for key, val := range record.AILog {
 			if str, ok := val.(string); ok && len(str) > 500 {
 				replaced := replaceMultimediaWithPlaceholders(str)
 				if replaced != str {
 					record.AILog[key] = replaced
-					log.Debugf("[enforceSizeCap] replaced multimedia in %s: %d -> %d bytes",
-						key, len(str), len(replaced))
+					log.Infof("[AI-STAT-DEBUG] enforceSizeCap Step1: replaced %s %d->%d", key, len(str), len(replaced))
 				}
 			}
 		}
+	} else {
+		log.Infof("[AI-STAT-DEBUG] enforceSizeCap Step1 SKIP: total %d <= %d", len(trial), maxBytes)
 	}
 
 	// ========== Step 2: 智能截断 —— 按字段大小排序，从大到小截断 ==========
