@@ -155,15 +155,14 @@ const (
 	CtxFailureReason            = "ai_statistics_failure_reason"
 	CtxIsFallbackRoute          = "ai_statistics_is_fallback_route"
 
-	// DefaultMaxLogBodyBytes 默认 10KB。
-	// 实测：日志内容 35KB 时 log-pilot 报 chunk 超限(>1MB)，最终截断到 16KB。
-	// 因此 ai_log 必须控制在 10KB 以内，给 access log 其他字段留 ~6KB 余量，
-	// 确保单条总日志不超过 16KB 截断线。
-	DefaultMaxLogBodyBytes = 10 * 1024
-	// DefaultMaxAttributeBytes 默认 2KB。
-	// 单个属性（question/answer/messages）最多保留 2KB（与 hard cap 一致），
+	// DefaultMaxLogBodyBytes 默认 5KB。
+	// 实测：log-pilot 单条日志上限 8KB，access log 其他字段约 2-3KB，
+	// 因此 ai_log 必须控制在 5KB 以内，确保单条总日志不超过 8KB。
+	DefaultMaxLogBodyBytes = 5 * 1024
+	// DefaultMaxAttributeBytes 默认 1536B (1.5KB)。
+	// 单个属性（question/answer/messages）最多保留 1.5KB，
 	// 超长时先替换多模态占位符，再两端截断。
-	DefaultMaxAttributeBytes = 2 * 1024
+	DefaultMaxAttributeBytes = 1536
 
 	// Embedding & Rerank paths
 	QuestionPathEmbedding = "input"
@@ -636,19 +635,19 @@ func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
 	if configJson.Get("value_length_limit").Exists() {
 		config.valueLengthLimit = int(configJson.Get("value_length_limit").Int())
 	} else {
-		config.valueLengthLimit = 4 * 1024
+		config.valueLengthLimit = 3 * 1024
 	}
 
 	if useDefaultAttributes {
 		config.attributes = getDefaultAttributes()
 		if !configJson.Get("value_length_limit").Exists() {
-			config.valueLengthLimit = 4 * 1024
+			config.valueLengthLimit = 3 * 1024
 		}
 		log.Infof("Using default attributes configuration")
 	} else if useDefaultResponseAttributes {
 		config.attributes = getDefaultResponseAttributes()
 		if !configJson.Get("value_length_limit").Exists() {
-			config.valueLengthLimit = 4 * 1024
+			config.valueLengthLimit = 3 * 1024
 		}
 		log.Infof("Using default response attributes configuration (lightweight mode)")
 	} else {
@@ -757,11 +756,11 @@ func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
 		config.maxAttributeBytes = DefaultMaxAttributeBytes
 	}
 
-	// 安全建议值：实测日志 35KB 时 log-pilot 报 chunk 超限，最终截断到 16KB。
+	// 安全建议值：log-pilot 单条日志上限 8KB，access log 其他字段约 2-3KB。
 	// 如果配置值超过安全建议值，打印 warning 但不强制覆盖（配置优先）。
-	const suggestMaxLogBodyBytes = 10 * 1024
-	const suggestMaxAttributeBytes = 2 * 1024
-	const suggestValueLengthLimit = 4 * 1024
+	const suggestMaxLogBodyBytes = 5 * 1024
+	const suggestMaxAttributeBytes = 1536
+	const suggestValueLengthLimit = 3 * 1024
 	if config.maxLogBodyBytes > suggestMaxLogBodyBytes {
 		log.Warnf("max_log_body_bytes=%d exceeds suggested safe value %d, "+
 			"log-pilot may truncate logs exceeding ~16KB",
