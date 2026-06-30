@@ -1306,24 +1306,31 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 				formattedValue = string(jsonBytes)
 			}
 		default:
-			// 先替换多模态占位符，再检查长度限制。
-			// 必须在 valueLengthLimit 截断之前替换，否则截断会破坏
-			// data URI 完整性，导致 base64 数据逃过替换。
-			strValue := fmt.Sprint(value)
-			log.Infof("[AI-STAT-DEBUG] setAttr BEFORE replace: key=%s len=%d vll=%d", key, len(strValue), config.valueLengthLimit)
-			strValue = replaceMultimediaWithPlaceholders(strValue)
-			log.Infof("[AI-STAT-DEBUG] setAttr AFTER replace: key=%s len=%d", key, len(strValue))
-			if len(strValue) > config.valueLengthLimit {
-				origLen := len(strValue)
-				strValue = strValue[:config.valueLengthLimit/2] + "..." + strconv.Itoa(len(strValue)-config.valueLengthLimit) + "B>" + strValue[len(strValue)-config.valueLengthLimit/2:]
-				log.Infof("[AI-STAT-DEBUG] setAttr VLL truncate: key=%s %d->%d vll=%d", key, origLen, len(strValue), config.valueLengthLimit)
+			if value == nil {
+				// value 为 nil 时 fmt.Sprint(nil) 返回 "<nil>" 字符串，
+				// 会被错误写入 ai_log。直接跳过 nil 值。
+				log.Infof("[AI-STAT-DEBUG] setAttr SKIP nil: key=%s", key)
+				formattedValue = nil
+			} else {
+				// 先替换多模态占位符，再检查长度限制。
+				// 必须在 valueLengthLimit 截断之前替换，否则截断会破坏
+				// data URI 完整性，导致 base64 数据逃过替换。
+				strValue := fmt.Sprint(value)
+				log.Infof("[AI-STAT-DEBUG] setAttr BEFORE replace: key=%s len=%d vll=%d", key, len(strValue), config.valueLengthLimit)
+				strValue = replaceMultimediaWithPlaceholders(strValue)
+				log.Infof("[AI-STAT-DEBUG] setAttr AFTER replace: key=%s len=%d", key, len(strValue))
+				if len(strValue) > config.valueLengthLimit {
+					origLen := len(strValue)
+					strValue = strValue[:config.valueLengthLimit/2] + "..." + strconv.Itoa(len(strValue)-config.valueLengthLimit) + "B>" + strValue[len(strValue)-config.valueLengthLimit/2:]
+					log.Infof("[AI-STAT-DEBUG] setAttr VLL truncate: key=%s %d->%d vll=%d", key, origLen, len(strValue), config.valueLengthLimit)
+				}
+				formattedValue = strValue
+				log.Infof("[AI-STAT-DEBUG] setAttr FINAL: key=%s len=%d type=%T", key, len(fmt.Sprint(formattedValue)), formattedValue)
 			}
-			formattedValue = strValue
-			log.Infof("[AI-STAT-DEBUG] setAttr FINAL: key=%s len=%d type=%T", key, len(fmt.Sprint(formattedValue)), formattedValue)
 		}
 
 		log.Debugf("[attribute] source type: %s, key: %s, value: %+v", source, key, formattedValue)
-		if attribute.ApplyToLog {
+		if attribute.ApplyToLog && formattedValue != nil {
 			if attribute.AsSeparateLogField {
 				var marshalledJsonStr string
 				if _, ok := value.(map[string]int64); ok {
