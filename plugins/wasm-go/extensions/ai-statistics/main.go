@@ -1254,9 +1254,23 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 			case ResponseHeader:
 				value, _ = proxywasm.GetHttpResponseHeader(attribute.Value)
 			case ResponseStreamingBody:
-				value = extractStreamingBodyByJsonPath(body, attribute.Value, attribute.Rule)
+				// answer 特殊处理：如果配置 value 是 choices.0.delta.content，
+				// 调用 extractStreamingMessage 提取 content + reasoning + tool_calls
+				if key == BuiltinAnswerKey && attribute.Value == AnswerPathOpenAIStreaming {
+					log.Infof("[AI-STAT-DEBUG] setAttr answer using extractStreamingMessage")
+					value = extractStreamingMessage(ctx, body, attribute.Rule)
+				} else {
+					value = extractStreamingBodyByJsonPath(body, attribute.Value, attribute.Rule)
+				}
 			case ResponseBody:
-				value = gjson.GetBytes(body, attribute.Value).Value()
+				// answer 特殊处理：如果配置 value 是 choices.0.message.content，
+				// 调用 extractOpenAIMessage 提取 content + reasoning + tool_calls
+				if key == BuiltinAnswerKey && attribute.Value == AnswerPathOpenAINonStreaming {
+					log.Infof("[AI-STAT-DEBUG] setAttr answer using extractOpenAIMessage")
+					value = extractOpenAIMessage(body)
+				} else {
+					value = gjson.GetBytes(body, attribute.Value).Value()
+				}
 			case SourceIP:
 				value = "unknown"
 				if bs, err := proxywasm.GetProperty([]string{"source", "address"}); err == nil {
