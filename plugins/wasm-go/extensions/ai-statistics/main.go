@@ -129,6 +129,11 @@ const (
 	AnswerPathOpenAIStreaming = "choices.0.delta.content"
 	AnswerPathClaudeStreaming = "delta.text"
 
+	// 完整 message 路径，用于工具调用场景提取 content + tool_calls + reasoning
+	AnswerPathOpenAIMessage       = "choices.0.message"
+	AnswerPathOpenAIMessageRole   = "choices.0.message.role"
+	AnswerPathOpenAIMessageDelta  = "choices.0.delta"
+
 	ToolCallsPathNonStreaming = "choices.0.message.tool_calls"
 	ToolCallsPathStreaming    = "choices.0.delta.tool_calls"
 
@@ -1444,6 +1449,138 @@ func extractRerankQuestion(body []byte) interface{} {
 	return buf.String()
 }
 
+// StreamingMessageBuffer 用于流式响应中聚合 content 和 tool_calls
+// 因为 extractStreamingBodyByJsonPath 只按单个 jsonPath 提取，
+// 工具调用需要同时聚合 content 和 tool_calls 两个字段。
+type StreamingMessageBuffer struct {
+	Content   string
+	ToolCalls []ToolCall
+}
+
+// extractOpenAIMessage 从非流式响应的 choices.0.message 中提取完整内容。
+// 如果只有 content 有值 → 返回 content 纯文本字符串。
+// 如果有 tool_calls / reasoning / function_call 任一 → 返回 JSON 字符串。
+func extractOpenAIMessage(body []byte) interface{} {
+	message := gjson.GetBytes(body, AnswerPathOpenAIMessage)
+	if !message.Exists() {
+		return nil
+	}
+
+	content := message.Get("content").String()
+	toolCalls := message.Get("tool_calls")
+	reasoning := message.Get("reasoning_content").String()
+	funcCall := message.Get("function_call")
+
+	// 检查是否有 content 以外的字段
+	hasExtra := (toolCalls.Exists() && toolCalls.IsArray() && len(toolCalls.Array()) > 0) ||
+		reasoning != "" ||
+		(funcCall.Exists() && funcCall.Get("name").String() != "")
+
+	if !hasExtra {
+		// 只有 content，返回纯文本
+		if content != "" {
+			return content
+		}
+		return nil
+	}
+
+	// 有额外字段，返回 JSON 格式
+	result := make(map[string]interface{})
+	if content != "" {
+		result["content"] = content
+	}
+	if toolCalls.Exists() && toolCalls.IsArray() && len(toolCalls.Array()) > 0 {
+		result["tool_calls"] = toolCalls.Value()
+	}
+	if reasoning != "" {
+		result["reasoning"] = reasoning
+	}
+	if funcCall.Exists() {
+		result["function_call"] = funcCall.Value()
+	}
+
+	jsonBytes, err := json.Marshal(result)
+	if err != nil {
+		log.Warnf("[extractOpenAIMessage] marshal failed: %v", err)
+		return content // 回退到 content
+	}
+	return string(jsonBytes)
+}
+
+// extractStreamingMessage 从流式响应的聚合 buffer 中提取 content + tool_calls + reasoning + function_call。
+// 如果只有 content → 返回 content 纯文本。
+// 如果有 tool_calls / reasoning / function_call 任一 → 返回 JSON 字符串。
+func extractStreamingMessage(ctx wrapper.HttpContext, data []byte, rule string) interface{} {
+	// 1. 提取 content
+	content := extractStreamingBodyByJsonPath(data, AnswerPathOpenAIStreaming, rule)
+	contentStr := ""
+	if content != nil {
+		contentStr = fmt.Sprint(content)
+	}
+
+	// 2. 提取 reasoning（流式聚合）
+	reasoningPath := "choices.0.delta.reasoning_content"
+	reasoning := extractStreamingBodyByJsonPath(data, reasoningPath, RuleAppend)
+	reasoningStr := ""
+	if reasoning != nil {
+		reasoningStr = fmt.Sprint(reasoning)
+	}
+
+	// 3. 提取 function_call（流式聚合 name + arguments）
+	funcNamePath := "choices.0.delta.function_call.name"
+	funcArgsPath := "choices.0.delta.function_call.arguments"
+	funcName := extractStreamingBodyByJsonPath(data, funcNamePath, RuleAppend)
+	funcArgs := extractStreamingBodyByJsonPath(data, funcArgsPath, RuleAppend)
+	hasFuncCall := (funcName != nil && fmt.Sprint(funcName) != "") ||
+		(funcArgs != nil && fmt.Sprint(funcArgs) != "")
+
+	// 4. 获取流式 tool_calls buffer
+	var toolCalls []ToolCall
+	if buffer, ok := ctx.GetContext(CtxStreamingToolCallsBuffer).(*StreamingToolCallsBuffer); ok {
+		toolCalls = getToolCallsFromBuffer(buffer)
+	}
+
+	// 5. 判断是否有 content 以外的字段
+	hasExtra := len(toolCalls) > 0 || reasoningStr != "" || hasFuncCall
+
+	if !hasExtra {
+		// 只有 content，返回纯文本
+		if contentStr != "" {
+			return contentStr
+		}
+		return nil
+	}
+
+	// 6. 有额外字段，返回 JSON
+	result := map[string]interface{}{}
+	if contentStr != "" {
+		result["content"] = contentStr
+	}
+	if len(toolCalls) > 0 {
+		result["tool_calls"] = toolCalls
+	}
+	if reasoningStr != "" {
+		result["reasoning"] = reasoningStr
+	}
+	if hasFuncCall {
+		fc := map[string]string{}
+		if funcName != nil && fmt.Sprint(funcName) != "" {
+			fc["name"] = fmt.Sprint(funcName)
+		}
+		if funcArgs != nil && fmt.Sprint(funcArgs) != "" {
+			fc["arguments"] = fmt.Sprint(funcArgs)
+		}
+		result["function_call"] = fc
+	}
+
+	jsonBytes, err := json.Marshal(result)
+	if err != nil {
+		log.Warnf("[extractStreamingMessage] marshal failed: %v", err)
+		return contentStr // 回退到 content
+	}
+	return string(jsonBytes)
+}
+
 func getBuiltinAttributeFallback(ctx wrapper.HttpContext, config AIStatisticsConfig, key, source string, body []byte, rule string) interface{} {
 	log.Infof("[AI-STAT-DEBUG] getBuiltinFallback START: key=%s source=%s bodyLen=%d", key, source, len(body))
 	switch key {
@@ -1474,8 +1611,14 @@ func getBuiltinAttributeFallback(ctx wrapper.HttpContext, config AIStatisticsCon
 		}
 	case BuiltinAnswerKey:
 		if source == ResponseStreamingBody {
+			// 优先提取 content + tool_calls 合并（工具调用场景）
+			if value := extractStreamingMessage(ctx, body, rule); value != nil && value != "" {
+				log.Infof("[AI-STAT-DEBUG] answer extracted from streaming message, type=%T len=%d", value, len(fmt.Sprint(value)))
+				return value
+			}
+			// 兜底：只提取 content
 			if value := extractStreamingBodyByJsonPath(body, AnswerPathOpenAIStreaming, rule); value != nil && value != "" {
-				log.Infof("[AI-STAT-DEBUG] answer extracted from OpenAI streaming, type=%T len=%d", value, len(fmt.Sprint(value)))
+				log.Infof("[AI-STAT-DEBUG] answer extracted from OpenAI streaming content, type=%T len=%d", value, len(fmt.Sprint(value)))
 				return value
 			}
 			if value := extractStreamingBodyByJsonPath(body, AnswerPathClaudeStreaming, rule); value != nil && value != "" {
@@ -1483,8 +1626,14 @@ func getBuiltinAttributeFallback(ctx wrapper.HttpContext, config AIStatisticsCon
 				return value
 			}
 		} else if source == ResponseBody {
+			// 优先从完整 message 中提取（工具调用场景：content + tool_calls + reasoning）
+			if value := extractOpenAIMessage(body); value != nil && value != "" {
+				log.Infof("[AI-STAT-DEBUG] answer extracted from OpenAI message, type=%T len=%d", value, len(fmt.Sprint(value)))
+				return value
+			}
+			// 兜底：只提取 content
 			if value := gjson.GetBytes(body, AnswerPathOpenAINonStreaming).Value(); value != nil && value != "" {
-				log.Infof("[AI-STAT-DEBUG] answer extracted from OpenAI non-streaming, type=%T len=%d", value, len(fmt.Sprint(value)))
+				log.Infof("[AI-STAT-DEBUG] answer extracted from OpenAI content, type=%T len=%d", value, len(fmt.Sprint(value)))
 				return value
 			}
 			if value := gjson.GetBytes(body, AnswerPathClaudeNonStreaming).Value(); value != nil && value != "" {
