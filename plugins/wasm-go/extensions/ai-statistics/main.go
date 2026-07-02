@@ -145,8 +145,10 @@ const (
 	ClaudeDeltaPartialJSON  = "delta.partial_json"
 	ClaudeIndex             = "index"
 
-	ReasoningPathNonStreaming = "choices.0.message.reasoning_content"
-	ReasoningPathStreaming    = "choices.0.delta.reasoning_content"
+	ReasoningPathNonStreaming      = "choices.0.message.reasoning"
+	ReasoningPathNonStreamingAlt   = "choices.0.message.reasoning_content"
+	ReasoningPathStreaming         = "choices.0.delta.reasoning"
+	ReasoningPathStreamingAlt      = "choices.0.delta.reasoning_content"
 
 	CtxStreamingToolCallsBuffer = "streamingToolCallsBuffer"
 
@@ -1482,7 +1484,7 @@ func extractOpenAIMessage(body []byte) interface{} {
 
 	content := message.Get("content").String()
 	toolCalls := message.Get("tool_calls")
-	reasoning := message.Get("reasoning_content").String()
+	reasoning := message.Get("reasoning").String()
 	funcCall := message.Get("function_call")
 
 	// 检查是否有 content 以外的字段
@@ -1533,8 +1535,13 @@ func extractStreamingMessage(ctx wrapper.HttpContext, data []byte, rule string) 
 	}
 
 	// 2. 提取 reasoning（流式聚合）
-	reasoningPath := "choices.0.delta.reasoning_content"
-	reasoning := extractStreamingBodyByJsonPath(data, reasoningPath, RuleAppend)
+	// 不同模型使用不同字段名：DeepSeek 用 reasoning_content，其他可能用 reasoning
+	reasoningPath1 := "choices.0.delta.reasoning_content"
+	reasoningPath2 := "choices.0.delta.reasoning"
+	reasoning := extractStreamingBodyByJsonPath(data, reasoningPath1, RuleAppend)
+	if reasoning == nil || fmt.Sprint(reasoning) == "" {
+		reasoning = extractStreamingBodyByJsonPath(data, reasoningPath2, RuleAppend)
+	}
 	reasoningStr := ""
 	if reasoning != nil {
 		reasoningStr = fmt.Sprint(reasoning)
@@ -1691,8 +1698,14 @@ func getBuiltinAttributeFallback(ctx wrapper.HttpContext, config AIStatisticsCon
 			if value := extractStreamingBodyByJsonPath(body, ReasoningPathStreaming, RuleAppend); value != nil && value != "" {
 				return value
 			}
+			if value := extractStreamingBodyByJsonPath(body, ReasoningPathStreamingAlt, RuleAppend); value != nil && value != "" {
+				return value
+			}
 		} else if source == ResponseBody {
 			if value := gjson.GetBytes(body, ReasoningPathNonStreaming).Value(); value != nil && value != "" {
+				return value
+			}
+			if value := gjson.GetBytes(body, ReasoningPathNonStreamingAlt).Value(); value != nil && value != "" {
 				return value
 			}
 		}
