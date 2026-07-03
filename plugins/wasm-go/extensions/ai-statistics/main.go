@@ -1164,6 +1164,23 @@ func onHttpStreamingBody(ctx wrapper.HttpContext, config AIStatisticsConfig, dat
 			_ = ctx.WriteUserAttributeToLogWithKey(wrapper.AILogKey)
 		}
 	}
+
+	// 从每个 chunk 中提取 reasoning / tool_calls / function_call，
+	// 缓存到 ai_log filter state。某些模型在流式响应中把这些字段
+	// 放在 message 中而不是 delta 中，需要在 chunk 级别提取。
+	if reasoning := extractStreamingReasoning(data); reasoning != nil {
+		appendToAILogFilterState(map[string]interface{}{"reasoning": reasoning})
+		log.Infof("[AI-STAT-DEBUG] streaming reasoning extracted: len=%d", len(fmt.Sprint(reasoning)))
+	}
+	if toolCalls := extractStreamingToolCallsSimple(data); toolCalls != nil {
+		appendToAILogFilterState(map[string]interface{}{"tool_calls": toolCalls})
+		log.Infof("[AI-STAT-DEBUG] streaming tool_calls extracted: len=%d", len(fmt.Sprint(toolCalls)))
+	}
+	if funcCall := extractStreamingFunctionCall(data); funcCall != nil {
+		appendToAILogFilterState(map[string]interface{}{"function_call": funcCall})
+		log.Infof("[AI-STAT-DEBUG] streaming function_call extracted: len=%d", len(fmt.Sprint(funcCall)))
+	}
+
 	if endOfStream {
 		responseEndTime := time.Now().UnixMilli()
 		ctx.SetUserAttribute(LLMServiceDuration, responseEndTime-requestStartTime)
@@ -1347,7 +1364,13 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 				log.Infof("[AI-STAT-DEBUG] setAttr AFTER replace: key=%s len=%d", key, len(strValue))
 				if len(strValue) > config.valueLengthLimit {
 					origLen := len(strValue)
-					strValue = strValue[:config.valueLengthLimit/2] + "..." + strconv.Itoa(len(strValue)-config.valueLengthLimit) + "B>" + strValue[len(strValue)-config.valueLengthLimit/2:]
+					if key == "question" {
+						// question 保留前面、截断后面
+						strValue = strValue[:config.valueLengthLimit] + "..." + strconv.Itoa(len(strValue)-config.valueLengthLimit) + "B>"
+					} else {
+						// 其他字段两端保留
+						strValue = strValue[:config.valueLengthLimit/2] + "..." + strconv.Itoa(len(strValue)-config.valueLengthLimit) + "B>" + strValue[len(strValue)-config.valueLengthLimit/2:]
+					}
 					log.Infof("[AI-STAT-DEBUG] setAttr VLL truncate: key=%s %d->%d vll=%d", key, origLen, len(strValue), config.valueLengthLimit)
 				}
 				formattedValue = strValue
@@ -1506,6 +1529,54 @@ func extractStreamingMessage(ctx wrapper.HttpContext, data []byte, rule string) 
 	return nil
 }
 
+// extractStreamingReasoning 从流式 chunk 中提取 reasoning。
+// 尝试多个路径：delta.reasoning / delta.reasoning_content / message.reasoning
+// 某些模型（如 DeepSeek）在流式响应中把 reasoning 放在 message 中而非 delta 中。
+func extractStreamingReasoning(data []byte) interface{} {
+	paths := []string{
+		"choices.0.delta.reasoning",
+		"choices.0.delta.reasoning_content",
+		"choices.0.message.reasoning",
+		"choices.0.message.reasoning_content",
+	}
+	for _, path := range paths {
+		if value := extractStreamingBodyByJsonPath(data, path, RuleAppend); value != nil && fmt.Sprint(value) != "" {
+			return value
+		}
+	}
+	return nil
+}
+
+// extractStreamingToolCallsSimple 从流式 chunk 中提取 tool_calls。
+// 尝试 delta.tool_calls 和 message.tool_calls 两个路径。
+func extractStreamingToolCallsSimple(data []byte) interface{} {
+	paths := []string{
+		"choices.0.delta.tool_calls",
+		"choices.0.message.tool_calls",
+	}
+	for _, path := range paths {
+		if value := extractStreamingBodyByJsonPath(data, path, RuleAppend); value != nil && fmt.Sprint(value) != "" {
+			return value
+		}
+	}
+	return nil
+}
+
+// extractStreamingFunctionCall 从流式 chunk 中提取 function_call。
+// 尝试 delta.function_call 和 message.function_call 两个路径。
+func extractStreamingFunctionCall(data []byte) interface{} {
+	paths := []string{
+		"choices.0.delta.function_call",
+		"choices.0.message.function_call",
+	}
+	for _, path := range paths {
+		if value := extractStreamingBodyByJsonPath(data, path, RuleAppend); value != nil && fmt.Sprint(value) != "" {
+			return value
+		}
+	}
+	return nil
+}
+
 func getBuiltinAttributeFallback(ctx wrapper.HttpContext, config AIStatisticsConfig, key, source string, body []byte, rule string) interface{} {
 	log.Infof("[AI-STAT-DEBUG] getBuiltinFallback START: key=%s source=%s bodyLen=%d", key, source, len(body))
 	switch key {
@@ -1599,22 +1670,40 @@ func getBuiltinAttributeFallback(ctx wrapper.HttpContext, config AIStatisticsCon
 		}
 	case BuiltinReasoningKey:
 		if source == ResponseStreamingBody {
+			// 尝试 delta.reasoning（标准 OpenAI 流式）
 			if value := extractStreamingBodyByJsonPath(body, ReasoningPathStreaming, RuleAppend); value != nil && value != "" {
 				return value
 			}
+			// 尝试 delta.reasoning_content（DeepSeek 格式）
 			if value := extractStreamingBodyByJsonPath(body, ReasoningPathStreamingAlt, RuleAppend); value != nil && value != "" {
 				return value
 			}
+			// 尝试 message.reasoning（某些模型在流式 chunk 中也放在 message 中）
+			if value := extractStreamingBodyByJsonPath(body, "choices.0.message.reasoning", RuleAppend); value != nil && value != "" {
+				return value
+			}
+			if value := extractStreamingBodyByJsonPath(body, "choices.0.message.reasoning_content", RuleAppend); value != nil && value != "" {
+				return value
+			}
 		} else if source == ResponseBody {
+			// 纯 JSON 格式
 			if value := gjson.GetBytes(body, ReasoningPathNonStreaming).Value(); value != nil && value != "" {
 				return value
 			}
 			if value := gjson.GetBytes(body, ReasoningPathNonStreamingAlt).Value(); value != nil && value != "" {
 				return value
 			}
+			// SSE 格式 fallback（body 可能是 SSE 聚合结果）
+			if value := extractStreamingBodyByJsonPath(body, ReasoningPathNonStreaming, RuleAppend); value != nil && value != "" {
+				return value
+			}
+			if value := extractStreamingBodyByJsonPath(body, ReasoningPathNonStreamingAlt, RuleAppend); value != nil && value != "" {
+				return value
+			}
 		}
 	case BuiltinFunctionCallKey:
 		if source == ResponseStreamingBody {
+			// 尝试 delta.function_call（标准 OpenAI 流式）
 			funcName := extractStreamingBodyByJsonPath(body, FunctionCallPathStreamingName, RuleAppend)
 			funcArgs := extractStreamingBodyByJsonPath(body, FunctionCallPathStreamingArgs, RuleAppend)
 			if funcName != nil || funcArgs != nil {
@@ -1629,8 +1718,28 @@ func getBuiltinAttributeFallback(ctx wrapper.HttpContext, config AIStatisticsCon
 					return string(jsonBytes)
 				}
 			}
+			// 尝试 message.function_call（某些模型放在 message 中）
+			funcName = extractStreamingBodyByJsonPath(body, "choices.0.message.function_call.name", RuleAppend)
+			funcArgs = extractStreamingBodyByJsonPath(body, "choices.0.message.function_call.arguments", RuleAppend)
+			if funcName != nil || funcArgs != nil {
+				fc := map[string]string{}
+				if funcName != nil && fmt.Sprint(funcName) != "" {
+					fc["name"] = fmt.Sprint(funcName)
+				}
+				if funcArgs != nil && fmt.Sprint(funcArgs) != "" {
+					fc["arguments"] = fmt.Sprint(funcArgs)
+				}
+				if jsonBytes, err := json.Marshal(fc); err == nil {
+					return string(jsonBytes)
+				}
+			}
 		} else if source == ResponseBody {
+			// 纯 JSON 格式
 			if value := gjson.GetBytes(body, FunctionCallPathNonStreaming).Value(); value != nil {
+				return value
+			}
+			// SSE 格式 fallback
+			if value := extractStreamingBodyByJsonPath(body, "choices.0.message.function_call", RuleAppend); value != nil && fmt.Sprint(value) != "" {
 				return value
 			}
 		}
@@ -2526,10 +2635,17 @@ func enforceSizeCap(record *AILogRecord, maxBytes int) {
 			continue // 不需要截断
 		}
 
-		half := targetLen / 2
-		record.AILog[f.key] = str[:half] +
-			fmt.Sprintf("...%dB>", len(str)-targetLen) +
-			str[len(str)-half:]
+		if f.key == "question" {
+			// question 保留前面、截断后面
+			record.AILog[f.key] = str[:targetLen] +
+				fmt.Sprintf("...%dB>", len(str)-targetLen)
+		} else {
+			// 其他字段两端保留
+			half := targetLen / 2
+			record.AILog[f.key] = str[:half] +
+				fmt.Sprintf("...%dB>", len(str)-targetLen) +
+				str[len(str)-half:]
+		}
 		truncated = append(truncated, f.key)
 		log.Debugf("[enforceSizeCap] truncated %s: %d -> ~%d bytes",
 			f.key, len(str), targetLen)
