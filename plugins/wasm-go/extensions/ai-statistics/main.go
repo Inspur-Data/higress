@@ -56,6 +56,9 @@ const (
 	CtxGeneralAtrribute        = "attributes"
 	CtxLogAtrribute            = "logAttributes"
 	CtxStreamingBodyBuffer     = "streamingBodyBuffer"
+	CtxStreamingReasoning      = "streamingReasoning"
+	CtxStreamingToolCallsData  = "streamingToolCallsData"
+	CtxStreamingFuncCallData   = "streamingFuncCallData"
 	RouteName                  = "route"
 	ClusterName                = "cluster"
 	APIName                    = "api"
@@ -1166,24 +1169,42 @@ func onHttpStreamingBody(ctx wrapper.HttpContext, config AIStatisticsConfig, dat
 	}
 
 	// 从每个 chunk 中提取 reasoning / tool_calls / function_call，
-	// 缓存到 ai_log filter state。某些模型在流式响应中把这些字段
-	// 放在 message 中而不是 delta 中，需要在 chunk 级别提取。
+	// 缓存到 ctx 中（不是 ai_log filter state），endOfStream 时写入 SetUserAttribute。
+	// buildAILogRecord 中的 collectAIAttr 只从 user attribute 读取。
 	if reasoning := extractStreamingReasoning(data); reasoning != nil {
-		appendToAILogFilterState(map[string]interface{}{"reasoning": reasoning})
-		log.Infof("[AI-STAT-DEBUG] streaming reasoning extracted: len=%d", len(fmt.Sprint(reasoning)))
+		buf, _ := ctx.GetContext(CtxStreamingReasoning).(string)
+		ctx.SetContext(CtxStreamingReasoning, buf+fmt.Sprint(reasoning))
+		log.Infof("[AI-STAT-DEBUG] streaming reasoning chunk: +%d bytes", len(fmt.Sprint(reasoning)))
 	}
 	if toolCalls := extractStreamingToolCallsSimple(data); toolCalls != nil {
-		appendToAILogFilterState(map[string]interface{}{"tool_calls": toolCalls})
-		log.Infof("[AI-STAT-DEBUG] streaming tool_calls extracted: len=%d", len(fmt.Sprint(toolCalls)))
+		buf, _ := ctx.GetContext(CtxStreamingToolCallsData).(string)
+		ctx.SetContext(CtxStreamingToolCallsData, buf+fmt.Sprint(toolCalls))
+		log.Infof("[AI-STAT-DEBUG] streaming tool_calls chunk: +%d bytes", len(fmt.Sprint(toolCalls)))
 	}
 	if funcCall := extractStreamingFunctionCall(data); funcCall != nil {
-		appendToAILogFilterState(map[string]interface{}{"function_call": funcCall})
-		log.Infof("[AI-STAT-DEBUG] streaming function_call extracted: len=%d", len(fmt.Sprint(funcCall)))
+		buf, _ := ctx.GetContext(CtxStreamingFuncCallData).(string)
+		ctx.SetContext(CtxStreamingFuncCallData, buf+fmt.Sprint(funcCall))
+		log.Infof("[AI-STAT-DEBUG] streaming function_call chunk: +%d bytes", len(fmt.Sprint(funcCall)))
 	}
 
 	if endOfStream {
 		responseEndTime := time.Now().UnixMilli()
 		ctx.SetUserAttribute(LLMServiceDuration, responseEndTime-requestStartTime)
+
+		// 从 chunk 缓存中读取 reasoning / tool_calls / function_call，
+		// 写入 user attribute。collectAIAttr 只从 user attribute 读取。
+		if reasoningBuf, ok := ctx.GetContext(CtxStreamingReasoning).(string); ok && reasoningBuf != "" {
+			ctx.SetUserAttribute(BuiltinReasoningKey, reasoningBuf)
+			log.Infof("[AI-STAT-DEBUG] endOfStream reasoning written: len=%d", len(reasoningBuf))
+		}
+		if toolCallsBuf, ok := ctx.GetContext(CtxStreamingToolCallsData).(string); ok && toolCallsBuf != "" {
+			ctx.SetUserAttribute(BuiltinToolCallsKey, toolCallsBuf)
+			log.Infof("[AI-STAT-DEBUG] endOfStream tool_calls written: len=%d", len(toolCallsBuf))
+		}
+		if funcCallBuf, ok := ctx.GetContext(CtxStreamingFuncCallData).(string); ok && funcCallBuf != "" {
+			ctx.SetUserAttribute(BuiltinFunctionCallKey, funcCallBuf)
+			log.Infof("[AI-STAT-DEBUG] endOfStream function_call written: len=%d", len(funcCallBuf))
+		}
 
 		var streamingBodyBuffer []byte
 		if config.shouldBufferStreamingBody {
