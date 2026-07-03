@@ -111,6 +111,7 @@ const (
 	BuiltinAnswerKey          = "answer"
 	BuiltinToolCallsKey       = "tool_calls"
 	BuiltinReasoningKey       = "reasoning"
+	BuiltinFunctionCallKey    = "function_call"
 	BuiltinSystemKey          = "system"
 	BuiltinReasoningTokens    = "reasoning_tokens"
 	BuiltinCachedTokens       = "cached_tokens"
@@ -149,6 +150,10 @@ const (
 	ReasoningPathNonStreamingAlt   = "choices.0.message.reasoning_content"
 	ReasoningPathStreaming         = "choices.0.delta.reasoning"
 	ReasoningPathStreamingAlt      = "choices.0.delta.reasoning_content"
+
+	FunctionCallPathNonStreaming   = "choices.0.message.function_call"
+	FunctionCallPathStreamingName  = "choices.0.delta.function_call.name"
+	FunctionCallPathStreamingArgs  = "choices.0.delta.function_call.arguments"
 
 	CtxStreamingToolCallsBuffer = "streamingToolCallsBuffer"
 
@@ -1379,13 +1384,13 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 }
 
 func isBuiltinAttribute(key string) bool {
-	return key == BuiltinQuestionKey || key == BuiltinAnswerKey || key == BuiltinToolCallsKey || key == BuiltinReasoningKey || key == BuiltinSystemKey ||
+	return key == BuiltinQuestionKey || key == BuiltinAnswerKey || key == BuiltinToolCallsKey || key == BuiltinReasoningKey || key == BuiltinFunctionCallKey || key == BuiltinSystemKey ||
 		key == BuiltinReasoningTokens || key == BuiltinCachedTokens ||
 		key == BuiltinInputTokenDetails || key == BuiltinOutputTokenDetails
 }
 
 func needsBodyBuffering(key string) bool {
-	return key == BuiltinAnswerKey || key == BuiltinToolCallsKey || key == BuiltinReasoningKey
+	return key == BuiltinAnswerKey || key == BuiltinToolCallsKey || key == BuiltinReasoningKey || key == BuiltinFunctionCallKey
 }
 
 func getBuiltinAttributeDefaultSources(key string) []string {
@@ -1473,9 +1478,10 @@ type StreamingMessageBuffer struct {
 	ToolCalls []ToolCall
 }
 
-// extractOpenAIMessage 从非流式响应的 choices.0.message 中提取完整内容。
-// 如果只有 content 有值 → 返回 content 纯文本字符串。
-// 如果有 tool_calls / reasoning / function_call 任一 → 返回 JSON 字符串。
+// extractOpenAIMessage 从非流式响应的 choices.0.message 中提取 content。
+// 只返回 message.content 纯文本，tool_calls / reasoning / function_call
+// 由各自独立的字段（BuiltinToolCallsKey / BuiltinReasoningKey / BuiltinFunctionCallKey）
+// 通过 getBuiltinAttributeFallback 单独提取，不再合并到 answer 中。
 func extractOpenAIMessage(body []byte) interface{} {
 	message := gjson.GetBytes(body, AnswerPathOpenAIMessage)
 	if !message.Exists() {
@@ -1483,123 +1489,21 @@ func extractOpenAIMessage(body []byte) interface{} {
 	}
 
 	content := message.Get("content").String()
-	toolCalls := message.Get("tool_calls")
-	reasoning := message.Get("reasoning").String()
-	funcCall := message.Get("function_call")
-
-	// 检查是否有 content 以外的字段
-	hasExtra := (toolCalls.Exists() && toolCalls.IsArray() && len(toolCalls.Array()) > 0) ||
-		reasoning != "" ||
-		(funcCall.Exists() && funcCall.Get("name").String() != "")
-
-	if !hasExtra {
-		// 只有 content，返回纯文本
-		if content != "" {
-			return content
-		}
-		return nil
-	}
-
-	// 有额外字段，返回 JSON 格式
-	result := make(map[string]interface{})
 	if content != "" {
-		result["content"] = content
+		return content
 	}
-	if toolCalls.Exists() && toolCalls.IsArray() && len(toolCalls.Array()) > 0 {
-		result["tool_calls"] = toolCalls.Value()
-	}
-	if reasoning != "" {
-		result["reasoning"] = reasoning
-	}
-	if funcCall.Exists() {
-		result["function_call"] = funcCall.Value()
-	}
-
-	jsonBytes, err := json.Marshal(result)
-	if err != nil {
-		log.Warnf("[extractOpenAIMessage] marshal failed: %v", err)
-		return content // 回退到 content
-	}
-	return string(jsonBytes)
+	return nil
 }
 
-// extractStreamingMessage 从流式响应的聚合 buffer 中提取 content + tool_calls + reasoning + function_call。
-// 如果只有 content → 返回 content 纯文本。
-// 如果有 tool_calls / reasoning / function_call 任一 → 返回 JSON 字符串。
+// extractStreamingMessage 从流式响应的聚合 buffer 中提取 content。
+// 只返回 content 纯文本，tool_calls / reasoning / function_call
+// 由各自独立的字段通过 getBuiltinAttributeFallback 单独提取。
 func extractStreamingMessage(ctx wrapper.HttpContext, data []byte, rule string) interface{} {
-	// 1. 提取 content
 	content := extractStreamingBodyByJsonPath(data, AnswerPathOpenAIStreaming, rule)
-	contentStr := ""
-	if content != nil {
-		contentStr = fmt.Sprint(content)
+	if content != nil && fmt.Sprint(content) != "" {
+		return content
 	}
-
-	// 2. 提取 reasoning（流式聚合）
-	// 不同模型使用不同字段名：DeepSeek 用 reasoning_content，其他可能用 reasoning
-	reasoningPath1 := "choices.0.delta.reasoning_content"
-	reasoningPath2 := "choices.0.delta.reasoning"
-	reasoning := extractStreamingBodyByJsonPath(data, reasoningPath1, RuleAppend)
-	if reasoning == nil || fmt.Sprint(reasoning) == "" {
-		reasoning = extractStreamingBodyByJsonPath(data, reasoningPath2, RuleAppend)
-	}
-	reasoningStr := ""
-	if reasoning != nil {
-		reasoningStr = fmt.Sprint(reasoning)
-	}
-
-	// 3. 提取 function_call（流式聚合 name + arguments）
-	funcNamePath := "choices.0.delta.function_call.name"
-	funcArgsPath := "choices.0.delta.function_call.arguments"
-	funcName := extractStreamingBodyByJsonPath(data, funcNamePath, RuleAppend)
-	funcArgs := extractStreamingBodyByJsonPath(data, funcArgsPath, RuleAppend)
-	hasFuncCall := (funcName != nil && fmt.Sprint(funcName) != "") ||
-		(funcArgs != nil && fmt.Sprint(funcArgs) != "")
-
-	// 4. 获取流式 tool_calls buffer
-	var toolCalls []ToolCall
-	if buffer, ok := ctx.GetContext(CtxStreamingToolCallsBuffer).(*StreamingToolCallsBuffer); ok {
-		toolCalls = getToolCallsFromBuffer(buffer)
-	}
-
-	// 5. 判断是否有 content 以外的字段
-	hasExtra := len(toolCalls) > 0 || reasoningStr != "" || hasFuncCall
-
-	if !hasExtra {
-		// 只有 content，返回纯文本
-		if contentStr != "" {
-			return contentStr
-		}
-		return nil
-	}
-
-	// 6. 有额外字段，返回 JSON
-	result := map[string]interface{}{}
-	if contentStr != "" {
-		result["content"] = contentStr
-	}
-	if len(toolCalls) > 0 {
-		result["tool_calls"] = toolCalls
-	}
-	if reasoningStr != "" {
-		result["reasoning"] = reasoningStr
-	}
-	if hasFuncCall {
-		fc := map[string]string{}
-		if funcName != nil && fmt.Sprint(funcName) != "" {
-			fc["name"] = fmt.Sprint(funcName)
-		}
-		if funcArgs != nil && fmt.Sprint(funcArgs) != "" {
-			fc["arguments"] = fmt.Sprint(funcArgs)
-		}
-		result["function_call"] = fc
-	}
-
-	jsonBytes, err := json.Marshal(result)
-	if err != nil {
-		log.Warnf("[extractStreamingMessage] marshal failed: %v", err)
-		return contentStr // 回退到 content
-	}
-	return string(jsonBytes)
+	return nil
 }
 
 func getBuiltinAttributeFallback(ctx wrapper.HttpContext, config AIStatisticsConfig, key, source string, body []byte, rule string) interface{} {
@@ -1706,6 +1610,27 @@ func getBuiltinAttributeFallback(ctx wrapper.HttpContext, config AIStatisticsCon
 				return value
 			}
 			if value := gjson.GetBytes(body, ReasoningPathNonStreamingAlt).Value(); value != nil && value != "" {
+				return value
+			}
+		}
+	case BuiltinFunctionCallKey:
+		if source == ResponseStreamingBody {
+			funcName := extractStreamingBodyByJsonPath(body, FunctionCallPathStreamingName, RuleAppend)
+			funcArgs := extractStreamingBodyByJsonPath(body, FunctionCallPathStreamingArgs, RuleAppend)
+			if funcName != nil || funcArgs != nil {
+				fc := map[string]string{}
+				if funcName != nil && fmt.Sprint(funcName) != "" {
+					fc["name"] = fmt.Sprint(funcName)
+				}
+				if funcArgs != nil && fmt.Sprint(funcArgs) != "" {
+					fc["arguments"] = fmt.Sprint(funcArgs)
+				}
+				if jsonBytes, err := json.Marshal(fc); err == nil {
+					return string(jsonBytes)
+				}
+			}
+		} else if source == ResponseBody {
+			if value := gjson.GetBytes(body, FunctionCallPathNonStreaming).Value(); value != nil {
 				return value
 			}
 		}
@@ -2347,6 +2272,7 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 	collectAIAttr("answer")
 	collectAIAttr("reasoning")
 	collectAIAttr("tool_calls")
+	collectAIAttr("function_call")
 	collectAIAttr("messages")
 	collectAIAttr("session_id")
 	collectAIAttr("chat_id")
@@ -2365,7 +2291,7 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 		switch key {
 		case "messages":
 			aiLog[key] = summarizeMessages(val, config.maxAttributeBytes)
-		case "question", "answer", "reasoning", "tool_calls":
+		case "question", "answer", "reasoning", "tool_calls", "function_call":
 			aiLog[key] = summarizeAttribute(key, val, config.maxAttributeBytes)
 		default:
 			// 对其他可能包含多模态内容的字段，超长后才替换占位符
@@ -2468,8 +2394,16 @@ func summarizeAttribute(key string, value interface{}, maxBytes int) interface{}
 		log.Infof("[AI-STAT-DEBUG] summarizeAttribute RETURN replaced: key=%s %d<=%d", key, len(str), maxBytes)
 		return str
 	}
-	half := maxBytes / 2
-	truncated := str[:half] + "..." + strconv.Itoa(len(str)-maxBytes) + "B>" + str[len(str)-half:]
+
+	var truncated string
+	if key == "question" {
+		// question 保留前面、截断后面（便于前端展示时看到开头）
+		truncated = str[:maxBytes] + "..." + strconv.Itoa(len(str)-maxBytes) + "B>"
+	} else {
+		// 其他字段两端保留、中间截断（保留上下文）
+		half := maxBytes / 2
+		truncated = str[:half] + "..." + strconv.Itoa(len(str)-maxBytes) + "B>" + str[len(str)-half:]
+	}
 	log.Infof("[AI-STAT-DEBUG] summarizeAttribute TRUNCATED: key=%s %d->%d", key, len(str), len(truncated))
 	return truncated
 }
