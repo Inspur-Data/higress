@@ -170,10 +170,10 @@ const (
 	CtxFailureReason            = "ai_statistics_failure_reason"
 	CtxIsFallbackRoute          = "ai_statistics_is_fallback_route"
 
-	// DefaultMaxLogBodyBytes 默认 5KB。
+	// DefaultMaxLogBodyBytes 默认 7KB。
 	// 实测：log-pilot 单条日志上限 8KB，access log 其他字段约 2-3KB，
-	// 因此 ai_log 必须控制在 5KB 以内，确保单条总日志不超过 8KB。
-	DefaultMaxLogBodyBytes = 5 * 1024
+	// 因此 ai_log 必须控制在 7KB 以内，确保单条总日志不超过 8KB。
+	DefaultMaxLogBodyBytes = 7 * 1024
 	// DefaultMaxAttributeBytes 默认 1536B (1.5KB)。
 	// 单个属性（question/answer/messages）最多保留 1.5KB，
 	// 超长时先替换多模态占位符，再两端截断。
@@ -773,7 +773,7 @@ func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
 
 	// 安全建议值：log-pilot 单条日志上限 8KB，access log 其他字段约 2-3KB。
 	// 如果配置值超过安全建议值，打印 warning 但不强制覆盖（配置优先）。
-	const suggestMaxLogBodyBytes = 5 * 1024
+	const suggestMaxLogBodyBytes = 7 * 1024
 	const suggestMaxAttributeBytes = 1536
 	const suggestValueLengthLimit = 3 * 1024
 	if config.maxLogBodyBytes > suggestMaxLogBodyBytes {
@@ -1386,10 +1386,10 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 				if len(strValue) > config.valueLengthLimit {
 					origLen := len(strValue)
 					if key == "question" {
-						// question 保留前面、截断后面
-						strValue = strValue[:config.valueLengthLimit] + "..." + strconv.Itoa(len(strValue)-config.valueLengthLimit) + "B>"
+						// question 保留前面固定长度，其余全用省略号代替
+						strValue = strValue[:config.valueLengthLimit] + "..."
 					} else {
-						// 其他字段两端保留
+						// 其他字段两端保留、中间截断（保留上下文）
 						strValue = strValue[:config.valueLengthLimit/2] + "..." + strconv.Itoa(len(strValue)-config.valueLengthLimit) + "B>" + strValue[len(strValue)-config.valueLengthLimit/2:]
 					}
 					log.Infof("[AI-STAT-DEBUG] setAttr VLL truncate: key=%s %d->%d vll=%d", key, origLen, len(strValue), config.valueLengthLimit)
@@ -1862,6 +1862,9 @@ func debugLogAiLog(ctx wrapper.HttpContext) {
 	}
 	if toolCalls := ctx.GetUserAttribute("tool_calls"); toolCalls != nil {
 		userAttrs["tool_calls"] = toolCalls
+	}
+	if funcCall := ctx.GetUserAttribute("function_call"); funcCall != nil {
+		userAttrs["function_call"] = funcCall
 	}
 	if messages := ctx.GetUserAttribute("messages"); messages != nil {
 		userAttrs["messages"] = messages
@@ -2386,7 +2389,7 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 		log.Infof("[AI-STATISTICS-DEBUG] buildAILogRecord: no request-phase ai_log found, err=%v", err)
 	}
 
-	collectBasicAILogInfo(ctx, aiLog, record.Consumer)
+	collectBasicAILogInfo(ctx, aiLog, consumer)
 
 	collectAIAttr := func(key string) {
 		if v := ctx.GetUserAttribute(key); v != nil {
@@ -2399,10 +2402,8 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 	}
 	collectAIAttr("question")
 	collectAIAttr("system")
-	collectAIAttr("answer")
-	collectAIAttr("reasoning")
-	collectAIAttr("tool_calls")
-	collectAIAttr("function_call")
+	// 注意：answer / reasoning / tool_calls / function_call 不再单独收集，
+	// 它们将在下方合并为复合 answer JSON 对象。
 	collectAIAttr("messages")
 	collectAIAttr("session_id")
 	collectAIAttr("chat_id")
@@ -2421,7 +2422,7 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 		switch key {
 		case "messages":
 			aiLog[key] = summarizeMessages(val, config.maxAttributeBytes)
-		case "question", "answer", "reasoning", "tool_calls", "function_call":
+		case "question":
 			aiLog[key] = summarizeAttribute(key, val, config.maxAttributeBytes)
 		default:
 			// 对其他可能包含多模态内容的字段，超长后才替换占位符
@@ -2437,6 +2438,52 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 		if origLen != newLen {
 			log.Infof("[AI-STAT-DEBUG] summarize: key=%s %d->%d bytes", key, origLen, newLen)
 		}
+	}
+
+	// ============================================================
+	// 构建复合 answer 对象：将 content、reasoning、function_call、tool_calls 合并为 JSON 字符串
+	// ============================================================
+	answerMap := make(map[string]interface{})
+
+	// content：从 user attribute 获取，并做超长截断（与 answer 字段共用相同截断策略）
+	if v := ctx.GetUserAttribute("answer"); v != nil {
+		answerMap["content"] = summarizeAttribute("answer", fmt.Sprint(v), config.maxAttributeBytes)
+	} else {
+		answerMap["content"] = ""
+	}
+
+	// reasoning：同样做超长截断，保障整体日志可控
+	if v := ctx.GetUserAttribute("reasoning"); v != nil {
+		answerMap["reasoning"] = summarizeAttribute("reasoning", fmt.Sprint(v), config.maxAttributeBytes)
+	} else {
+		answerMap["reasoning"] = ""
+	}
+
+	// function_call：特殊处理 null / <nil> 值，转为空字符串
+	if v := ctx.GetUserAttribute("function_call"); v != nil {
+		fc := fmt.Sprint(v)
+		if fc == "null" || fc == "<nil>" {
+			answerMap["function_call"] = ""
+		} else {
+			answerMap["function_call"] = fc
+		}
+	} else {
+		answerMap["function_call"] = ""
+	}
+
+	// tool_calls：保持原始类型（数组或空数组兜底）
+	if v := ctx.GetUserAttribute("tool_calls"); v != nil {
+		answerMap["tool_calls"] = v
+	} else {
+		answerMap["tool_calls"] = []interface{}{}
+	}
+
+	if answerJSONBytes, err := json.Marshal(answerMap); err == nil {
+		aiLog["answer"] = string(answerJSONBytes)
+		log.Infof("[AI-STAT-DEBUG] answer composite object built: len=%d", len(answerJSONBytes))
+	} else {
+		log.Warnf("[AI-STAT-DEBUG] failed to marshal answer object: %v", err)
+		aiLog["answer"] = answerMap["content"]
 	}
 
 	record.AILog = aiLog
@@ -2527,12 +2574,11 @@ func summarizeAttribute(key string, value interface{}, maxBytes int) interface{}
 
 	var truncated string
 	if key == "question" {
-		// question 保留前面、截断后面（便于前端展示时看到开头）
-		truncated = str[:maxBytes] + "..." + strconv.Itoa(len(str)-maxBytes) + "B>"
+		// question 保留前面固定长度，其余全用省略号代替（不保留尾部字节数统计）
+		truncated = str[:maxBytes] + "..."
 	} else {
-		// 其他字段两端保留、中间截断（保留上下文）
-		half := maxBytes / 2
-		truncated = str[:half] + "..." + strconv.Itoa(len(str)-maxBytes) + "B>" + str[len(str)-half:]
+		// 其他字段（answer / reasoning 等）保持现状：两端保留、中间截断（保留上下文）
+		truncated = str[:maxBytes/2] + "..." + strconv.Itoa(len(str)-maxBytes) + "B>" + str[len(str)-maxBytes/2:]
 	}
 	log.Infof("[AI-STAT-DEBUG] summarizeAttribute TRUNCATED: key=%s %d->%d", key, len(str), len(truncated))
 	return truncated
@@ -2657,11 +2703,37 @@ func enforceSizeCap(record *AILogRecord, maxBytes int) {
 		}
 
 		if f.key == "question" {
-			// question 保留前面、截断后面
-			record.AILog[f.key] = str[:targetLen] +
-				fmt.Sprintf("...%dB>", len(str)-targetLen)
+			// question 保留前面固定长度，其余全用省略号代替（不保留尾部字节数统计）
+			record.AILog[f.key] = str[:targetLen] + "..."
+		} else if f.key == "answer" {
+			// answer 是 JSON 字符串，直接截断会破坏 JSON 格式。
+			// 尝试解析并缩短内部 content / reasoning，若失败则回退到字符串截断。
+			if jsonStr, ok := record.AILog[f.key].(string); ok {
+				var answerObj map[string]interface{}
+				if err := json.Unmarshal([]byte(jsonStr), &answerObj); err == nil {
+					// 缩短 content 和 reasoning 到 targetLen/2 各保留一半
+					half := targetLen / 4 // 两个字段各保留 1/4，加上 JSON 包装约等于 targetLen
+					if content, ok := answerObj["content"].(string); ok && len(content) > half {
+						answerObj["content"] = content[:half] + "..."
+					}
+					if reasoning, ok := answerObj["reasoning"].(string); ok && len(reasoning) > half {
+						answerObj["reasoning"] = reasoning[:half] + "..."
+					}
+					if newJSON, err := json.Marshal(answerObj); err == nil {
+						record.AILog[f.key] = string(newJSON)
+						truncated = append(truncated, f.key)
+						log.Debugf("[enforceSizeCap] smart truncated answer JSON: %d -> %d bytes", len(jsonStr), len(newJSON))
+						continue
+					}
+				}
+			}
+			// 回退：普通字符串截断（可能破坏 JSON，但兜底可用）
+			half := targetLen / 2
+			record.AILog[f.key] = str[:half] +
+				fmt.Sprintf("...%dB>", len(str)-targetLen) +
+				str[len(str)-half:]
 		} else {
-			// 其他字段两端保留
+			// 其他字段两端保留、中间截断（保留上下文）
 			half := targetLen / 2
 			record.AILog[f.key] = str[:half] +
 				fmt.Sprintf("...%dB>", len(str)-targetLen) +
