@@ -170,10 +170,10 @@ const (
 	CtxFailureReason            = "ai_statistics_failure_reason"
 	CtxIsFallbackRoute          = "ai_statistics_is_fallback_route"
 
-	// DefaultMaxLogBodyBytes 默认 7KB。
+	// DefaultMaxLogBodyBytes 默认 6KB。
 	// 实测：log-pilot 单条日志上限 8KB，access log 其他字段约 2-3KB，
-	// 因此 ai_log 必须控制在 7KB 以内，确保单条总日志不超过 8KB。
-	DefaultMaxLogBodyBytes = 7 * 1024
+	// 因此 ai_log 必须控制在 6KB 以内，确保单条总日志不超过 8KB。
+	DefaultMaxLogBodyBytes = 6 * 1024
 	// DefaultMaxAttributeBytes 默认 1536B (1.5KB)。
 	// 单个属性（question/answer/messages）最多保留 1.5KB，
 	// 超长时先替换多模态占位符，再两端截断。
@@ -773,7 +773,7 @@ func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
 
 	// 安全建议值：log-pilot 单条日志上限 8KB，access log 其他字段约 2-3KB。
 	// 如果配置值超过安全建议值，打印 warning 但不强制覆盖（配置优先）。
-	const suggestMaxLogBodyBytes = 7 * 1024
+	const suggestMaxLogBodyBytes = 6 * 1024
 	const suggestMaxAttributeBytes = 1536
 	const suggestValueLengthLimit = 3 * 1024
 	if config.maxLogBodyBytes > suggestMaxLogBodyBytes {
@@ -1187,6 +1187,15 @@ func onHttpStreamingBody(ctx wrapper.HttpContext, config AIStatisticsConfig, dat
 		log.Infof("[AI-STAT-DEBUG] streaming function_call chunk: +%d bytes", len(fmt.Sprint(funcCall)))
 	}
 
+	// 累积结构化 tool_calls buffer，供 extractStreamingMessage 在 endOfStream 时读取完整数据
+	var toolCallsBuffer *StreamingToolCallsBuffer
+	if existingBuffer, ok := ctx.GetContext(CtxStreamingToolCallsBuffer).(*StreamingToolCallsBuffer); ok {
+		toolCallsBuffer = existingBuffer
+	}
+	toolCallsBuffer = extractStreamingToolCalls(data, toolCallsBuffer)
+	toolCallsBuffer = extractClaudeStreamingToolCalls(data, toolCallsBuffer)
+	ctx.SetContext(CtxStreamingToolCallsBuffer, toolCallsBuffer)
+
 	if endOfStream {
 		responseEndTime := time.Now().UnixMilli()
 		ctx.SetUserAttribute(LLMServiceDuration, responseEndTime-requestStartTime)
@@ -1388,10 +1397,12 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 					if key == "question" {
 						// question 保留前面固定长度，其余全用省略号代替
 						strValue = strValue[:config.valueLengthLimit] + "..."
-					} else {
-						// 其他字段两端保留、中间截断（保留上下文）
+					} else if key != BuiltinAnswerKey {
+						// 其他字段（answer 除外）两端保留、中间截断（保留上下文）
 						strValue = strValue[:config.valueLengthLimit/2] + "..." + strconv.Itoa(len(strValue)-config.valueLengthLimit) + "B>" + strValue[len(strValue)-config.valueLengthLimit/2:]
 					}
+					// answer 字段不做 valueLengthLimit 截断，避免破坏内部 JSON 结构；
+					// 其长度控制由 buildAILogRecord 中的 summarizeAttribute 统一处理。
 					log.Infof("[AI-STAT-DEBUG] setAttr VLL truncate: key=%s %d->%d vll=%d", key, origLen, len(strValue), config.valueLengthLimit)
 				}
 				formattedValue = strValue
@@ -1441,7 +1452,7 @@ func getBuiltinAttributeDefaultSources(key string) []string {
 	switch key {
 	case BuiltinQuestionKey, BuiltinSystemKey:
 		return []string{RequestBody}
-	case BuiltinAnswerKey, BuiltinToolCallsKey, BuiltinReasoningKey:
+	case BuiltinAnswerKey, BuiltinToolCallsKey, BuiltinReasoningKey, BuiltinFunctionCallKey:
 		return []string{ResponseStreamingBody, ResponseBody}
 	case BuiltinReasoningTokens, BuiltinCachedTokens, BuiltinInputTokenDetails, BuiltinOutputTokenDetails:
 		return []string{ResponseStreamingBody, ResponseBody}
@@ -1522,10 +1533,8 @@ type StreamingMessageBuffer struct {
 	ToolCalls []ToolCall
 }
 
-// extractOpenAIMessage 从非流式响应的 choices.0.message 中提取 content。
-// 只返回 message.content 纯文本，tool_calls / reasoning / function_call
-// 由各自独立的字段（BuiltinToolCallsKey / BuiltinReasoningKey / BuiltinFunctionCallKey）
-// 通过 getBuiltinAttributeFallback 单独提取，不再合并到 answer 中。
+// extractOpenAIMessage 从非流式响应的 choices.0.message 中提取完整内容。
+// 始终返回固定格式 JSON 字符串，包含 content / function_call / tool_calls / reasoning。
 func extractOpenAIMessage(body []byte) interface{} {
 	message := gjson.GetBytes(body, AnswerPathOpenAIMessage)
 	if !message.Exists() {
@@ -1533,21 +1542,93 @@ func extractOpenAIMessage(body []byte) interface{} {
 	}
 
 	content := message.Get("content").String()
-	if content != "" {
-		return content
+	toolCalls := message.Get("tool_calls")
+	reasoning := message.Get("reasoning").String()
+	funcCall := message.Get("function_call")
+
+	result := map[string]interface{}{
+		"content":       content,
+		"reasoning":     reasoning,
+		"tool_calls":    []interface{}{},
+		"function_call": "",
 	}
-	return nil
+
+	if toolCalls.Exists() && toolCalls.IsArray() && len(toolCalls.Array()) > 0 {
+		result["tool_calls"] = toolCalls.Value()
+	}
+
+	if funcCall.Exists() && funcCall.Raw != "" && funcCall.Raw != "null" {
+		if fcVal := funcCall.Value(); fcVal != nil {
+			result["function_call"] = fcVal
+		}
+	}
+
+	jsonBytes, err := json.Marshal(result)
+	if err != nil {
+		log.Warnf("[extractOpenAIMessage] marshal failed: %v", err)
+		return nil
+	}
+	return string(jsonBytes)
 }
 
-// extractStreamingMessage 从流式响应的聚合 buffer 中提取 content。
-// 只返回 content 纯文本，tool_calls / reasoning / function_call
-// 由各自独立的字段通过 getBuiltinAttributeFallback 单独提取。
+// extractStreamingMessage 从流式响应的聚合 buffer 中提取 content + tool_calls + reasoning + function_call。
+// 始终返回固定格式 JSON 字符串，空值给默认值。
 func extractStreamingMessage(ctx wrapper.HttpContext, data []byte, rule string) interface{} {
+	// 1. 提取 content
 	content := extractStreamingBodyByJsonPath(data, AnswerPathOpenAIStreaming, rule)
-	if content != nil && fmt.Sprint(content) != "" {
-		return content
+	contentStr := ""
+	if content != nil {
+		contentStr = fmt.Sprint(content)
 	}
-	return nil
+
+	// 2. 提取 reasoning
+	reasoningPath1 := "choices.0.delta.reasoning_content"
+	reasoningPath2 := "choices.0.delta.reasoning"
+	reasoning := extractStreamingBodyByJsonPath(data, reasoningPath1, RuleAppend)
+	if reasoning == nil || fmt.Sprint(reasoning) == "" {
+		reasoning = extractStreamingBodyByJsonPath(data, reasoningPath2, RuleAppend)
+	}
+	reasoningStr := ""
+	if reasoning != nil {
+		reasoningStr = fmt.Sprint(reasoning)
+	}
+
+	// 3. 提取 function_call
+	funcNamePath := "choices.0.delta.function_call.name"
+	funcArgsPath := "choices.0.delta.function_call.arguments"
+	funcName := extractStreamingBodyByJsonPath(data, funcNamePath, RuleAppend)
+	funcArgs := extractStreamingBodyByJsonPath(data, funcArgsPath, RuleAppend)
+
+	funcCallObj := map[string]string{}
+	if funcName != nil && fmt.Sprint(funcName) != "" {
+		funcCallObj["name"] = fmt.Sprint(funcName)
+	}
+	if funcArgs != nil && fmt.Sprint(funcArgs) != "" {
+		funcCallObj["arguments"] = fmt.Sprint(funcArgs)
+	}
+
+	// 4. 获取流式 tool_calls buffer（累积所有 chunk）
+	var toolCalls []ToolCall
+	if buffer, ok := ctx.GetContext(CtxStreamingToolCallsBuffer).(*StreamingToolCallsBuffer); ok {
+		toolCalls = getToolCallsFromBuffer(buffer)
+	}
+
+	result := map[string]interface{}{
+		"content":    contentStr,
+		"reasoning":  reasoningStr,
+		"tool_calls": toolCalls,
+		"function_call": "",
+	}
+	if len(funcCallObj) > 0 {
+		result["function_call"] = funcCallObj
+	}
+
+	jsonBytes, err := json.Marshal(result)
+	if err != nil {
+		log.Warnf("[extractStreamingMessage] marshal failed: %v", err)
+		return contentStr
+	}
+	return string(jsonBytes)
 }
 
 // extractStreamingReasoning 从流式 chunk 中提取 reasoning。
@@ -2389,7 +2470,7 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 		log.Infof("[AI-STATISTICS-DEBUG] buildAILogRecord: no request-phase ai_log found, err=%v", err)
 	}
 
-	collectBasicAILogInfo(ctx, aiLog, consumer)
+	collectBasicAILogInfo(ctx, aiLog, record.Consumer)
 
 	collectAIAttr := func(key string) {
 		if v := ctx.GetUserAttribute(key); v != nil {
@@ -2402,8 +2483,7 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 	}
 	collectAIAttr("question")
 	collectAIAttr("system")
-	// 注意：answer / reasoning / tool_calls / function_call 不再单独收集，
-	// 它们将在下方合并为复合 answer JSON 对象。
+	// answer / reasoning / tool_calls / function_call 将在下方统一合并为复合 answer JSON 对象
 	collectAIAttr("messages")
 	collectAIAttr("session_id")
 	collectAIAttr("chat_id")
@@ -2422,7 +2502,7 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 		switch key {
 		case "messages":
 			aiLog[key] = summarizeMessages(val, config.maxAttributeBytes)
-		case "question":
+		case "question", "reasoning", "tool_calls", "function_call":
 			aiLog[key] = summarizeAttribute(key, val, config.maxAttributeBytes)
 		default:
 			// 对其他可能包含多模态内容的字段，超长后才替换占位符
@@ -2440,50 +2520,48 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 		}
 	}
 
-	// ============================================================
-	// 构建复合 answer 对象：将 content、reasoning、function_call、tool_calls 合并为 JSON 字符串
-	// ============================================================
-	answerMap := make(map[string]interface{})
-
-	// content：从 user attribute 获取，并做超长截断（与 answer 字段共用相同截断策略）
+	// 构建复合 answer 对象：统一包含 content / function_call / tool_calls / reasoning
 	if v := ctx.GetUserAttribute("answer"); v != nil {
-		answerMap["content"] = summarizeAttribute("answer", fmt.Sprint(v), config.maxAttributeBytes)
-	} else {
-		answerMap["content"] = ""
-	}
-
-	// reasoning：同样做超长截断，保障整体日志可控
-	if v := ctx.GetUserAttribute("reasoning"); v != nil {
-		answerMap["reasoning"] = summarizeAttribute("reasoning", fmt.Sprint(v), config.maxAttributeBytes)
-	} else {
-		answerMap["reasoning"] = ""
-	}
-
-	// function_call：特殊处理 null / <nil> 值，转为空字符串
-	if v := ctx.GetUserAttribute("function_call"); v != nil {
-		fc := fmt.Sprint(v)
-		if fc == "null" || fc == "<nil>" {
-			answerMap["function_call"] = ""
+		if jsonStr, ok := v.(string); ok && strings.HasPrefix(jsonStr, "{") {
+			var answerMap map[string]interface{}
+			if err := json.Unmarshal([]byte(jsonStr), &answerMap); err == nil {
+				// 对 content 和 reasoning 做超长截断
+				if content, ok := answerMap["content"].(string); ok {
+					answerMap["content"] = summarizeAttribute("answer", content, config.maxAttributeBytes)
+				}
+				if reasoning, ok := answerMap["reasoning"].(string); ok {
+					answerMap["reasoning"] = summarizeAttribute("reasoning", reasoning, config.maxAttributeBytes)
+				}
+				if newJSON, err := json.Marshal(answerMap); err == nil {
+					aiLog["answer"] = string(newJSON)
+				} else {
+					aiLog["answer"] = jsonStr
+				}
+			} else {
+				aiLog["answer"] = summarizeAttribute("answer", jsonStr, config.maxAttributeBytes)
+			}
 		} else {
-			answerMap["function_call"] = fc
+			// 非 JSON 字符串，包装为固定格式
+			content := fmt.Sprint(v)
+			answerMap := map[string]interface{}{
+				"content":       summarizeAttribute("answer", content, config.maxAttributeBytes),
+				"function_call": "",
+				"tool_calls":    []interface{}{},
+				"reasoning":     "",
+			}
+			newJSON, _ := json.Marshal(answerMap)
+			aiLog["answer"] = string(newJSON)
 		}
 	} else {
-		answerMap["function_call"] = ""
-	}
-
-	// tool_calls：保持原始类型（数组或空数组兜底）
-	if v := ctx.GetUserAttribute("tool_calls"); v != nil {
-		answerMap["tool_calls"] = v
-	} else {
-		answerMap["tool_calls"] = []interface{}{}
-	}
-
-	if answerJSONBytes, err := json.Marshal(answerMap); err == nil {
-		aiLog["answer"] = string(answerJSONBytes)
-		log.Infof("[AI-STAT-DEBUG] answer composite object built: len=%d", len(answerJSONBytes))
-	} else {
-		log.Warnf("[AI-STAT-DEBUG] failed to marshal answer object: %v", err)
-		aiLog["answer"] = answerMap["content"]
+		// 无 answer，生成空对象
+		emptyAnswer := map[string]interface{}{
+			"content":       "",
+			"function_call": "",
+			"tool_calls":    []interface{}{},
+			"reasoning":     "",
+		}
+		emptyJSON, _ := json.Marshal(emptyAnswer)
+		aiLog["answer"] = string(emptyJSON)
 	}
 
 	record.AILog = aiLog
@@ -2705,14 +2783,15 @@ func enforceSizeCap(record *AILogRecord, maxBytes int) {
 		if f.key == "question" {
 			// question 保留前面固定长度，其余全用省略号代替（不保留尾部字节数统计）
 			record.AILog[f.key] = str[:targetLen] + "..."
+			truncated = append(truncated, f.key)
+			log.Debugf("[enforceSizeCap] truncated %s: %d -> ~%d bytes", f.key, len(str), targetLen)
 		} else if f.key == "answer" {
-			// answer 是 JSON 字符串，直接截断会破坏 JSON 格式。
-			// 尝试解析并缩短内部 content / reasoning，若失败则回退到字符串截断。
+			// answer 是 JSON 字符串，尝试解析并缩短内部字段
+			smartTruncated := false
 			if jsonStr, ok := record.AILog[f.key].(string); ok {
 				var answerObj map[string]interface{}
 				if err := json.Unmarshal([]byte(jsonStr), &answerObj); err == nil {
-					// 缩短 content 和 reasoning 到 targetLen/2 各保留一半
-					half := targetLen / 4 // 两个字段各保留 1/4，加上 JSON 包装约等于 targetLen
+					half := targetLen / 4
 					if content, ok := answerObj["content"].(string); ok && len(content) > half {
 						answerObj["content"] = content[:half] + "..."
 					}
@@ -2721,27 +2800,29 @@ func enforceSizeCap(record *AILogRecord, maxBytes int) {
 					}
 					if newJSON, err := json.Marshal(answerObj); err == nil {
 						record.AILog[f.key] = string(newJSON)
+						smartTruncated = true
 						truncated = append(truncated, f.key)
 						log.Debugf("[enforceSizeCap] smart truncated answer JSON: %d -> %d bytes", len(jsonStr), len(newJSON))
-						continue
 					}
 				}
 			}
-			// 回退：普通字符串截断（可能破坏 JSON，但兜底可用）
-			half := targetLen / 2
-			record.AILog[f.key] = str[:half] +
-				fmt.Sprintf("...%dB>", len(str)-targetLen) +
-				str[len(str)-half:]
+			if !smartTruncated {
+				half := targetLen / 2
+				record.AILog[f.key] = str[:half] +
+					fmt.Sprintf("...%dB>", len(str)-targetLen) +
+					str[len(str)-half:]
+				truncated = append(truncated, f.key)
+				log.Debugf("[enforceSizeCap] truncated %s: %d -> ~%d bytes", f.key, len(str), targetLen)
+			}
 		} else {
 			// 其他字段两端保留、中间截断（保留上下文）
 			half := targetLen / 2
 			record.AILog[f.key] = str[:half] +
 				fmt.Sprintf("...%dB>", len(str)-targetLen) +
 				str[len(str)-half:]
+			truncated = append(truncated, f.key)
+			log.Debugf("[enforceSizeCap] truncated %s: %d -> ~%d bytes", f.key, len(str), targetLen)
 		}
-		truncated = append(truncated, f.key)
-		log.Debugf("[enforceSizeCap] truncated %s: %d -> ~%d bytes",
-			f.key, len(str), targetLen)
 	}
 
 	// ========== Step 3: 如果仍然超限，删除已截断的字段（最后手段） ==========
