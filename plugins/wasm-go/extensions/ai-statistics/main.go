@@ -1395,8 +1395,13 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 				if len(strValue) > config.valueLengthLimit {
 					origLen := len(strValue)
 					if key == "question" {
-						// question 保留前面固定长度，其余全用省略号代替
-						strValue = strValue[:config.valueLengthLimit] + "..."
+						// question 优先删除多模态占位符，尽量保留完整 text
+						cleaned := cleanMultimediaResiduals(strValue)
+						if len(cleaned) <= config.valueLengthLimit {
+							strValue = cleaned
+						} else {
+							strValue = cleaned[:config.valueLengthLimit] + "..."
+						}
 					} else if key != BuiltinAnswerKey {
 						// 其他字段（answer 除外）两端保留、中间截断（保留上下文）
 						strValue = strValue[:config.valueLengthLimit/2] + "..." + strconv.Itoa(len(strValue)-config.valueLengthLimit) + "B>" + strValue[len(strValue)-config.valueLengthLimit/2:]
@@ -1472,6 +1477,55 @@ func shouldProcessBuiltinAttribute(key, configuredSource, currentSource string) 
 		}
 	}
 	return false
+}
+
+// extractTextFromMultimodalContent 从多模态 content 数组中提取所有 text 类型内容。
+// 如果最后一个 message 的 content 是数组（OpenAI 多模态格式），则只保留 text 元素，
+// 避免 image/audio 的 base64 数据占用过多空间。
+func extractTextFromMultimodalContent(body []byte) string {
+	content := gjson.GetBytes(body, "messages.@reverse.0.content")
+	if !content.Exists() || !content.IsArray() {
+		return ""
+	}
+	var texts []string
+	for _, item := range content.Array() {
+		if item.Get("type").String() == "text" {
+			if text := item.Get("text").String(); text != "" {
+				texts = append(texts, text)
+			}
+		}
+	}
+	if len(texts) > 0 {
+		return strings.Join(texts, "\n")
+	}
+	return ""
+}
+
+// cleanMultimediaResiduals 删除字符串中的多模态占位符及其周边 JSON/Go-map 结构残留，
+// 最大化保留纯文本内容。用于 question 超长时的优先保 text 策略。
+func cleanMultimediaResiduals(str string) string {
+	// 1. 删除标准多模态占位符
+	for _, ph := range []string{"[image]", "[video]", "[audio]", "[file]", "[base64 data]"} {
+		str = strings.ReplaceAll(str, ph, "")
+	}
+
+	// 2. 删除 Go fmt 输出的 map 结构残留（包含 image_url 的 map 块）
+	str = regexp.MustCompile(`map\[[^\]]*image_url[^\]]*\]`).ReplaceAllString(str, "")
+
+	// 3. 清理空的 map/object/array
+	str = regexp.MustCompile(`map\[\]`).ReplaceAllString(str, "")
+	str = regexp.MustCompile(`\{\s*\}`).ReplaceAllString(str, "")
+	str = regexp.MustCompile(`\[\s*\]`).ReplaceAllString(str, "")
+
+	// 4. 清理多余分隔符
+	str = regexp.MustCompile(`,\s*,+`).ReplaceAllString(str, ",")
+	str = regexp.MustCompile(`\[\s*,`).ReplaceAllString(str, "[")
+	str = regexp.MustCompile(`,\s*\]`).ReplaceAllString(str, "]")
+	str = regexp.MustCompile(`\{\s*,`).ReplaceAllString(str, "{")
+	str = regexp.MustCompile(`,\s*\}`).ReplaceAllString(str, "}")
+	str = strings.TrimSpace(str)
+
+	return str
 }
 
 // extractEmbeddingAnswer 从 Embedding 模型响应中提取摘要信息。
@@ -1685,6 +1739,11 @@ func getBuiltinAttributeFallback(ctx wrapper.HttpContext, config AIStatisticsCon
 	case BuiltinQuestionKey:
 		if source == RequestBody {
 			// 优先尝试通用 chat/completions 路径
+			// 如果是多模态数组，提取所有 text 类型内容，避免 image base64 占用空间
+			if texts := extractTextFromMultimodalContent(body); texts != "" {
+				log.Infof("[AI-STAT-DEBUG] question extracted from multimodal text, len=%d", len(texts))
+				return texts
+			}
 			if value := gjson.GetBytes(body, QuestionPathOpenAI).Value(); value != nil && value != "" {
 				log.Infof("[AI-STAT-DEBUG] question extracted from QuestionPathOpenAI, type=%T len=%d", value, len(fmt.Sprint(value)))
 				return value
@@ -2276,7 +2335,7 @@ func writeStringToFilterState(key, value string) {
 
 // writeTopLevelFields 将 record 中的核心字段以及 ai_log 中的关键业务字段
 // 作为独立的 filter state 键写入，供 accessLogFormat 直接平级引用。
-// 本函数仅做“额外冗余输出”，不影响原有的 ai_log 与 stdout 日志链路。
+// 本函数仅做"额外冗余输出"，不影响原有的 ai_log 与 stdout 日志链路。
 func writeTopLevelFields(record *AILogRecord) {
 	if record == nil {
 		return
@@ -2652,8 +2711,13 @@ func summarizeAttribute(key string, value interface{}, maxBytes int) interface{}
 
 	var truncated string
 	if key == "question" {
-		// question 保留前面固定长度，其余全用省略号代替（不保留尾部字节数统计）
-		truncated = str[:maxBytes] + "..."
+		// question 优先删除多模态占位符，尽量保留完整 text
+		cleaned := cleanMultimediaResiduals(str)
+		log.Infof("[AI-STAT-DEBUG] summarizeAttribute AFTER cleanMM: key=%s len=%d", key, len(cleaned))
+		if len(cleaned) <= maxBytes {
+			return cleaned
+		}
+		truncated = cleaned[:maxBytes] + "..."
 	} else {
 		// 其他字段（answer / reasoning 等）保持现状：两端保留、中间截断（保留上下文）
 		truncated = str[:maxBytes/2] + "..." + strconv.Itoa(len(str)-maxBytes) + "B>" + str[len(str)-maxBytes/2:]
