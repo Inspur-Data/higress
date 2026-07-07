@@ -134,9 +134,9 @@ const (
 	AnswerPathClaudeStreaming = "delta.text"
 
 	// 完整 message 路径，用于工具调用场景提取 content + tool_calls + reasoning
-	AnswerPathOpenAIMessage       = "choices.0.message"
-	AnswerPathOpenAIMessageRole   = "choices.0.message.role"
-	AnswerPathOpenAIMessageDelta  = "choices.0.delta"
+	AnswerPathOpenAIMessage      = "choices.0.message"
+	AnswerPathOpenAIMessageRole  = "choices.0.message.role"
+	AnswerPathOpenAIMessageDelta = "choices.0.delta"
 
 	ToolCallsPathNonStreaming = "choices.0.message.tool_calls"
 	ToolCallsPathStreaming    = "choices.0.delta.tool_calls"
@@ -149,14 +149,14 @@ const (
 	ClaudeDeltaPartialJSON  = "delta.partial_json"
 	ClaudeIndex             = "index"
 
-	ReasoningPathNonStreaming      = "choices.0.message.reasoning"
-	ReasoningPathNonStreamingAlt   = "choices.0.message.reasoning_content"
-	ReasoningPathStreaming         = "choices.0.delta.reasoning"
-	ReasoningPathStreamingAlt      = "choices.0.delta.reasoning_content"
+	ReasoningPathNonStreaming    = "choices.0.message.reasoning"
+	ReasoningPathNonStreamingAlt = "choices.0.message.reasoning_content"
+	ReasoningPathStreaming       = "choices.0.delta.reasoning"
+	ReasoningPathStreamingAlt    = "choices.0.delta.reasoning_content"
 
-	FunctionCallPathNonStreaming   = "choices.0.message.function_call"
-	FunctionCallPathStreamingName  = "choices.0.delta.function_call.name"
-	FunctionCallPathStreamingArgs  = "choices.0.delta.function_call.arguments"
+	FunctionCallPathNonStreaming  = "choices.0.message.function_call"
+	FunctionCallPathStreamingName = "choices.0.delta.function_call.name"
+	FunctionCallPathStreamingArgs = "choices.0.delta.function_call.arguments"
 
 	CtxStreamingToolCallsBuffer = "streamingToolCallsBuffer"
 
@@ -431,26 +431,26 @@ func getToolCallsFromBuffer(buffer *StreamingToolCallsBuffer) []ToolCall {
 }
 
 type AILogRecord struct {
-	Timestamp             string `json:"@timestamp"`
-	RequestID             string `json:"request_id,omitempty"`
-	RequestSuccess        bool   `json:"request_success"`
-	StatusCode            int    `json:"status_code"`
-	Route                 string `json:"route"`
-	Cluster               string `json:"cluster"`
-	Model                 string `json:"model"`
-	Consumer              string `json:"consumer"`
-	SourceIP              string `json:"source_ip"`
-	SessionID             string `json:"session_id,omitempty"`
-	ResponseType          string `json:"response_type,omitempty"`
-	LLMServiceDuration    int64  `json:"llm_service_duration,omitempty"`
-	LLMFirstTokenDuration int64  `json:"llm_first_token_duration,omitempty"`
-	RequestMethod         string `json:"request_method,omitempty"`
-	RequestPath           string `json:"request_path,omitempty"`
-	AILog                 map[string]interface{} `json:"ai_log,omitempty"`
-	PodName                string `json:"gateway_pod_name"`
-	BackendModelCluster    string `json:"backend_model_cluster"`
-	BackendUpstreamAddress string `json:"backend_upstream_address,omitempty"`
-	FailureReason          string `json:"failure_reason,omitempty"`
+	Timestamp              string                 `json:"@timestamp"`
+	RequestID              string                 `json:"request_id,omitempty"`
+	RequestSuccess         bool                   `json:"request_success"`
+	StatusCode             int                    `json:"status_code"`
+	Route                  string                 `json:"route"`
+	Cluster                string                 `json:"cluster"`
+	Model                  string                 `json:"model"`
+	Consumer               string                 `json:"consumer"`
+	SourceIP               string                 `json:"source_ip"`
+	SessionID              string                 `json:"session_id,omitempty"`
+	ResponseType           string                 `json:"response_type,omitempty"`
+	LLMServiceDuration     int64                  `json:"llm_service_duration,omitempty"`
+	LLMFirstTokenDuration  int64                  `json:"llm_first_token_duration,omitempty"`
+	RequestMethod          string                 `json:"request_method,omitempty"`
+	RequestPath            string                 `json:"request_path,omitempty"`
+	AILog                  map[string]interface{} `json:"ai_log,omitempty"`
+	PodName                string                 `json:"gateway_pod_name"`
+	BackendModelCluster    string                 `json:"backend_model_cluster"`
+	BackendUpstreamAddress string                 `json:"backend_upstream_address,omitempty"`
+	FailureReason          string                 `json:"failure_reason,omitempty"`
 }
 
 type Attribute struct {
@@ -472,7 +472,7 @@ type AIStatisticsConfig struct {
 	shouldBufferRequestBody   bool
 	disableOpenaiUsage        bool
 	valueLengthLimit          int
-	enablePathSuffixes          []string
+	enablePathSuffixes        []string
 	enableContentTypes        []string
 	sessionIdHeader           string
 	RedisClient               wrapper.RedisClient
@@ -1489,6 +1489,27 @@ func extractTextFromMultimodalContent(body []byte) string {
 	if len(texts) > 0 {
 		return strings.Join(texts, "\n")
 	}
+
+	// 在 return "" 之前添加：
+	// Gemini 格式: contents.parts
+	contents := gjson.GetBytes(body, "contents")
+	if contents.Exists() && contents.IsArray() {
+		var texts []string
+		for _, content := range contents.Array() {
+			parts := content.Get("parts")
+			if parts.Exists() && parts.IsArray() {
+				for _, part := range parts.Array() {
+					if text := part.Get("text").String(); text != "" {
+						texts = append(texts, text)
+					}
+				}
+			}
+		}
+		if len(texts) > 0 {
+			return strings.Join(texts, "\n")
+		}
+	}
+
 	return ""
 }
 
@@ -1579,7 +1600,7 @@ func extractRerankQuestion(body []byte) interface{} {
 		origLen := len(result)
 		// 保留 query 部分，截断 documents
 		queryStr := query.String()
-		truncated := fmt.Sprintf("query: %s\ndocuments: %d items\n[... %d bytes truncated ...]", 
+		truncated := fmt.Sprintf("query: %s\ndocuments: %d items\n[... %d bytes truncated ...]",
 			queryStr, docCount, origLen-maxRerankQuestionBytes)
 		if len(truncated) > maxRerankQuestionBytes {
 			// 如果 query 本身超长，直接前端截断
@@ -1843,7 +1864,13 @@ func getBuiltinAttributeFallback(ctx wrapper.HttpContext, config AIStatisticsCon
 	case BuiltinSystemKey:
 		if source == RequestBody {
 			if value := gjson.GetBytes(body, SystemPathClaude).Value(); value != nil && value != "" {
-				return value
+				strValue := fmt.Sprint(value)
+				if len(strValue) > config.valueLengthLimit {
+					origLen := len(strValue)
+					strValue = strValue[:config.valueLengthLimit] + "..."
+					log.Infof("[AI-STAT-DEBUG] system truncated: %d -> %d", origLen, len(strValue))
+				}
+				return strValue
 			}
 		}
 	case BuiltinAnswerKey:
@@ -1855,14 +1882,37 @@ func getBuiltinAttributeFallback(ctx wrapper.HttpContext, config AIStatisticsCon
 			}
 			// 兜底：只提取 content
 			if value := extractStreamingBodyByJsonPath(body, AnswerPathOpenAIStreaming, rule); value != nil && value != "" {
-				log.Infof("[AI-STAT-DEBUG] answer extracted from OpenAI streaming content, type=%T len=%d", value, len(fmt.Sprint(value)))
-				return value
+				contentStr := fmt.Sprint(value)
+				log.Infof("[AI-STAT-DEBUG] answer extracted from OpenAI streaming content, raw len=%d", len(contentStr))
+				if len(contentStr) > maxStreamingAnswerBytes {
+					contentStr, _ = truncateStreamingContent(contentStr, "", maxStreamingAnswerBytes)
+					log.Infof("[AI-STAT-DEBUG] answer OpenAI streaming truncated: %d", len(contentStr))
+				}
+				answerMap := map[string]interface{}{
+					"content":       contentStr,
+					"reasoning":     "",
+					"tool_calls":    []interface{}{},
+					"function_call": "",
+				}
+				jsonBytes, _ := json.Marshal(answerMap)
+				return string(jsonBytes)
 			}
 			if value := extractStreamingBodyByJsonPath(body, AnswerPathClaudeStreaming, rule); value != nil && value != "" {
-				log.Infof("[AI-STAT-DEBUG] answer extracted from Claude streaming, type=%T len=%d", value, len(fmt.Sprint(value)))
-				return value
+				contentStr := fmt.Sprint(value)
+				log.Infof("[AI-STAT-DEBUG] answer extracted from Claude streaming, raw len=%d", len(contentStr))
+				if len(contentStr) > maxStreamingAnswerBytes {
+					contentStr, _ = truncateStreamingContent(contentStr, "", maxStreamingAnswerBytes)
+					log.Infof("[AI-STAT-DEBUG] answer Claude streaming truncated: %d", len(contentStr))
+				}
+				answerMap := map[string]interface{}{
+					"content":       contentStr,
+					"reasoning":     "",
+					"tool_calls":    []interface{}{},
+					"function_call": "",
+				}
+				jsonBytes, _ := json.Marshal(answerMap)
+				return string(jsonBytes)
 			}
-
 		} else if source == ResponseBody {
 			// 优先从完整 message 中提取（工具调用场景：content + tool_calls + reasoning）
 			if value := extractOpenAIMessage(body); value != nil && value != "" {
@@ -2655,7 +2705,7 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 			if err := json.Unmarshal([]byte(jsonStr), &answerMap); err == nil {
 				// 对 content 和 reasoning 做超长截断
 				// 使用更严格的限制：maxAttributeBytes 的 80%，留余量给 JSON 结构
-				contentLimit := config.maxAttributeBytes * 4 / 10  // content 最多 40%
+				contentLimit := config.maxAttributeBytes * 4 / 10   // content 最多 40%
 				reasoningLimit := config.maxAttributeBytes * 3 / 10 // reasoning 最多 30%
 				if content, ok := answerMap["content"].(string); ok {
 					answerMap["content"] = summarizeAttribute("answer", content, contentLimit)
