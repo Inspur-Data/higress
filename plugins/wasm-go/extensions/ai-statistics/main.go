@@ -1527,7 +1527,8 @@ func extractEmbeddingAnswer(body []byte) interface{} {
 		return nil
 	}
 	arr := data.Array()
-	if len(arr) == 0 {
+	arrLen := len(arr)
+	if arrLen == 0 {
 		return nil
 	}
 
@@ -1542,7 +1543,7 @@ func extractEmbeddingAnswer(body []byte) interface{} {
 	totalTokens := gjson.GetBytes(body, "usage.total_tokens").Int()
 
 	return fmt.Sprintf("%d embedding(s) of dimension %d, tokens: prompt=%d total=%d",
-		len(arr), dim, promptTokens, totalTokens)
+		arrLen, dim, promptTokens, totalTokens)
 }
 
 // extractRerankQuestion 从 Rerank 请求中提取 query 和 documents 组合成 question。
@@ -1560,10 +1561,12 @@ func extractRerankQuestion(body []byte) interface{} {
 	buf.WriteString("query: ")
 	buf.WriteString(query.String())
 
+	docCount := 0
 	docs := gjson.GetBytes(body, RerankDocumentsPath)
 	if docs.Exists() && docs.IsArray() {
 		arr := docs.Array()
-		buf.WriteString(fmt.Sprintf("\ndocuments: %d items", len(arr)))
+		docCount = len(arr)
+		buf.WriteString(fmt.Sprintf("\ndocuments: %d items", docCount))
 		for i, doc := range arr {
 			buf.WriteString(fmt.Sprintf("\n[%d] ", i))
 			buf.WriteString(doc.String())
@@ -1577,7 +1580,7 @@ func extractRerankQuestion(body []byte) interface{} {
 		// 保留 query 部分，截断 documents
 		queryStr := query.String()
 		truncated := fmt.Sprintf("query: %s\ndocuments: %d items\n[... %d bytes truncated ...]", 
-			queryStr, len(arr), origLen-maxRerankQuestionBytes)
+			queryStr, docCount, origLen-maxRerankQuestionBytes)
 		if len(truncated) > maxRerankQuestionBytes {
 			// 如果 query 本身超长，直接前端截断
 			truncated = truncated[:maxRerankQuestionBytes] + "..."
@@ -2824,12 +2827,13 @@ func summarizeMessages(value interface{}, maxBytes int) interface{} {
 		return summarizeAttribute("messages", value, maxBytes)
 	}
 	arr := result.Array()
-	if len(arr) <= 4 {
+	arrLen := len(arr)
+	if arrLen <= 4 {
 		return summarizeAttribute("messages", value, maxBytes)
 	}
 	var buf bytes.Buffer
 	buf.WriteString("[")
-	for i := 0; i < 2 && i < len(arr); i++ {
+	for i := 0; i < 2 && i < arrLen; i++ {
 		if i > 0 {
 			buf.WriteString(",")
 		}
@@ -2837,9 +2841,9 @@ func summarizeMessages(value interface{}, maxBytes int) interface{} {
 		truncatedMsg := replaceMultimediaWithPlaceholders(arr[i].Raw)
 		buf.WriteString(truncatedMsg)
 	}
-	truncatedCount := len(arr) - 4
-	buf.WriteString(fmt.Sprintf(`,"[ ... %d conversation rounds truncated (original %d rounds, %d bytes) ... ]"`, truncatedCount, len(arr), len(str)))
-	for i := len(arr) - 2; i < len(arr); i++ {
+	truncatedCount := arrLen - 4
+	buf.WriteString(fmt.Sprintf(`,"[ ... %d conversation rounds truncated (original %d rounds, %d bytes) ... ]"`, truncatedCount, arrLen, len(str)))
+	for i := arrLen - 2; i < arrLen; i++ {
 		if i >= 0 {
 			buf.WriteString(",")
 			truncatedMsg := replaceMultimediaWithPlaceholders(arr[i].Raw)
