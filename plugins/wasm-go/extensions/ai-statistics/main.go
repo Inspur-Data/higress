@@ -1587,9 +1587,15 @@ func extractOpenAIMessage(body []byte) interface{} {
 	}
 
 	content := message.Get("content").String()
-	toolCalls := message.Get("tool_calls")
 	reasoning := message.Get("reasoning").String()
+	log.Infof("[AI-STAT-DEBUG] extractOpenAIMessage: raw content len=%d, reasoning len=%d", len(content), len(reasoning))
+
+	toolCalls := message.Get("tool_calls")
 	funcCall := message.Get("function_call")
+
+	// 对 content 和 reasoning 做截断，确保 JSON 不超过限制
+	content, reasoning = truncateStreamingContent(content, reasoning, maxStreamingAnswerBytes)
+	log.Infof("[AI-STAT-DEBUG] extractOpenAIMessage: after truncate content=%d, reasoning=%d", len(content), len(reasoning))
 
 	result := map[string]interface{}{
 		"content":       content,
@@ -1613,20 +1619,68 @@ func extractOpenAIMessage(body []byte) interface{} {
 		log.Warnf("[extractOpenAIMessage] marshal failed: %v", err)
 		return nil
 	}
+	log.Infof("[AI-STAT-DEBUG] extractOpenAIMessage: final JSON len=%d", len(jsonBytes))
 	return string(jsonBytes)
 }
 
 // extractStreamingMessage 从流式响应的聚合 buffer 中提取 content + tool_calls + reasoning + function_call。
 // 始终返回固定格式 JSON 字符串，空值给默认值。
+// maxStreamingAnswerBytes 流式 answer 的最大字节数（默认 4KB，留余量给 JSON 结构）
+const maxStreamingAnswerBytes = 4 * 1024
+
+// truncateStreamingContent 对流式 answer 的 content 和 reasoning 做截断，
+// 确保最终 JSON 不超过 maxBytes。优先截断 content，其次 reasoning。
+func truncateStreamingContent(content, reasoning string, maxBytes int) (string, string) {
+	// JSON 结构固定开销估算: {"content":"","reasoning":"","tool_calls":[],"function_call":""} ≈ 60 bytes
+	const jsonOverhead = 80
+	available := maxBytes - jsonOverhead
+	if available < 200 {
+		available = 200
+	}
+
+	contentLen := len(content)
+	reasoningLen := len(reasoning)
+	total := contentLen + reasoningLen
+
+	if total <= available {
+		return content, reasoning
+	}
+
+	// 优先保留 reasoning（通常较短且重要），按比例分配
+	// 但 reasoning 最多占可用空间的 30%
+	maxReasoning := available * 3 / 10
+	if reasoningLen > maxReasoning {
+		reasoning = reasoning[:maxReasoning] + "..."
+		reasoningLen = len(reasoning)
+	}
+
+	// content 占用剩余空间
+	contentAvailable := available - reasoningLen
+	if contentLen > contentAvailable {
+		if contentAvailable > 100 {
+			// 两端保留、中间截断，保留上下文
+			half := contentAvailable / 2
+			content = content[:half] + "..." + strconv.Itoa(contentLen-contentAvailable) + "B>" + content[contentLen-half:]
+		} else {
+			content = content[:contentAvailable] + "..."
+		}
+	}
+
+	log.Infof("[AI-STAT-DEBUG] truncateStreamingContent: content %d->%d, reasoning %d->%d, max=%d",
+		contentLen, len(content), len(reasoning), len(reasoning), maxBytes)
+	return content, reasoning
+}
+
 func extractStreamingMessage(ctx wrapper.HttpContext, data []byte, rule string) interface{} {
-	// 1. 提取 content
+	// 1. 提取 content（累积所有 chunk 的 delta.content，可能超长）
 	content := extractStreamingBodyByJsonPath(data, AnswerPathOpenAIStreaming, rule)
 	contentStr := ""
 	if content != nil {
 		contentStr = fmt.Sprint(content)
 	}
+	log.Infof("[AI-STAT-DEBUG] extractStreamingMessage: raw content len=%d", len(contentStr))
 
-	// 2. 从 context 缓存中读取 reasoning（不再从当前 chunk 提取，避免重复）
+	// 2. 从 context 缓存中读取 reasoning
 	reasoningStr := ""
 	if reasoningBuf, ok := ctx.GetContext(CtxStreamingReasoning).(string); ok && reasoningBuf != "" {
 		reasoningStr = reasoningBuf
@@ -1636,7 +1690,6 @@ func extractStreamingMessage(ctx wrapper.HttpContext, data []byte, rule string) 
 	// 3. 从 context 缓存中读取 function_call
 	funcCallObj := map[string]string{}
 	if funcCallBuf, ok := ctx.GetContext(CtxStreamingFuncCallData).(string); ok && funcCallBuf != "" {
-		// 尝试解析缓存的 function_call
 		var fc map[string]interface{}
 		if err := json.Unmarshal([]byte(funcCallBuf), &fc); err == nil {
 			if name, ok := fc["name"].(string); ok {
@@ -1646,7 +1699,6 @@ func extractStreamingMessage(ctx wrapper.HttpContext, data []byte, rule string) 
 				funcCallObj["arguments"] = args
 			}
 		} else {
-			// 非 JSON 格式，直接作为 name 处理
 			funcCallObj["name"] = funcCallBuf
 		}
 		log.Infof("[AI-STAT-DEBUG] extractStreamingMessage: function_call from context cache")
@@ -1659,10 +1711,15 @@ func extractStreamingMessage(ctx wrapper.HttpContext, data []byte, rule string) 
 		log.Infof("[AI-STAT-DEBUG] extractStreamingMessage: tool_calls from context buffer, count=%d", len(toolCalls))
 	}
 
+	// 5. 截断 content 和 reasoning，确保 JSON 不超过限制
+	contentStr, reasoningStr = truncateStreamingContent(contentStr, reasoningStr, maxStreamingAnswerBytes)
+	log.Infof("[AI-STAT-DEBUG] extractStreamingMessage: after truncate content=%d reasoning=%d",
+		len(contentStr), len(reasoningStr))
+
 	result := map[string]interface{}{
-		"content":    contentStr,
-		"reasoning":  reasoningStr,
-		"tool_calls": toolCalls,
+		"content":       contentStr,
+		"reasoning":     reasoningStr,
+		"tool_calls":    toolCalls,
 		"function_call": "",
 	}
 	if len(funcCallObj) > 0 {
@@ -1674,6 +1731,7 @@ func extractStreamingMessage(ctx wrapper.HttpContext, data []byte, rule string) 
 		log.Warnf("[extractStreamingMessage] marshal failed: %v", err)
 		return contentStr
 	}
+	log.Infof("[AI-STAT-DEBUG] extractStreamingMessage: final JSON len=%d", len(jsonBytes))
 	return string(jsonBytes)
 }
 
@@ -1774,20 +1832,46 @@ func getBuiltinAttributeFallback(ctx wrapper.HttpContext, config AIStatisticsCon
 				log.Infof("[AI-STAT-DEBUG] answer extracted from Claude streaming, type=%T len=%d", value, len(fmt.Sprint(value)))
 				return value
 			}
+
 		} else if source == ResponseBody {
 			// 优先从完整 message 中提取（工具调用场景：content + tool_calls + reasoning）
 			if value := extractOpenAIMessage(body); value != nil && value != "" {
 				log.Infof("[AI-STAT-DEBUG] answer extracted from OpenAI message, type=%T len=%d", value, len(fmt.Sprint(value)))
 				return value
 			}
-			// 兜底：只提取 content
+			// 兜底：只提取 content，需要截断避免超长
 			if value := gjson.GetBytes(body, AnswerPathOpenAINonStreaming).Value(); value != nil && value != "" {
-				log.Infof("[AI-STAT-DEBUG] answer extracted from OpenAI content, type=%T len=%d", value, len(fmt.Sprint(value)))
-				return value
+				contentStr := fmt.Sprint(value)
+				log.Infof("[AI-STAT-DEBUG] answer extracted from OpenAI content fallback, raw len=%d", len(contentStr))
+				// 对超长 content 截断并包装为固定格式 JSON
+				if len(contentStr) > maxStreamingAnswerBytes {
+					contentStr, _ = truncateStreamingContent(contentStr, "", maxStreamingAnswerBytes)
+					log.Infof("[AI-STAT-DEBUG] answer content fallback truncated: %d", len(contentStr))
+				}
+				answerMap := map[string]interface{}{
+					"content":       contentStr,
+					"reasoning":     "",
+					"tool_calls":    []interface{}{},
+					"function_call": "",
+				}
+				jsonBytes, _ := json.Marshal(answerMap)
+				return string(jsonBytes)
 			}
 			if value := gjson.GetBytes(body, AnswerPathClaudeNonStreaming).Value(); value != nil && value != "" {
-				log.Infof("[AI-STAT-DEBUG] answer extracted from Claude non-streaming, type=%T len=%d", value, len(fmt.Sprint(value)))
-				return value
+				contentStr := fmt.Sprint(value)
+				log.Infof("[AI-STAT-DEBUG] answer extracted from Claude non-streaming, raw len=%d", len(contentStr))
+				if len(contentStr) > maxStreamingAnswerBytes {
+					contentStr, _ = truncateStreamingContent(contentStr, "", maxStreamingAnswerBytes)
+					log.Infof("[AI-STAT-DEBUG] answer Claude fallback truncated: %d", len(contentStr))
+				}
+				answerMap := map[string]interface{}{
+					"content":       contentStr,
+					"reasoning":     "",
+					"tool_calls":    []interface{}{},
+					"function_call": "",
+				}
+				jsonBytes, _ := json.Marshal(answerMap)
+				return string(jsonBytes)
 			}
 			// Embedding 模型: 提取 data 摘要和 usage
 			if value := extractEmbeddingAnswer(body); value != nil && value != "" {
@@ -2532,14 +2616,18 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 			var answerMap map[string]interface{}
 			if err := json.Unmarshal([]byte(jsonStr), &answerMap); err == nil {
 				// 对 content 和 reasoning 做超长截断
+				// 使用更严格的限制：maxAttributeBytes 的 80%，留余量给 JSON 结构
+				contentLimit := config.maxAttributeBytes * 4 / 10  // content 最多 40%
+				reasoningLimit := config.maxAttributeBytes * 3 / 10 // reasoning 最多 30%
 				if content, ok := answerMap["content"].(string); ok {
-					answerMap["content"] = summarizeAttribute("answer", content, config.maxAttributeBytes)
+					answerMap["content"] = summarizeAttribute("answer", content, contentLimit)
 				}
 				if reasoning, ok := answerMap["reasoning"].(string); ok {
-					answerMap["reasoning"] = summarizeAttribute("reasoning", reasoning, config.maxAttributeBytes)
+					answerMap["reasoning"] = summarizeAttribute("reasoning", reasoning, reasoningLimit)
 				}
 				if newJSON, err := json.Marshal(answerMap); err == nil {
 					aiLog["answer"] = string(newJSON)
+					log.Infof("[AI-STAT-DEBUG] buildAILogRecord answer JSON: len=%d max=%d", len(newJSON), config.maxAttributeBytes)
 				} else {
 					aiLog["answer"] = jsonStr
 				}
@@ -2550,13 +2638,14 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 			// 非 JSON 字符串，包装为固定格式
 			content := fmt.Sprint(v)
 			answerMap := map[string]interface{}{
-				"content":       summarizeAttribute("answer", content, config.maxAttributeBytes),
+				"content":       summarizeAttribute("answer", content, config.maxAttributeBytes*4/10),
 				"function_call": "",
 				"tool_calls":    []interface{}{},
 				"reasoning":     "",
 			}
 			newJSON, _ := json.Marshal(answerMap)
 			aiLog["answer"] = string(newJSON)
+			log.Infof("[AI-STAT-DEBUG] buildAILogRecord answer non-JSON: len=%d", len(newJSON))
 		}
 	} else {
 		// 无 answer，生成空对象
@@ -2804,19 +2893,33 @@ func enforceSizeCap(record *AILogRecord, maxBytes int) {
 			record.AILog[f.key] = str[:targetLen] + "..."
 			truncated = append(truncated, f.key)
 			log.Debugf("[enforceSizeCap] truncated %s: %d -> ~%d bytes", f.key, len(str), targetLen)
+
 		} else if f.key == "answer" {
 			// answer 是 JSON 字符串，尝试解析并缩短内部字段
 			smartTruncated := false
 			if jsonStr, ok := record.AILog[f.key].(string); ok {
 				var answerObj map[string]interface{}
 				if err := json.Unmarshal([]byte(jsonStr), &answerObj); err == nil {
-					half := targetLen / 4
-					if content, ok := answerObj["content"].(string); ok && len(content) > half {
-						answerObj["content"] = content[:half] + "..."
+					// 更激进的截断：content 和 reasoning 各自最多保留 targetLen/6
+					maxContent := targetLen / 6
+					maxReasoning := targetLen / 8
+					if content, ok := answerObj["content"].(string); ok && len(content) > maxContent {
+						if maxContent > 50 {
+							answerObj["content"] = content[:maxContent/2] + "..." + strconv.Itoa(len(content)-maxContent) + "B>" + content[len(content)-maxContent/2:]
+						} else {
+							answerObj["content"] = content[:maxContent] + "..."
+						}
 					}
-					if reasoning, ok := answerObj["reasoning"].(string); ok && len(reasoning) > half {
-						answerObj["reasoning"] = reasoning[:half] + "..."
+					if reasoning, ok := answerObj["reasoning"].(string); ok && len(reasoning) > maxReasoning {
+						if maxReasoning > 50 {
+							answerObj["reasoning"] = reasoning[:maxReasoning/2] + "..." + strconv.Itoa(len(reasoning)-maxReasoning) + "B>" + reasoning[len(reasoning)-maxReasoning/2:]
+						} else {
+							answerObj["reasoning"] = reasoning[:maxReasoning] + "..."
+						}
 					}
+					// 强制清空 tool_calls 和 function_call 以节省空间
+					answerObj["tool_calls"] = []interface{}{}
+					answerObj["function_call"] = ""
 					if newJSON, err := json.Marshal(answerObj); err == nil {
 						record.AILog[f.key] = string(newJSON)
 						smartTruncated = true
