@@ -1547,6 +1547,9 @@ func extractEmbeddingAnswer(body []byte) interface{} {
 
 // extractRerankQuestion 从 Rerank 请求中提取 query 和 documents 组合成 question。
 // 格式: "query: <query>\ndocuments: <N> items\n[0] <doc0>\n[1] <doc1> ..."
+// maxRerankQuestionBytes rerank question 最大字节数（默认 3KB，与 valueLengthLimit 一致）
+const maxRerankQuestionBytes = 3 * 1024
+
 func extractRerankQuestion(body []byte) interface{} {
 	query := gjson.GetBytes(body, QuestionPathRerank)
 	if !query.Exists() || query.String() == "" {
@@ -1567,7 +1570,23 @@ func extractRerankQuestion(body []byte) interface{} {
 		}
 	}
 
-	return buf.String()
+	result := buf.String()
+	// 对超长 rerank question 做截断，保留 query 和文档数量信息
+	if len(result) > maxRerankQuestionBytes {
+		origLen := len(result)
+		// 保留 query 部分，截断 documents
+		queryStr := query.String()
+		truncated := fmt.Sprintf("query: %s\ndocuments: %d items\n[... %d bytes truncated ...]", 
+			queryStr, len(arr), origLen-maxRerankQuestionBytes)
+		if len(truncated) > maxRerankQuestionBytes {
+			// 如果 query 本身超长，直接前端截断
+			truncated = truncated[:maxRerankQuestionBytes] + "..."
+		}
+		log.Infof("[AI-STAT-DEBUG] extractRerankQuestion truncated: %d -> %d", origLen, len(truncated))
+		return truncated
+	}
+
+	return result
 }
 
 // StreamingMessageBuffer 用于流式响应中聚合 content 和 tool_calls
@@ -1798,10 +1817,18 @@ func getBuiltinAttributeFallback(ctx wrapper.HttpContext, config AIStatisticsCon
 				log.Infof("[AI-STAT-DEBUG] question extracted from QuestionPathOpenAI, type=%T len=%d", value, len(fmt.Sprint(value)))
 				return value
 			}
+
 			// Embedding 模型: input 字段（string 或 string array）
 			if value := gjson.GetBytes(body, QuestionPathEmbedding).Value(); value != nil && value != "" {
-				log.Infof("[AI-STAT-DEBUG] question extracted from QuestionPathEmbedding, type=%T len=%d", value, len(fmt.Sprint(value)))
-				return value
+				strValue := fmt.Sprint(value)
+				log.Infof("[AI-STAT-DEBUG] question extracted from QuestionPathEmbedding, type=%T raw len=%d", value, len(strValue))
+				// 如果 input 是数组，可能包含大量文本，需要截断
+				if len(strValue) > config.valueLengthLimit {
+					origLen := len(strValue)
+					strValue = strValue[:config.valueLengthLimit] + "..."
+					log.Infof("[AI-STAT-DEBUG] embedding question truncated: %d -> %d", origLen, len(strValue))
+				}
+				return strValue
 			}
 			// Rerank 模型: 组合 query + documents
 			if value := extractRerankQuestion(body); value != nil && value != "" {
@@ -1878,10 +1905,18 @@ func getBuiltinAttributeFallback(ctx wrapper.HttpContext, config AIStatisticsCon
 				log.Infof("[AI-STAT-DEBUG] answer extracted from Embedding, type=%T len=%d", value, len(fmt.Sprint(value)))
 				return value
 			}
-			// Rerank 模型: results 字段
+
+			// Rerank 模型: results 字段，可能包含大量文档，需要截断
 			if value := gjson.GetBytes(body, AnswerPathRerank).Value(); value != nil && value != "" {
-				log.Infof("[AI-STAT-DEBUG] answer extracted from Rerank, type=%T len=%d", value, len(fmt.Sprint(value)))
-				return value
+				resultStr := fmt.Sprint(value)
+				log.Infof("[AI-STAT-DEBUG] answer extracted from Rerank, type=%T raw len=%d", value, len(resultStr))
+				if len(resultStr) > maxStreamingAnswerBytes {
+					// 对 rerank results 做截断，保留前后各一半
+					half := maxStreamingAnswerBytes / 2
+					resultStr = resultStr[:half] + "..." + strconv.Itoa(len(resultStr)-maxStreamingAnswerBytes) + "B>" + resultStr[len(resultStr)-half:]
+					log.Infof("[AI-STAT-DEBUG] answer Rerank truncated: %d", len(resultStr))
+				}
+				return resultStr
 			}
 			log.Infof("[AI-STAT-DEBUG] answer: all extraction paths failed for source=%s", source)
 		}
