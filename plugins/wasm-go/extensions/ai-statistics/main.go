@@ -2623,6 +2623,14 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 		aiLog["answer"] = string(emptyJSON)
 	}
 
+	// 删除冗余字段：reasoning/tool_calls/function_call 已合并到 answer 中，
+	// 避免日志中出现重复的 reasoning（流式场景下 WriteUserAttributeToLogWithKey
+	// 会把这些字段写入 wasm.ai_log，导致 buildAILogRecord 加载后出现重复）
+	delete(aiLog, "reasoning")
+	delete(aiLog, "tool_calls")
+	delete(aiLog, "function_call")
+	log.Infof("[AI-STAT-DEBUG] removed redundant fields from aiLog: reasoning, tool_calls, function_call")
+
 	record.AILog = aiLog
 
 	// 记录 enforceSizeCap 前后的总大小
