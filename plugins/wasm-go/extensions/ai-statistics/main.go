@@ -1200,20 +1200,11 @@ func onHttpStreamingBody(ctx wrapper.HttpContext, config AIStatisticsConfig, dat
 		responseEndTime := time.Now().UnixMilli()
 		ctx.SetUserAttribute(LLMServiceDuration, responseEndTime-requestStartTime)
 
-		// 从 chunk 缓存中读取 reasoning / tool_calls / function_call，
-		// 写入 user attribute。collectAIAttr 只从 user attribute 读取。
-		if reasoningBuf, ok := ctx.GetContext(CtxStreamingReasoning).(string); ok && reasoningBuf != "" {
-			ctx.SetUserAttribute(BuiltinReasoningKey, reasoningBuf)
-			log.Infof("[AI-STAT-DEBUG] endOfStream reasoning written: len=%d", len(reasoningBuf))
-		}
-		if toolCallsBuf, ok := ctx.GetContext(CtxStreamingToolCallsData).(string); ok && toolCallsBuf != "" {
-			ctx.SetUserAttribute(BuiltinToolCallsKey, toolCallsBuf)
-			log.Infof("[AI-STAT-DEBUG] endOfStream tool_calls written: len=%d", len(toolCallsBuf))
-		}
-		if funcCallBuf, ok := ctx.GetContext(CtxStreamingFuncCallData).(string); ok && funcCallBuf != "" {
-			ctx.SetUserAttribute(BuiltinFunctionCallKey, funcCallBuf)
-			log.Infof("[AI-STAT-DEBUG] endOfStream function_call written: len=%d", len(funcCallBuf))
-		}
+		// 修复：不再单独将 reasoning / tool_calls / function_call 写入 user attribute。
+		// 这些字段将由 extractStreamingMessage 在 setAttributeBySource 处理 answer 时
+		// 从 context 缓存中读取并合并到 answer 的复合 JSON 中。
+		// 这样可以确保 ai_log 中只有 answer 包含这些字段，不会出现平级重复。
+		log.Infof("[AI-STAT-DEBUG] endOfStream: reasoning/tool_calls/function_call will be merged into answer by extractStreamingMessage")
 
 		var streamingBodyBuffer []byte
 		if config.shouldBufferStreamingBody {
@@ -1635,36 +1626,37 @@ func extractStreamingMessage(ctx wrapper.HttpContext, data []byte, rule string) 
 		contentStr = fmt.Sprint(content)
 	}
 
-	// 2. 提取 reasoning
-	reasoningPath1 := "choices.0.delta.reasoning_content"
-	reasoningPath2 := "choices.0.delta.reasoning"
-	reasoning := extractStreamingBodyByJsonPath(data, reasoningPath1, RuleAppend)
-	if reasoning == nil || fmt.Sprint(reasoning) == "" {
-		reasoning = extractStreamingBodyByJsonPath(data, reasoningPath2, RuleAppend)
-	}
+	// 2. 从 context 缓存中读取 reasoning（不再从当前 chunk 提取，避免重复）
 	reasoningStr := ""
-	if reasoning != nil {
-		reasoningStr = fmt.Sprint(reasoning)
+	if reasoningBuf, ok := ctx.GetContext(CtxStreamingReasoning).(string); ok && reasoningBuf != "" {
+		reasoningStr = reasoningBuf
+		log.Infof("[AI-STAT-DEBUG] extractStreamingMessage: reasoning from context cache, len=%d", len(reasoningStr))
 	}
 
-	// 3. 提取 function_call
-	funcNamePath := "choices.0.delta.function_call.name"
-	funcArgsPath := "choices.0.delta.function_call.arguments"
-	funcName := extractStreamingBodyByJsonPath(data, funcNamePath, RuleAppend)
-	funcArgs := extractStreamingBodyByJsonPath(data, funcArgsPath, RuleAppend)
-
+	// 3. 从 context 缓存中读取 function_call
 	funcCallObj := map[string]string{}
-	if funcName != nil && fmt.Sprint(funcName) != "" {
-		funcCallObj["name"] = fmt.Sprint(funcName)
-	}
-	if funcArgs != nil && fmt.Sprint(funcArgs) != "" {
-		funcCallObj["arguments"] = fmt.Sprint(funcArgs)
+	if funcCallBuf, ok := ctx.GetContext(CtxStreamingFuncCallData).(string); ok && funcCallBuf != "" {
+		// 尝试解析缓存的 function_call
+		var fc map[string]interface{}
+		if err := json.Unmarshal([]byte(funcCallBuf), &fc); err == nil {
+			if name, ok := fc["name"].(string); ok {
+				funcCallObj["name"] = name
+			}
+			if args, ok := fc["arguments"].(string); ok {
+				funcCallObj["arguments"] = args
+			}
+		} else {
+			// 非 JSON 格式，直接作为 name 处理
+			funcCallObj["name"] = funcCallBuf
+		}
+		log.Infof("[AI-STAT-DEBUG] extractStreamingMessage: function_call from context cache")
 	}
 
-	// 4. 获取流式 tool_calls buffer（累积所有 chunk）
+	// 4. 从 context 缓存中读取结构化 tool_calls buffer
 	var toolCalls []ToolCall
 	if buffer, ok := ctx.GetContext(CtxStreamingToolCallsBuffer).(*StreamingToolCallsBuffer); ok {
 		toolCalls = getToolCallsFromBuffer(buffer)
+		log.Infof("[AI-STAT-DEBUG] extractStreamingMessage: tool_calls from context buffer, count=%d", len(toolCalls))
 	}
 
 	result := map[string]interface{}{
@@ -1810,42 +1802,22 @@ func getBuiltinAttributeFallback(ctx wrapper.HttpContext, config AIStatisticsCon
 			log.Infof("[AI-STAT-DEBUG] answer: all extraction paths failed for source=%s", source)
 		}
 	case BuiltinToolCallsKey:
+		// 流式场景：不再单独返回 tool_calls，由 extractStreamingMessage 统一合并到 answer 中。
+		// 这样可以避免 ai_log 中出现与 answer 平级的重复 tool_calls。
 		if source == ResponseStreamingBody {
-			var buffer *StreamingToolCallsBuffer
-			if existingBuffer, ok := ctx.GetContext(CtxStreamingToolCallsBuffer).(*StreamingToolCallsBuffer); ok {
-				buffer = existingBuffer
-			}
-			buffer = extractStreamingToolCalls(body, buffer)
-			buffer = extractClaudeStreamingToolCalls(body, buffer)
-			ctx.SetContext(CtxStreamingToolCallsBuffer, buffer)
-
-			toolCalls := getToolCallsFromBuffer(buffer)
-			if len(toolCalls) > 0 {
-				ctx.SetUserAttribute(BuiltinToolCallsKey, toolCalls)
-				return toolCalls
-			}
+			log.Infof("[AI-STAT-DEBUG] getBuiltinFallback: BuiltinToolCallsKey in streaming mode returns nil, will be merged into answer")
+			return nil
 		} else if source == ResponseBody {
 			if value := gjson.GetBytes(body, ToolCallsPathNonStreaming).Value(); value != nil {
 				return value
 			}
 		}
 	case BuiltinReasoningKey:
+		// 流式场景：不再单独返回 reasoning，由 extractStreamingMessage 统一合并到 answer 中。
+		// 这样可以避免 ai_log 中出现与 answer 平级的重复 reasoning。
 		if source == ResponseStreamingBody {
-			// 尝试 delta.reasoning（标准 OpenAI 流式）
-			if value := extractStreamingBodyByJsonPath(body, ReasoningPathStreaming, RuleAppend); value != nil && value != "" {
-				return value
-			}
-			// 尝试 delta.reasoning_content（DeepSeek 格式）
-			if value := extractStreamingBodyByJsonPath(body, ReasoningPathStreamingAlt, RuleAppend); value != nil && value != "" {
-				return value
-			}
-			// 尝试 message.reasoning（某些模型在流式 chunk 中也放在 message 中）
-			if value := extractStreamingBodyByJsonPath(body, "choices.0.message.reasoning", RuleAppend); value != nil && value != "" {
-				return value
-			}
-			if value := extractStreamingBodyByJsonPath(body, "choices.0.message.reasoning_content", RuleAppend); value != nil && value != "" {
-				return value
-			}
+			log.Infof("[AI-STAT-DEBUG] getBuiltinFallback: BuiltinReasoningKey in streaming mode returns nil, will be merged into answer")
+			return nil
 		} else if source == ResponseBody {
 			// 纯 JSON 格式
 			if value := gjson.GetBytes(body, ReasoningPathNonStreaming).Value(); value != nil && value != "" {
@@ -1863,37 +1835,10 @@ func getBuiltinAttributeFallback(ctx wrapper.HttpContext, config AIStatisticsCon
 			}
 		}
 	case BuiltinFunctionCallKey:
+		// 流式场景：不再单独返回 function_call，由 extractStreamingMessage 统一合并到 answer 中。
 		if source == ResponseStreamingBody {
-			// 尝试 delta.function_call（标准 OpenAI 流式）
-			funcName := extractStreamingBodyByJsonPath(body, FunctionCallPathStreamingName, RuleAppend)
-			funcArgs := extractStreamingBodyByJsonPath(body, FunctionCallPathStreamingArgs, RuleAppend)
-			if funcName != nil || funcArgs != nil {
-				fc := map[string]string{}
-				if funcName != nil && fmt.Sprint(funcName) != "" {
-					fc["name"] = fmt.Sprint(funcName)
-				}
-				if funcArgs != nil && fmt.Sprint(funcArgs) != "" {
-					fc["arguments"] = fmt.Sprint(funcArgs)
-				}
-				if jsonBytes, err := json.Marshal(fc); err == nil {
-					return string(jsonBytes)
-				}
-			}
-			// 尝试 message.function_call（某些模型放在 message 中）
-			funcName = extractStreamingBodyByJsonPath(body, "choices.0.message.function_call.name", RuleAppend)
-			funcArgs = extractStreamingBodyByJsonPath(body, "choices.0.message.function_call.arguments", RuleAppend)
-			if funcName != nil || funcArgs != nil {
-				fc := map[string]string{}
-				if funcName != nil && fmt.Sprint(funcName) != "" {
-					fc["name"] = fmt.Sprint(funcName)
-				}
-				if funcArgs != nil && fmt.Sprint(funcArgs) != "" {
-					fc["arguments"] = fmt.Sprint(funcArgs)
-				}
-				if jsonBytes, err := json.Marshal(fc); err == nil {
-					return string(jsonBytes)
-				}
-			}
+			log.Infof("[AI-STAT-DEBUG] getBuiltinFallback: BuiltinFunctionCallKey in streaming mode returns nil, will be merged into answer")
+			return nil
 		} else if source == ResponseBody {
 			// 纯 JSON 格式
 			if value := gjson.GetBytes(body, FunctionCallPathNonStreaming).Value(); value != nil {
@@ -2542,7 +2487,8 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 	}
 	collectAIAttr("question")
 	collectAIAttr("system")
-	// answer / reasoning / tool_calls / function_call 将在下方统一合并为复合 answer JSON 对象
+	// 修复：不再 collect reasoning / tool_calls / function_call 作为独立字段，
+	// 这些字段已经合并到 answer 中，避免 ai_log 中出现重复。
 	collectAIAttr("messages")
 	collectAIAttr("session_id")
 	collectAIAttr("chat_id")
@@ -2554,6 +2500,7 @@ func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILog
 	collectAIAttr("cached_tokens")
 	collectAIAttr("input_token_details")
 	collectAIAttr("output_token_details")
+	log.Infof("[AI-STAT-DEBUG] collectAIAttr: skipping reasoning/tool_calls/function_call (merged into answer)")
 
 	log.Infof("[AI-STAT-DEBUG] before summarize: maxAttributeBytes=%d", config.maxAttributeBytes)
 	for key, val := range aiLog {
