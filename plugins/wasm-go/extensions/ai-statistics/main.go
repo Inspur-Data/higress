@@ -43,6 +43,7 @@ func init() {
 		wrapper.ProcessResponseHeaders(onHttpResponseHeaders),
 		wrapper.ProcessStreamingResponseBody(onHttpStreamingBody),
 		wrapper.ProcessResponseBody(onHttpResponseBody),
+		wrapper.ProcessStreamDone(onHttpStreamDone),
 		wrapper.WithRebuildAfterRequests[AIStatisticsConfig](1000),
 		wrapper.WithRebuildMaxMemBytes[AIStatisticsConfig](200*1024*1024),
 	)
@@ -643,8 +644,14 @@ func isPathEnabled(requestPath string, enabledSuffixes []string) bool {
 	return false
 }
 
+// 修复 #3：放宽 enable_content_types 的默认配置，增加对空 Content-Type 的兜底处理
 func isContentTypeEnabled(contentType string, enabledContentTypes []string) bool {
 	if len(enabledContentTypes) == 0 {
+		return true
+	}
+
+	// 修复：空 Content-Type 默认放行，避免 200 响应因缺少该头被 Skip
+	if strings.TrimSpace(contentType) == "" {
 		return true
 	}
 
@@ -1116,6 +1123,18 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) t
 		log.Debugf("ai-statistics: skipping response for content type %s (not in enabled content types)", contentType)
 		ctx.SetContext(SkipProcessing, true)
 		ctx.DontReadResponseBody()
+
+		// 修复 #2：200 响应即使 SkipProcessing 也要确保基础 ai_log 被输出
+		if !ctx.GetBoolContext(CtxAILogOutput, false) {
+			if statusCodeStr := ctx.GetStringContext(ResponseStatusCode, ""); statusCodeStr != "" {
+				if code, _ := strconv.Atoi(statusCodeStr); code >= 200 && code < 400 {
+					log.Debugf("[AI-LOG] SkipProcessing with 2xx response, outputting success log")
+					outputAILog(ctx, config)
+					ctx.SetContext(CtxAILogOutput, true)
+				}
+			}
+		}
+
 		return types.ActionContinue
 	}
 
@@ -1291,6 +1310,32 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body
 	}
 
 	return types.ActionContinue
+}
+
+// 修复 #4：新增 onHttpStreamDone，在连接断开时强制输出一次 ai_log
+func onHttpStreamDone(ctx wrapper.HttpContext, config AIStatisticsConfig) {
+	if ctx.GetBoolContext(CtxAILogOutput, false) {
+		return
+	}
+
+	log.Debugf("[AI-LOG] stream done without log output, forcing output")
+
+	statusCodeStr := ctx.GetStringContext(ResponseStatusCode, "")
+	if statusCodeStr == "" {
+		statusCodeStr, _ = proxywasm.GetHttpResponseHeader(":status")
+	}
+
+	if statusCodeStr != "" {
+		if code, _ := strconv.Atoi(statusCodeStr); code >= 400 {
+			outputAILogFailure(ctx, config)
+		} else {
+			outputAILog(ctx, config)
+		}
+	} else {
+		// 无状态码，按成功处理（输出基础信息）
+		outputAILog(ctx, config)
+	}
+	ctx.SetContext(CtxAILogOutput, true)
 }
 
 func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, source string, body []byte) {
@@ -3182,16 +3227,24 @@ func isValidIP(ip string) bool {
 	return ip != "" && ip != "unknown" && net.ParseIP(ip) != nil
 }
 
+// 修复 #1：collectBasicAILogInfo 保留请求阶段预写入的 consumer，避免响应阶段 fallback 值覆盖
 func collectBasicAILogInfo(ctx wrapper.HttpContext, aiLog map[string]interface{}, consumer string) {
 	if aiLog == nil {
 		return
 	}
-	// Use the consumer value already extracted in buildAILogRecord.
-	// Do NOT call proxywasm.GetProperty here - repeated GetProperty calls
-	// for the same key within the same function call chain may return empty
-	// values due to Envoy WASM SDK internal caching/lifecycle.
-	aiLog["consumer"] = consumer
-	log.Infof("[AI-STATISTICS-DEBUG] collectBasicAILogInfo: consumer set to: %v", consumer)
+	// 修复：如果 ai_log 中已有请求阶段预写入的有效 consumer，不要覆盖
+	existingConsumer := ""
+	if v, ok := aiLog["consumer"]; ok {
+		existingConsumer = fmt.Sprint(v)
+	}
+	if existingConsumer != "" && existingConsumer != "none" {
+		// 请求阶段已有有效 consumer，保留原值
+		log.Infof("[AI-STATISTICS-DEBUG] collectBasicAILogInfo: preserving request-phase consumer=%s, skipping fallback=%s", existingConsumer, consumer)
+	} else {
+		aiLog["consumer"] = consumer
+		log.Infof("[AI-STATISTICS-DEBUG] collectBasicAILogInfo: consumer set to: %v", consumer)
+	}
+
 	aiLog["route_name"] = ctx.GetStringContext(RouteName, "-")
 	aiLog["cluster_name"] = ctx.GetStringContext(ClusterName, "-")
 	if model := ctx.GetUserAttribute("model"); model != nil {
