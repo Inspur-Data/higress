@@ -587,7 +587,22 @@ func getConsumerFromRequest() string {
 		}
 	}
 
-	log.Infof("[AI-STATISTICS-DEBUG] getConsumerFromRequest: no consumer found in %s or Authorization header", ConsumerKey)
+	log.Errorf("[AI-STATISTICS-DEBUG] getConsumerFromRequest FAILED: no consumer found in %s or Authorization header", ConsumerKey)
+	// 强制打印所有相关请求头用于排查（不依赖 debug 开关）
+	if headers, err := proxywasm.GetHttpRequestHeaders(); err == nil {
+		for _, h := range headers {
+			key := strings.ToLower(h[0])
+			if key == "authorization" || key == "x-api-key" || key == "x-auth-token" || key == strings.ToLower(ConsumerKey) || strings.Contains(key, "auth") || strings.Contains(key, "consumer") {
+				valPreview := h[1]
+				if len(valPreview) > 50 {
+					valPreview = valPreview[:50] + "..."
+				}
+				log.Errorf("[AI-STATISTICS-DEBUG]   header %s=%s", h[0], valPreview)
+			}
+		}
+	} else {
+		log.Errorf("[AI-STATISTICS-DEBUG] getConsumerFromRequest: failed to list headers: %v", err)
+	}
 	return ""
 }
 
@@ -903,7 +918,7 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) ty
 		appendToAILogFilterState(map[string]interface{}{"consumer": consumer})
 		log.Infof("[AI-STATISTICS-DEBUG] consumer pre-written to ai_log filter state")
 	} else {
-		log.Infof("[AI-STATISTICS-DEBUG] consumer not found in %s or Authorization header", ConsumerKey)
+		log.Errorf("[AI-STATISTICS-DEBUG] onHttpRequestHeaders: consumer NOT FOUND for route=%s cluster=%s", route, cluster)
 	}
 
 	// Extract model from URL path in request phase (for APIs where model is in path).
@@ -2555,15 +2570,37 @@ func outputAILogFailure(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 }
 
 func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILogRecord {
-	// Read consumer from Envoy property (stored in request phase via proxywasm.SetProperty).
-	// getConsumerFromRequest() cannot be called here because proxywasm.GetHttpRequestHeader
-	// is not available in response phase to read request headers.
-	consumer := "none"
-	if raw, err := proxywasm.GetProperty([]string{"ai_statistics_consumer"}); err == nil && len(raw) > 0 {
-		consumer = string(raw)
-		log.Infof("[AI-STATISTICS-DEBUG] buildAILogRecord: consumer from property: %s", consumer)
+	// 修复 #1: 优先从 context 读取（request 阶段备份的值最可靠），再读 property
+	consumer := ctx.GetStringContext(CtxConsumerValue, "")
+	consumerSource := "context"
+	if consumer == "" {
+		consumerSource = "property"
+		if raw, err := proxywasm.GetProperty([]string{"ai_statistics_consumer"}); err == nil && len(raw) > 0 {
+			consumer = string(raw)
+		} else {
+			consumerSource = "none"
+			// 打印 error 日志用于排查
+			propErr := err
+			propLen := 0
+			if raw != nil {
+				propLen = len(raw)
+			}
+			log.Errorf("[AI-STATISTICS-DEBUG] buildAILogRecord: consumer EMPTY. ctx_consumer=%q, prop_err=%v, prop_raw_len=%d",
+				ctx.GetStringContext(CtxConsumerValue, "<empty>"), propErr, propLen)
+			route := ctx.GetStringContext(RouteName, "-")
+			cluster := ctx.GetStringContext(ClusterName, "-")
+			statusCode := ctx.GetStringContext(ResponseStatusCode, "0")
+			model := "UNKNOWN"
+			if m := ctx.GetUserAttribute("model"); m != nil {
+				model = fmt.Sprint(m)
+			}
+			log.Errorf("[AI-STATISTICS-DEBUG] buildAILogRecord: consumer empty details: route=%s cluster=%s status=%s model=%s", route, cluster, statusCode, model)
+		}
+	}
+	if consumer == "" {
+		consumer = "none"
 	} else {
-		log.Infof("[AI-STATISTICS-DEBUG] buildAILogRecord: consumer property not found, err=%v", err)
+		log.Infof("[AI-STATISTICS-DEBUG] buildAILogRecord: consumer from %s: %s", consumerSource, consumer)
 	}
 
 	record := &AILogRecord{
