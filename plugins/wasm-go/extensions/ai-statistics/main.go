@@ -43,7 +43,6 @@ func init() {
 		wrapper.ProcessResponseHeaders(onHttpResponseHeaders),
 		wrapper.ProcessStreamingResponseBody(onHttpStreamingBody),
 		wrapper.ProcessResponseBody(onHttpResponseBody),
-		wrapper.ProcessStreamDone(onHttpStreamDone),
 		wrapper.WithRebuildAfterRequests[AIStatisticsConfig](1000),
 		wrapper.WithRebuildMaxMemBytes[AIStatisticsConfig](200*1024*1024),
 	)
@@ -588,22 +587,7 @@ func getConsumerFromRequest() string {
 		}
 	}
 
-	log.Errorf("[AI-STATISTICS-DEBUG] getConsumerFromRequest FAILED: no consumer found in %s or Authorization header", ConsumerKey)
-	// 强制打印所有相关请求头用于排查（不依赖 debug 开关）
-	if headers, err := proxywasm.GetHttpRequestHeaders(); err == nil {
-		for _, h := range headers {
-			key := strings.ToLower(h[0])
-			if key == "authorization" || key == "x-api-key" || key == "x-auth-token" || key == strings.ToLower(ConsumerKey) || strings.Contains(key, "auth") || strings.Contains(key, "consumer") {
-				valPreview := h[1]
-				if len(valPreview) > 50 {
-					valPreview = valPreview[:50] + "..."
-				}
-				log.Errorf("[AI-STATISTICS-DEBUG]   header %s=%s", h[0], valPreview)
-			}
-		}
-	} else {
-		log.Errorf("[AI-STATISTICS-DEBUG] getConsumerFromRequest: failed to list headers: %v", err)
-	}
+	log.Infof("[AI-STATISTICS-DEBUG] getConsumerFromRequest: no consumer found in %s or Authorization header", ConsumerKey)
 	return ""
 }
 
@@ -644,14 +628,8 @@ func isPathEnabled(requestPath string, enabledSuffixes []string) bool {
 	return false
 }
 
-// 修复 #3：放宽 enable_content_types 的默认配置，增加对空 Content-Type 的兜底处理
 func isContentTypeEnabled(contentType string, enabledContentTypes []string) bool {
 	if len(enabledContentTypes) == 0 {
-		return true
-	}
-
-	// 修复：空 Content-Type 默认放行，避免 200 响应因缺少该头被 Skip
-	if strings.TrimSpace(contentType) == "" {
 		return true
 	}
 
@@ -925,7 +903,7 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) ty
 		appendToAILogFilterState(map[string]interface{}{"consumer": consumer})
 		log.Infof("[AI-STATISTICS-DEBUG] consumer pre-written to ai_log filter state")
 	} else {
-		log.Errorf("[AI-STATISTICS-DEBUG] onHttpRequestHeaders: consumer NOT FOUND for route=%s cluster=%s", route, cluster)
+		log.Infof("[AI-STATISTICS-DEBUG] consumer not found in %s or Authorization header", ConsumerKey)
 	}
 
 	// Extract model from URL path in request phase (for APIs where model is in path).
@@ -1123,18 +1101,6 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) t
 		log.Debugf("ai-statistics: skipping response for content type %s (not in enabled content types)", contentType)
 		ctx.SetContext(SkipProcessing, true)
 		ctx.DontReadResponseBody()
-
-		// 修复 #2：200 响应即使 SkipProcessing 也要确保基础 ai_log 被输出
-		if !ctx.GetBoolContext(CtxAILogOutput, false) {
-			if statusCodeStr := ctx.GetStringContext(ResponseStatusCode, ""); statusCodeStr != "" {
-				if code, _ := strconv.Atoi(statusCodeStr); code >= 200 && code < 400 {
-					log.Debugf("[AI-LOG] SkipProcessing with 2xx response, outputting success log")
-					outputAILog(ctx, config)
-					ctx.SetContext(CtxAILogOutput, true)
-				}
-			}
-		}
-
 		return types.ActionContinue
 	}
 
@@ -1310,32 +1276,6 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body
 	}
 
 	return types.ActionContinue
-}
-
-// 修复 #4：新增 onHttpStreamDone，在连接断开时强制输出一次 ai_log
-func onHttpStreamDone(ctx wrapper.HttpContext, config AIStatisticsConfig) {
-	if ctx.GetBoolContext(CtxAILogOutput, false) {
-		return
-	}
-
-	log.Debugf("[AI-LOG] stream done without log output, forcing output")
-
-	statusCodeStr := ctx.GetStringContext(ResponseStatusCode, "")
-	if statusCodeStr == "" {
-		statusCodeStr, _ = proxywasm.GetHttpResponseHeader(":status")
-	}
-
-	if statusCodeStr != "" {
-		if code, _ := strconv.Atoi(statusCodeStr); code >= 400 {
-			outputAILogFailure(ctx, config)
-		} else {
-			outputAILog(ctx, config)
-		}
-	} else {
-		// 无状态码，按成功处理（输出基础信息）
-		outputAILog(ctx, config)
-	}
-	ctx.SetContext(CtxAILogOutput, true)
 }
 
 func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, source string, body []byte) {
@@ -2615,37 +2555,15 @@ func outputAILogFailure(ctx wrapper.HttpContext, config AIStatisticsConfig) {
 }
 
 func buildAILogRecord(ctx wrapper.HttpContext, config AIStatisticsConfig) *AILogRecord {
-	// 修复 #1: 优先从 context 读取（request 阶段备份的值最可靠），再读 property
-	consumer := ctx.GetStringContext(CtxConsumerValue, "")
-	consumerSource := "context"
-	if consumer == "" {
-		consumerSource = "property"
-		if raw, err := proxywasm.GetProperty([]string{"ai_statistics_consumer"}); err == nil && len(raw) > 0 {
-			consumer = string(raw)
-		} else {
-			consumerSource = "none"
-			// 打印 error 日志用于排查
-			propErr := err
-			propLen := 0
-			if raw != nil {
-				propLen = len(raw)
-			}
-			log.Errorf("[AI-STATISTICS-DEBUG] buildAILogRecord: consumer EMPTY. ctx_consumer=%q, prop_err=%v, prop_raw_len=%d",
-				ctx.GetStringContext(CtxConsumerValue, "<empty>"), propErr, propLen)
-			route := ctx.GetStringContext(RouteName, "-")
-			cluster := ctx.GetStringContext(ClusterName, "-")
-			statusCode := ctx.GetStringContext(ResponseStatusCode, "0")
-			model := "UNKNOWN"
-			if m := ctx.GetUserAttribute("model"); m != nil {
-				model = fmt.Sprint(m)
-			}
-			log.Errorf("[AI-STATISTICS-DEBUG] buildAILogRecord: consumer empty details: route=%s cluster=%s status=%s model=%s", route, cluster, statusCode, model)
-		}
-	}
-	if consumer == "" {
-		consumer = "none"
+	// Read consumer from Envoy property (stored in request phase via proxywasm.SetProperty).
+	// getConsumerFromRequest() cannot be called here because proxywasm.GetHttpRequestHeader
+	// is not available in response phase to read request headers.
+	consumer := "none"
+	if raw, err := proxywasm.GetProperty([]string{"ai_statistics_consumer"}); err == nil && len(raw) > 0 {
+		consumer = string(raw)
+		log.Infof("[AI-STATISTICS-DEBUG] buildAILogRecord: consumer from property: %s", consumer)
 	} else {
-		log.Infof("[AI-STATISTICS-DEBUG] buildAILogRecord: consumer from %s: %s", consumerSource, consumer)
+		log.Infof("[AI-STATISTICS-DEBUG] buildAILogRecord: consumer property not found, err=%v", err)
 	}
 
 	record := &AILogRecord{
@@ -3227,24 +3145,16 @@ func isValidIP(ip string) bool {
 	return ip != "" && ip != "unknown" && net.ParseIP(ip) != nil
 }
 
-// 修复 #1：collectBasicAILogInfo 保留请求阶段预写入的 consumer，避免响应阶段 fallback 值覆盖
 func collectBasicAILogInfo(ctx wrapper.HttpContext, aiLog map[string]interface{}, consumer string) {
 	if aiLog == nil {
 		return
 	}
-	// 修复：如果 ai_log 中已有请求阶段预写入的有效 consumer，不要覆盖
-	existingConsumer := ""
-	if v, ok := aiLog["consumer"]; ok {
-		existingConsumer = fmt.Sprint(v)
-	}
-	if existingConsumer != "" && existingConsumer != "none" {
-		// 请求阶段已有有效 consumer，保留原值
-		log.Infof("[AI-STATISTICS-DEBUG] collectBasicAILogInfo: preserving request-phase consumer=%s, skipping fallback=%s", existingConsumer, consumer)
-	} else {
-		aiLog["consumer"] = consumer
-		log.Infof("[AI-STATISTICS-DEBUG] collectBasicAILogInfo: consumer set to: %v", consumer)
-	}
-
+	// Use the consumer value already extracted in buildAILogRecord.
+	// Do NOT call proxywasm.GetProperty here - repeated GetProperty calls
+	// for the same key within the same function call chain may return empty
+	// values due to Envoy WASM SDK internal caching/lifecycle.
+	aiLog["consumer"] = consumer
+	log.Infof("[AI-STATISTICS-DEBUG] collectBasicAILogInfo: consumer set to: %v", consumer)
 	aiLog["route_name"] = ctx.GetStringContext(RouteName, "-")
 	aiLog["cluster_name"] = ctx.GetStringContext(ClusterName, "-")
 	if model := ctx.GetUserAttribute("model"); model != nil {
