@@ -34,7 +34,7 @@ jobs:
       RUST_VERSION: 1.82
       GO_VERSION: 1.19
       TINYGO_VERSION: 0.28.1
-      ORAS_VERSION: 1.0.0
+      ORAS_VERSION: 0.16.0
     steps:
       - name: Set plugin_type, plugin_name and version from inputs or ref_name
         id: set_vars
@@ -142,9 +142,8 @@ jobs:
           oras push ${target_image_latest} ${push_command}
           "
           else
-
           command="
-          echo "unkown type ${PLUGIN_TYPE}"
+          echo \"unknown type ${PLUGIN_TYPE}\"
           "
           fi
           docker exec builder bash -c "$command"
