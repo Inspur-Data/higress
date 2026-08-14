@@ -1,6 +1,5 @@
 name: Build and Push Wasm Plugin Image
 
-# 触发条件
 on:
   push:
     branches:
@@ -45,21 +44,29 @@ jobs:
             version="${{ github.event.inputs.version }}"
           else
             ref_name=${{ github.ref_name }}
-            plugin_type=${ref_name#*-} # 删除插件类型前面的字段(wasm-)
-            plugin_type=${plugin_type%%-*} # 删除插件类型后面的字段(-{plugin_name}-vX.Y.Z)
-            plugin_name=${ref_name#*-*-} # 删除插件名前面的字段(wasm-go-)
-            plugin_name=${plugin_name%-*} # 删除插件名后面的字段(-vX.Y.Z)
+            plugin_type=${ref_name#*-}
+            plugin_type=${plugin_type%%-*}
+            plugin_name=${ref_name#*-*-}
+            plugin_name=${plugin_name%-*}
             version=$(echo "$ref_name" | awk -F'v' '{print $2}')
           fi
+          
           if [[ "$plugin_type" == "rust" ]]; then
             builder_image="higress-registry.cn-hangzhou.cr.aliyuncs.com/plugins/wasm-rust-builder:rust${{ env.RUST_VERSION }}-oras${{ env.ORAS_VERSION }}"
           else
             builder_image="higress-registry.cn-hangzhou.cr.aliyuncs.com/plugins/wasm-go-builder:go${{ env.GO_VERSION }}-tinygo${{ env.TINYGO_VERSION }}-oras${{ env.ORAS_VERSION }}"
           fi
+          
           echo "PLUGIN_TYPE=$plugin_type" >> $GITHUB_ENV
           echo "PLUGIN_NAME=$plugin_name" >> $GITHUB_ENV
           echo "VERSION=$version" >> $GITHUB_ENV
           echo "BUILDER_IMAGE=$builder_image" >> $GITHUB_ENV
+          
+          echo "======== Build Info ========"
+          echo "Plugin Type: $plugin_type"
+          echo "Plugin Name: $plugin_name"
+          echo "Version: $version"
+          echo "Builder Image: $builder_image"
 
       - name: Checkout code
         uses: actions/checkout@v3
@@ -69,81 +76,99 @@ jobs:
           workspace=${{ github.workspace }}/plugins/wasm-${PLUGIN_TYPE}/extensions/${PLUGIN_NAME}
           push_command="./plugin.tar.gz:application/vnd.oci.image.layer.v1.tar+gzip"
           echo "PUSH_COMMAND_ORIGIN=\"$push_command\""
-          # 查找spec.yaml
+          
           if [ -f "${workspace}/spec.yaml" ]; then
             echo "spec.yaml exists"
             push_command="./spec.yaml:application/vnd.module.wasm.spec.v1+yaml $push_command "
           fi
 
-          # 查找README.md
           if [ -f "${workspace}/README.md" ];then
-              echo "README.md exists"
-             # push_command="./README.md:application/vnd.module.wasm.doc.v1+markdown $push_command "
+            echo "README.md exists"
           fi
           
-          # 查找README_{lang}.md
           for file in ${workspace}/README_*.md; do
             if [ -f "$file" ]; then
               file_name=$(basename $file)
               echo "$file_name exists"
               lang=$(basename $file | sed 's/README_//; s/.md//')
-            #  push_command="./$file_name:application/vnd.module.wasm.doc.v1.$lang+markdown $push_command "
             fi
           done
 
           echo "PUSH_COMMAND=\"$push_command\"" >> $GITHUB_ENV
+
+      - name: Debug - Check Builder Image
+        run: |
+          echo "Builder Image: ${{ env.BUILDER_IMAGE }}"
+          docker pull ${{ env.BUILDER_IMAGE }} || echo "Warning: Failed to pull builder image"
         
       - name: Run a wasm-builder
         env: 
           PLUGIN_NAME: ${{ env.PLUGIN_NAME }}
           BUILDER_IMAGE: ${{ env.BUILDER_IMAGE }}
         run: |
-          docker run -itd --name builder -v ${{ github.workspace }}:/workspace -e PLUGIN_NAME=${{ env.PLUGIN_NAME }} --rm ${{ env.BUILDER_IMAGE }} /bin/bash
+          docker run -itd --name builder -v ${{ github.workspace }}:/workspace -e PLUGIN_NAME=${{ env.PLUGIN_NAME }} ${{ env.BUILDER_IMAGE }} /bin/bash
+
+      - name: Debug - Check ORAS Version
+        run: |
+          docker exec builder oras version || echo "ORAS not found"
+          docker exec builder which oras || echo "oras command not found"
 
       - name: Build Image and Push
         run: |
           push_command=${{ env.PUSH_COMMAND }}
           push_command=${push_command#\"}
-          push_command=${push_command%\"} # 删除PUSH_COMMAND中的双引号，确保oras push正常解析
+          push_command=${push_command%\"}
           
           target_image="${{ env.IMAGE_REGISTRY_SERVICE }}/${{ env.IMAGE_REPOSITORY}}/${{ env.PLUGIN_NAME }}:${{ env.VERSION }}"
           target_image_latest="${{ env.IMAGE_REGISTRY_SERVICE }}/${{ env.IMAGE_REPOSITORY}}/${{ env.PLUGIN_NAME }}:latest"
-          echo "TargetImage=${target_image}"
-          echo "TargetImageLatest=${target_image_latest}"
+          
+          echo "======== Push Info ========"
+          echo "Target Image: ${target_image}"
+          echo "Target Image Latest: ${target_image_latest}"
+          echo "Push Command: ${push_command}"
 
           cd ${{ github.workspace }}/plugins/wasm-${PLUGIN_TYPE}/extensions/${PLUGIN_NAME}
+          
           if [ -f ./.buildrc ]; then
             echo 'Found .buildrc file, sourcing it...'
             . ./.buildrc
           else
             echo '.buildrc file not found'
           fi
+          
           echo "EXTRA_TAGS=${EXTRA_TAGS}"
+          
           if [ "${PLUGIN_TYPE}" == "go" ]; then
           command="
-          set -e
+          set -ex
           cd /workspace/plugins/wasm-go/extensions/${PLUGIN_NAME}
           go mod tidy
           tinygo build -o ./plugin.wasm -scheduler=none -target=wasi -gc=custom -tags=\"custommalloc nottinygc_finalizer ${EXTRA_TAGS}\" .
           tar czvf plugin.tar.gz plugin.wasm
+          ls -lh plugin.tar.gz plugin.wasm
           echo ${{ secrets.PASSWORD_ALI }} | oras login -u ${{ secrets.USERNAME_ALI }} --password-stdin ${{ env.IMAGE_REGISTRY_SERVICE }}
+          oras version
           oras push ${target_image} ${push_command}
           oras push ${target_image_latest} ${push_command}
           "
           elif [ "${PLUGIN_TYPE}" == "rust" ]; then
           command="
-          set -e
+          set -ex
           cd /workspace/plugins/wasm-rust/extensions/${PLUGIN_NAME}
           cargo build --target wasm32-wasi --release
           cp target/wasm32-wasi/release/*.wasm plugin.wasm
           tar czvf plugin.tar.gz plugin.wasm
+          ls -lh plugin.tar.gz plugin.wasm
           echo ${{ secrets.PASSWORD_ALI }} | oras login -u ${{ secrets.USERNAME_ALI }} --password-stdin ${{ env.IMAGE_REGISTRY_SERVICE }}
+          oras version
           oras push ${target_image} ${push_command}
           oras push ${target_image_latest} ${push_command}
           "
           else
           command="
           echo \"unknown type ${PLUGIN_TYPE}\"
+          exit 1
           "
           fi
+          
           docker exec builder bash -c "$command"
