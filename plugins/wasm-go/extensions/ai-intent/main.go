@@ -20,8 +20,9 @@ import (
 )
 
 const (
-	DefaultPrompt  = "你是一个智能类别识别助手，负责根据用户提出的问题和预设的类别，确定问题属于哪个预设的类别，并给出相应的类别。用户提出的问题为:'%s',预设的类别为'%s'，直接返回一种具体类别，如果没有找到就返回'NotFound'。"
-	defaultTimeout = 10 * 1000 // ms
+	DefaultPrompt        = "你是一个智能类别识别助手，负责根据用户提出的问题和预设的类别，确定问题属于哪个预设的类别，并给出相应的类别。用户提出的问题为:'%s',预设的类别为'%s'，直接返回一种具体类别，如果没有找到就返回'NotFound'。"
+	defaultTimeout       = 10 * 1000           // ms
+	IntentCategoryHeader = "X-Intent-Category" // 标识意图类别的请求头，可用于后续路由转发
 )
 
 func main() {}
@@ -247,6 +248,12 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte
 							if proErr != nil {
 								log.Errorf("llmProxyClient proxywasm SetProperty error: %s", proErr.Error())
 							}
+							// 同时添加请求头，便于后续根据意图进行路由转发
+							headerErr := proxywasm.AddHttpRequestHeader(IntentCategoryHeader, config.SceneInfo.CategoryArr[i])
+							if headerErr != nil {
+								log.Errorf("llmProxyClient proxywasm AddHttpRequestHeader error: %s", headerErr.Error())
+							}
+							log.Infof("llmProxyClient intent category set to header %s: %s", IntentCategoryHeader, config.SceneInfo.CategoryArr[i])
 							break
 						}
 					}
