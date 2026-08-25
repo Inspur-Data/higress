@@ -199,9 +199,9 @@ func parseConfig(json gjson.Result, c *PluginConfig, log log.Log) error {
 }
 
 func onHttpRequestHeaders(ctx wrapper.HttpContext, config PluginConfig, log log.Log) types.Action {
-	ctx.DisableReroute()
+	// 不调用 ctx.DisableReroute()，允许 Envoy 在请求头被修改后重新计算路由
+	// 这样后续添加的 X-Intent-Category 请求头才能触发 HTTPRoute 重新匹配
 	log.Debug("start onHttpRequestHeaders function.")
-
 	log.Debug("end onHttpRequestHeaders function.")
 	return types.HeaderStopIteration
 }
@@ -219,6 +219,7 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte
 	proxyUrl, proxyRequestBody, proxyRequestHeader := generateProxyRequest(&config, []string{string(promptStr)}, log)
 	log.Infof("[onHttpRequestBody] proxyUrl is:  %s", proxyUrl)
 	log.Infof("[onHttpRequestBody] proxyRequestBody is:  %s", string(proxyRequestBody))
+	log.Infof("[onHttpRequestBody] ProxyClient cluster name:  %s", config.LLMInfo.ProxyClient.ClusterName())
 	//调用大模型 获取意向类型
 	llmProxyErr := config.LLMInfo.ProxyClient.Post(
 		proxyUrl,
@@ -229,12 +230,16 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte
 			log.Infof("llm.llmProxyClient statusCode is:%s", statusCode)
 			log.Infof("llm.llmProxyClient intent responseBody is: %s", string(responseBody))
 			if statusCode == 200 {
-				proxyResponseBody, _ := proxyResponseHandler(responseBody, log)
+				proxyResponseBody, respErr := proxyResponseHandler(responseBody, log)
+				if respErr != nil {
+					log.Errorf("[ai-intent] response body parse error: %s, raw: %s", respErr.Error(), string(responseBody))
+				}
 				//大模型返回的识别到的意图类型
 				if nil != proxyResponseBody && nil != proxyResponseBody.Choices && len(proxyResponseBody.Choices) > 0 {
 					category := proxyResponseBody.Choices[0].Message.Content
-					log.Infof("llmProxyClient intent response category is: %s", category)
+					log.Infof("[ai-intent] LLM response category: %s", category)
 					//验证返回结果是否为 定义的枚举值结果集合，判断返回结果是否在预设的类型中。
+					matched := false
 					for i := range config.SceneInfo.CategoryArr {
 						//防止空格、空字符串
 						if strings.TrimSpace(config.SceneInfo.CategoryArr[i]) == "" {
@@ -243,21 +248,31 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte
 						//2种判定条件，1.返回的category与该预设的场景完全一致 2.返回的category包含该预设的场景
 						if config.SceneInfo.CategoryArr[i] == category || strings.Contains(category, config.SceneInfo.CategoryArr[i]) {
 							// 把意图类型加入到Property中
-							log.Debug("llmProxyClient intent category set to Property")
+							log.Infof("[ai-intent] category matched: %s, setting Property and Header", config.SceneInfo.CategoryArr[i])
 							proErr := proxywasm.SetProperty([]string{"intent_category"}, []byte(config.SceneInfo.CategoryArr[i]))
 							if proErr != nil {
-								log.Errorf("llmProxyClient proxywasm SetProperty error: %s", proErr.Error())
+								log.Errorf("[ai-intent] SetProperty error: %s", proErr.Error())
 							}
 							// 同时添加请求头，便于后续根据意图进行路由转发
 							headerErr := proxywasm.AddHttpRequestHeader(IntentCategoryHeader, config.SceneInfo.CategoryArr[i])
 							if headerErr != nil {
-								log.Errorf("llmProxyClient proxywasm AddHttpRequestHeader error: %s", headerErr.Error())
+								log.Errorf("[ai-intent] AddHttpRequestHeader error: %s", headerErr.Error())
 							}
-							log.Infof("llmProxyClient intent category set to header %s: %s", IntentCategoryHeader, config.SceneInfo.CategoryArr[i])
+							log.Infof("[ai-intent] header %s set to: %s", IntentCategoryHeader, config.SceneInfo.CategoryArr[i])
+							// 显式开启路由缓存清除，确保 Envoy 在 ResumeHttpRequest 时基于新请求头重新匹配路由
+							_ = proxywasm.SetProperty([]string{"clear_route_cache"}, []byte("on"))
+							matched = true
 							break
 						}
 					}
+					if !matched {
+						log.Warnf("[ai-intent] no category matched! LLM returned: '%s', preset categories: %v", category, config.SceneInfo.CategoryArr)
+					}
+				} else {
+					log.Warnf("[ai-intent] LLM response has no choices, raw: %s", string(responseBody))
 				}
+			} else {
+				log.Errorf("[ai-intent] LLM proxy returned non-200 status: %d, body: %s", statusCode, string(responseBody))
 			}
 			_ = proxywasm.ResumeHttpRequest()
 			return
