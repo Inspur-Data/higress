@@ -24,8 +24,59 @@ func TestParseConfig_Valid(t *testing.T) {
 	if lb.ClusterHeader != DefaultClusterHeader {
 		t.Errorf("expected default cluster_header %q, got %q", DefaultClusterHeader, lb.ClusterHeader)
 	}
+	if lb.HashSource != HashSourceHeader {
+		t.Errorf("expected default hash_source %q, got %q", HashSourceHeader, lb.HashSource)
+	}
 	if len(lb.slots) != 100 {
 		t.Errorf("expected 100 slots, got %d", len(lb.slots))
+	}
+}
+
+func TestParseConfig_HashSourceSourceIP(t *testing.T) {
+	json := gjson.Parse(`{
+		"hash_source": "source_ip",
+		"clusters": [
+			{"cluster": "outbound|443||llm-a.internal.dns", "weight": 100}
+		]
+	}`)
+	lb, err := NewClusterHashLoadBalancer(json)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if lb.HashSource != HashSourceSourceIP {
+		t.Errorf("expected hash_source %q, got %q", HashSourceSourceIP, lb.HashSource)
+	}
+}
+
+func TestParseConfig_InvalidHashSource(t *testing.T) {
+	json := gjson.Parse(`{
+		"hash_source": "cookie",
+		"clusters": [
+			{"cluster": "outbound|443||llm-a.internal.dns", "weight": 100}
+		]
+	}`)
+	if _, err := NewClusterHashLoadBalancer(json); err == nil {
+		t.Fatal("expected error for unsupported hash_source")
+	}
+}
+
+func TestExtractIP(t *testing.T) {
+	cases := []struct {
+		name   string
+		input  string
+		expect string
+	}{
+		{"ipv4_with_port", "1.2.3.4:5678", "1.2.3.4"},
+		{"ipv4_without_port", "1.2.3.4", "1.2.3.4"},
+		{"ipv6_with_port", "[::1]:8080", "::1"},
+		{"ipv6_without_port", "::1", "::1"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := extractIP(c.input); got != c.expect {
+				t.Errorf("extractIP(%q) = %q, want %q", c.input, got, c.expect)
+			}
+		})
 	}
 }
 

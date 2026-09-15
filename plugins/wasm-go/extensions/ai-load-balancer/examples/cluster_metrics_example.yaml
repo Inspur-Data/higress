@@ -1,0 +1,91 @@
+apiVersion: extensions.higress.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: ai-load-balancer
+  namespace: higress-system
+spec:
+  # Wasm 插件镜像地址，请根据实际环境替换
+  url: oci://higress-registry.cn-hangzhou.cr.aliyuncs.com/plugins/ai-load-balancer:1.0.0
+  pluginName: ai-load-balancer
+  phase: STATS
+  priority: 10
+  defaultConfig:
+    # 负载均衡类型: cluster | endpoint
+    lb_type: cluster
+    # cluster 类型下的策略: cluster_metrics | cluster_hash
+    lb_policy: cluster_metrics
+    # cluster_metrics 策略的详细配置
+    lb_config:
+      # 调度模式，目前支持 AdaptiveScore
+      mode: AdaptiveScore
+
+      # ========== 基础配置 ==========
+
+      # 服务列表（必填），填写实际的 service name
+      service_list:
+        - openai-service
+        - qwen-service
+        - deepseek-service
+
+      # 请求头名称，用于标识目标 cluster，默认 x-higress-target-cluster
+      # cluster_header: x-higress-target-cluster
+
+      # 请求速率限制比例（0, 1]，单个 service 的请求占比低于此阈值时才参与调度
+      # 默认 1.0（不限制），设为 0.6 表示只有请求占比低于 60% 的 service 才可被选中
+      # rate_limit: 1.0
+
+      # 延迟历史队列大小，默认 100
+      # queue_size: 100
+
+      # ========== AdaptiveScore 评分参数 ==========
+
+      # EWMA 平滑系数 [0, 1]，越大越关注近期数据，默认 0.5
+      # ewma_beta: 0.5
+
+      # P2C（Power of Two Choices）采样数量，默认 2
+      # p2c_choices: 2
+
+      # TTFT（首包延迟）评分权重，默认 0.7
+      # ttft_weight: 0.7
+
+      # 总延迟评分权重，默认 0.3
+      # total_latency_weight: 0.3
+      # 注意: ttft_weight 和 total_latency_weight 不能同时为 0
+
+      # 错误惩罚系数，默认 3.0
+      # error_penalty: 3.0
+
+      # 失败冷却时间（毫秒），连续错误后在该冷却期内增加惩罚，默认 30000
+      # failure_cooldown_ms: 30000
+
+      # 无历史数据时的降级策略，目前支持 least_busy（按并发数最少选择）
+      # metrics_missing_policy: least_busy
+
+      # ========== 全局 Inflight 配置（跨网关实例共享，需要 Redis）==========
+
+      # 是否启用全局 inflight 统计，默认 false
+      # global_inflight_enabled: false
+
+      # Redis 中 inflight 计数的 key 前缀，默认 higress:adaptive_score_inflight
+      # global_inflight_key_prefix: higress:adaptive_score_inflight
+
+      # Redis 操作超时时间（毫秒），默认 3000
+      # global_inflight_timeout: 3000
+
+      # Redis key 的 TTL（秒），默认 1800
+      # global_inflight_key_ttl: 1800
+
+      # Redis 服务 FQDN（启用 global_inflight 时必填）
+      # serviceFQDN: redis.default.svc.cluster.local
+
+      # Redis 服务端口（启用 global_inflight 时必填）
+      # servicePort: 6379
+
+      # Redis 用户名（可选）
+      # username: ""
+
+      # Redis 密码（可选）
+      # password: ""
+
+      # Redis 数据库编号（可选，默认 0）
+      # database: 0

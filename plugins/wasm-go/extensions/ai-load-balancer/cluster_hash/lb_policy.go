@@ -3,6 +3,8 @@ package cluster_hash
 import (
 	"fmt"
 	"hash/fnv"
+	"net"
+	"strings"
 
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
@@ -14,6 +16,10 @@ import (
 const (
 	DefaultHashHeader    = "x-mse-consumer"
 	DefaultClusterHeader = "x-higress-target-cluster"
+
+	// hash_source 取值
+	HashSourceHeader   = "header"    // 默认，从 hash_header 指定的请求头取值
+	HashSourceSourceIP = "source_ip" // 从连接源 IP（source.address 属性）取值
 )
 
 type clusterEntry struct {
@@ -22,6 +28,7 @@ type clusterEntry struct {
 }
 
 type ClusterHashLoadBalancer struct {
+	HashSource    string
 	HashHeader    string
 	ClusterHeader string
 	// slots is expanded from clusters by weight, length == 100.
@@ -30,6 +37,16 @@ type ClusterHashLoadBalancer struct {
 
 func NewClusterHashLoadBalancer(json gjson.Result) (ClusterHashLoadBalancer, error) {
 	lb := ClusterHashLoadBalancer{}
+
+	lb.HashSource = json.Get("hash_source").String()
+	if lb.HashSource == "" {
+		lb.HashSource = HashSourceHeader
+	}
+	switch lb.HashSource {
+	case HashSourceSourceIP, HashSourceHeader:
+	default:
+		return lb, fmt.Errorf("hash_source %s is not supported", lb.HashSource)
+	}
 
 	lb.HashHeader = json.Get("hash_header").String()
 	if lb.HashHeader == "" {
@@ -86,11 +103,35 @@ func (lb ClusterHashLoadBalancer) selectCluster(hashKey string) string {
 }
 
 func (lb ClusterHashLoadBalancer) HandleHttpRequestHeaders(ctx wrapper.HttpContext) types.Action {
-	hashKey, err := proxywasm.GetHttpRequestHeader(lb.HashHeader)
-	if err != nil || hashKey == "" {
-		log.Warnf("[ai-load-balancer/cluster_hash] missing hash header %q, rejecting request", lb.HashHeader)
-		_ = proxywasm.SendHttpResponse(403, nil, []byte("hash header required"), -1)
-		return types.ActionPause
+	var (
+		hashKey string
+		err     error
+	)
+
+	switch lb.HashSource {
+	case HashSourceSourceIP:
+		// 从连接源地址属性获取直连上一跳的 IP:PORT，形如 "1.2.3.4:56789" 或 "[::1]:56789"
+		bs, err := proxywasm.GetProperty([]string{"source", "address"})
+		if err != nil || len(bs) == 0 {
+			log.Warnf("[ai-load-balancer/cluster_hash] missing source address, rejecting request")
+			_ = proxywasm.SendHttpResponse(403, nil, []byte("source address required"), -1)
+			return types.ActionPause
+		}
+		hashKey = extractIP(string(bs))
+		if hashKey == "" {
+			log.Warnf("[ai-load-balancer/cluster_hash] invalid source address %q, rejecting request", string(bs))
+			_ = proxywasm.SendHttpResponse(403, nil, []byte("source address required"), -1)
+			return types.ActionPause
+		}
+		// 打印源 IP，方便定位请求来源与路由结果
+		log.Infof("[ai-load-balancer/cluster_hash] source address %q -> source ip %q", string(bs), hashKey)
+	default: // HashSourceHeader，读取 hash_header 指定的请求头
+		hashKey, err = proxywasm.GetHttpRequestHeader(lb.HashHeader)
+		if err != nil || hashKey == "" {
+			log.Warnf("[ai-load-balancer/cluster_hash] missing hash header %q, rejecting request", lb.HashHeader)
+			_ = proxywasm.SendHttpResponse(403, nil, []byte("hash header required"), -1)
+			return types.ActionPause
+		}
 	}
 
 	cluster := lb.selectCluster(hashKey)
@@ -100,8 +141,17 @@ func (lb ClusterHashLoadBalancer) HandleHttpRequestHeaders(ctx wrapper.HttpConte
 		return types.ActionPause
 	}
 
-	log.Debugf("[ai-load-balancer/cluster_hash] %s=%s -> %s=%s", lb.HashHeader, hashKey, lb.ClusterHeader, cluster)
+	log.Debugf("[ai-load-balancer/cluster_hash] source=%s hashKey=%s -> %s=%s", lb.HashSource, hashKey, lb.ClusterHeader, cluster)
 	return types.ActionContinue
+}
+
+// extractIP 从 "IP:PORT" 中提取纯 IP，兼容 IPv4 与 IPv6：
+// "1.2.3.4:5678" -> "1.2.3.4"，"[::1]:8080" -> "::1"
+func extractIP(address string) string {
+	if host, _, err := net.SplitHostPort(address); err == nil {
+		return strings.Trim(host, "[]")
+	}
+	return strings.Trim(address, "[]")
 }
 
 func (lb ClusterHashLoadBalancer) HandleHttpRequestBody(ctx wrapper.HttpContext, body []byte) types.Action {

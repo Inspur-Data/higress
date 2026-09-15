@@ -279,7 +279,12 @@ lb_config:
 
 ## 功能说明
 
-读取指定请求头的值，使用 FNV-1a 一致性 hash 算法将请求路由到固定的上游集群，确保相同 hash key 的请求始终落到同一个 cluster，同时支持按百分比权重控制各 cluster 的流量分配。
+根据 hash key 使用 FNV-1a 一致性 hash 算法将请求路由到固定的上游集群，确保相同 hash key 的请求始终落到同一个 cluster，同时支持按百分比权重控制各 cluster 的流量分配。
+
+hash key 的来源由 `hash_source` 决定，支持两种方式：
+
+- `header`：读取 `hash_header` 指定的请求头作为 hash key（默认）
+- `source_ip`：读取连接源 IP（`source.address` 属性）作为 hash key，同一源 IP 的请求固定路由到同一集群；使用该方式时插件会打印源 IP 日志便于排查
 
 需要配合 EnvoyFilter 的 `cluster_header` 机制一起使用。
 
@@ -288,7 +293,8 @@ lb_config:
 | 名称 | 数据类型 | 填写要求 | 默认值 | 描述 |
 |------|----------|----------|--------|------|
 | `clusters` | []ClusterEntry | 必填 | - | cluster 列表，所有 `weight` 之和必须为 100 |
-| `hash_header` | string | 选填 | `x-mse-consumer` | 读取 hash key 的请求头名称 |
+| `hash_source` | string | 选填 | `header` | hash key 来源，可选 `header`、`source_ip` |
+| `hash_header` | string | 选填 | `x-mse-consumer` | 读取 hash key 的请求头名称，`hash_source` 为 `header` 时生效 |
 | `cluster_header` | string | 选填 | `x-higress-target-cluster` | 写入目标 cluster 的请求头名称 |
 
 ### ClusterEntry 字段
@@ -299,6 +305,8 @@ lb_config:
 | `weight` | int | 是 | 百分比权重，所有 cluster 的 weight 之和必须为 100 |
 
 ## 配置示例
+
+### 基于请求头哈希
 
 ```yaml
 lb_type: cluster
@@ -315,4 +323,21 @@ lb_config:
   cluster_header: x-higress-target-cluster
 ```
 
-若请求缺少 hash header，插件直接返回 **403**。
+### 基于连接源 IP 哈希
+
+```yaml
+lb_type: cluster
+lb_policy: cluster_hash
+lb_config:
+  hash_source: source_ip
+  clusters:
+    - cluster: "outbound|80||llm-test1.internal.static"
+      weight: 70
+    - cluster: "outbound|443||llm-test2.internal.dns"
+      weight: 30
+  cluster_header: x-higress-target-cluster
+```
+
+**注意**：`source_ip` 取的是与网关直连的上一跳地址。若请求经过 LB/CDN 等前置代理，得到的将是代理的出口 IP 而非终端用户 IP。
+
+若请求缺少 hash key（hash header 为空或源地址不可用），插件直接返回 **403**。
