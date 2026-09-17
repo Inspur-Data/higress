@@ -22,3 +22,4 @@ require (
 	github.com/tidwall/pretty v1.2.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+replace github.com/higress-group/proxy-wasm-go-sdk => github.com/higress-group/proxy-wasm-go-sdk go-1.24
