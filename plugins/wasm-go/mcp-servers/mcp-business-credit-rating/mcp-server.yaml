@@ -3,7 +3,7 @@ server:
   config:
     appCode: ""
 tools:
-  - name: business-credit-rating
+  - name: bussiness-credit-rating
     description: 企业信用评级
     args:
       - name: keyword
