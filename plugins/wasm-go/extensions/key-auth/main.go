@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"time"
 
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
@@ -56,12 +55,6 @@ type Consumer struct {
 	// @Description en-US The credential of the consumer.
 	// @Scope GLOBAL
 	Credential string `yaml:"credential"`
-	// @Title 过期时间
-	// @Title en-US Expiration Time
-	// @Description 该调用方的访问凭证过期时间，Unix时间戳格式。
-	// @Description en-US The expiration time of the consumer's credential, in Unix timestamp format.
-	// @Scope GLOBAL
-	ExpiresAt int64 `yaml:"expires_at,omitempty"`
 }
 
 // @Name key-auth
@@ -204,10 +197,6 @@ func parseGlobalConfig(json gjson.Result, global *KeyAuthConfig, log log.Log) er
 			Name:       name.String(),
 			Credential: credential.String(),
 		}
-		expiresAt := item.Get("expires_at")
-		if expiresAt.Exists() {
-			consumer.ExpiresAt = expiresAt.Int()
-		}
 		global.consumers = append(global.consumers, consumer)
 		global.credential2Name[credential.String()] = name.String()
 	}
@@ -302,12 +291,8 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config KeyAuthConfig, log log
 		return deniedUnauthorizedConsumer()
 	}
 
-	for _, consumer := range config.consumers {
-		if consumer.Credential == tokens[0] && consumer.ExpiresAt != 0 && time.Now().Unix() > consumer.ExpiresAt {
-			log.Warnf("credential %q has expired,now: %v,expireat: %v", tokens[0], time.Now().Unix(), consumer.ExpiresAt)
-			return deniedExpireConsumer()
-		}
-	}
+	proxywasm.AddHttpRequestHeader("X-Mse-Consumer", name)
+
 	// 全局生效：
 	// - global_auth == true 且 当前 domain/route 未配置该插件
 	// - global_auth 未设置 且 没有任何一个 domain/route 配置该插件
@@ -359,13 +344,7 @@ func deniedUnauthorizedConsumer() types.Action {
 	return types.ActionContinue
 }
 
-func deniedExpireConsumer() types.Action {
-	_ = proxywasm.SendHttpResponseWithDetail(http.StatusForbidden, "key-auth.unauthorized", WWWAuthenticateHeader(protectionSpace),
-		[]byte("Request denied by Key Auth check. Expired consumer."), -1)
-	return types.ActionContinue
-}
 func authenticated(name string) types.Action {
-	_ = proxywasm.AddHttpRequestHeader("X-Mse-Consumer", name)
 	return types.ActionContinue
 }
 

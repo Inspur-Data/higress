@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -20,21 +21,60 @@ import (
 	"github.com/higress-group/wasm-go/pkg/log"
 	"github.com/higress-group/wasm-go/pkg/wrapper"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 const (
 	vertexAuthDomain = "oauth2.googleapis.com"
-	vertexDomain     = "{REGION}-aiplatform.googleapis.com"
+	vertexDomain     = "aiplatform.googleapis.com"
 	// /v1/projects/{PROJECT_ID}/locations/{REGION}/publishers/google/models/{MODEL_ID}:{ACTION}
-	vertexPathTemplate               = "/v1/projects/%s/locations/%s/publishers/google/models/%s:%s"
-	vertexChatCompletionAction       = "generateContent"
-	vertexChatCompletionStreamAction = "streamGenerateContent?alt=sse"
-	vertexEmbeddingAction            = "predict"
+	vertexPathTemplate          = "/v1/projects/%s/locations/%s/publishers/google/models/%s:%s"
+	vertexPathAnthropicTemplate = "/v1/projects/%s/locations/%s/publishers/anthropic/models/%s:%s"
+	// Express Mode 路径模板 (不含 project/location)
+	vertexExpressPathTemplate          = "/v1/publishers/google/models/%s:%s"
+	vertexExpressPathAnthropicTemplate = "/v1/publishers/anthropic/models/%s:%s"
+	// OpenAI-compatible endpoint 路径模板
+	// /v1beta1/projects/{PROJECT_ID}/locations/{LOCATION}/endpoints/openapi/chat/completions
+	vertexOpenAICompatiblePathTemplate = "/v1beta1/projects/%s/locations/%s/endpoints/openapi/chat/completions"
+	vertexChatCompletionAction         = "generateContent"
+	vertexChatCompletionStreamAction   = "streamGenerateContent?alt=sse"
+	vertexAnthropicMessageAction       = "rawPredict"
+	vertexAnthropicMessageStreamAction = "streamRawPredict"
+	vertexEmbeddingAction              = "predict"
+	vertexGlobalRegion                 = "global"
+	contextClaudeMarker                = "isClaudeRequest"
+	contextOpenAICompatibleMarker      = "isOpenAICompatibleRequest"
+	vertexAnthropicVersion             = "vertex-2023-10-16"
 )
 
 type vertexProviderInitializer struct{}
 
 func (v *vertexProviderInitializer) ValidateConfig(config *ProviderConfig) error {
+	// Express Mode: 如果配置了 apiTokens，则使用 API Key 认证
+	if len(config.apiTokens) > 0 {
+		// Express Mode 与 OpenAI 兼容模式互斥
+		if config.vertexOpenAICompatible {
+			return errors.New("vertexOpenAICompatible is not compatible with Express Mode (apiTokens)")
+		}
+		// Express Mode 不需要其他配置
+		return nil
+	}
+
+	// OpenAI 兼容模式: 需要 OAuth 认证配置
+	if config.vertexOpenAICompatible {
+		if config.vertexAuthKey == "" {
+			return errors.New("missing vertexAuthKey in vertex provider config for OpenAI compatible mode")
+		}
+		if config.vertexRegion == "" || config.vertexProjectId == "" {
+			return errors.New("missing vertexRegion or vertexProjectId in vertex provider config for OpenAI compatible mode")
+		}
+		if config.vertexAuthServiceName == "" {
+			return errors.New("missing vertexAuthServiceName in vertex provider config for OpenAI compatible mode")
+		}
+		return nil
+	}
+
+	// 标准模式: 保持原有验证逻辑
 	if config.vertexAuthKey == "" {
 		return errors.New("missing vertexAuthKey in vertex provider config")
 	}
@@ -56,21 +96,45 @@ func (v *vertexProviderInitializer) DefaultCapabilities() map[string]string {
 
 func (v *vertexProviderInitializer) CreateProvider(config ProviderConfig) (Provider, error) {
 	config.setDefaultCapabilities(v.DefaultCapabilities())
-	return &vertexProvider{
-		config: config,
-		client: wrapper.NewClusterClient(wrapper.DnsCluster{
+
+	provider := &vertexProvider{
+		config:       config,
+		contextCache: createContextCache(&config),
+		claude: &claudeProvider{
+			config:       config,
+			contextCache: createContextCache(&config),
+		},
+	}
+
+	// 仅标准模式需要 OAuth 客户端（Express Mode 通过 apiTokens 配置）
+	if !provider.isExpressMode() {
+		provider.client = wrapper.NewClusterClient(wrapper.DnsCluster{
 			Domain:      vertexAuthDomain,
 			ServiceName: config.vertexAuthServiceName,
 			Port:        443,
-		}),
-		contextCache: createContextCache(&config),
-	}, nil
+		})
+	}
+
+	return provider, nil
+}
+
+// isExpressMode 检测是否启用 Express Mode
+// 如果配置了 apiTokens，则使用 Express Mode（API Key 认证）
+func (v *vertexProvider) isExpressMode() bool {
+	return len(v.config.apiTokens) > 0
+}
+
+// isOpenAICompatibleMode 检测是否启用 OpenAI 兼容模式
+// 使用 Vertex AI 的 OpenAI-compatible Chat Completions API
+func (v *vertexProvider) isOpenAICompatibleMode() bool {
+	return v.config.vertexOpenAICompatible
 }
 
 type vertexProvider struct {
 	client       wrapper.HttpClient
 	config       ProviderConfig
 	contextCache *contextCache
+	claude       *claudeProvider
 }
 
 func (v *vertexProvider) GetProviderType() string {
@@ -93,8 +157,21 @@ func (v *vertexProvider) OnRequestHeaders(ctx wrapper.HttpContext, apiName ApiNa
 }
 
 func (v *vertexProvider) TransformRequestHeaders(ctx wrapper.HttpContext, apiName ApiName, headers http.Header) {
-	vertexRegionDomain := strings.Replace(vertexDomain, "{REGION}", v.config.vertexRegion, 1)
-	util.OverwriteRequestHostHeader(headers, vertexRegionDomain)
+	var finalVertexDomain string
+
+	if v.isExpressMode() {
+		// Express Mode: 固定域名，不带 region 前缀
+		finalVertexDomain = vertexDomain
+	} else {
+		// 标准模式: 带 region 前缀
+		if v.config.vertexRegion != vertexGlobalRegion {
+			finalVertexDomain = fmt.Sprintf("%s-%s", v.config.vertexRegion, vertexDomain)
+		} else {
+			finalVertexDomain = vertexDomain
+		}
+	}
+
+	util.OverwriteRequestHostHeader(headers, finalVertexDomain)
 }
 
 func (v *vertexProvider) getToken() (cached bool, err error) {
@@ -136,8 +213,42 @@ func (v *vertexProvider) OnRequestBody(ctx wrapper.HttpContext, apiName ApiName,
 	if v.config.IsOriginal() {
 		return types.ActionContinue, nil
 	}
+
 	headers := util.GetRequestHeaders()
+
+	// OpenAI 兼容模式: 不转换请求体，只设置路径和进行模型映射
+	if v.isOpenAICompatibleMode() {
+		ctx.SetContext(contextOpenAICompatibleMarker, true)
+		body, err := v.onOpenAICompatibleRequestBody(ctx, apiName, body, headers)
+		headers.Set("Content-Length", fmt.Sprint(len(body)))
+		util.ReplaceRequestHeaders(headers)
+		_ = proxywasm.ReplaceHttpRequestBody(body)
+		if err != nil {
+			return types.ActionContinue, err
+		}
+		// OpenAI 兼容模式需要 OAuth token
+		cached, err := v.getToken()
+		if cached {
+			return types.ActionContinue, nil
+		}
+		if err == nil {
+			return types.ActionPause, nil
+		}
+		return types.ActionContinue, err
+	}
+
 	body, err := v.TransformRequestBodyHeaders(ctx, apiName, body, headers)
+	headers.Set("Content-Length", fmt.Sprint(len(body)))
+
+	if v.isExpressMode() {
+		// Express Mode: 不需要 Authorization header，API Key 已在 URL 中
+		headers.Del("Authorization")
+		util.ReplaceRequestHeaders(headers)
+		_ = proxywasm.ReplaceHttpRequestBody(body)
+		return types.ActionContinue, err
+	}
+
+	// 标准模式: 需要获取 OAuth token
 	util.ReplaceRequestHeaders(headers)
 	_ = proxywasm.ReplaceHttpRequestBody(body)
 	if err != nil {
@@ -161,17 +272,58 @@ func (v *vertexProvider) TransformRequestBodyHeaders(ctx wrapper.HttpContext, ap
 	}
 }
 
+// onOpenAICompatibleRequestBody 处理 OpenAI 兼容模式的请求
+// 不转换请求体格式，只进行模型映射和路径设置
+func (v *vertexProvider) onOpenAICompatibleRequestBody(ctx wrapper.HttpContext, apiName ApiName, body []byte, headers http.Header) ([]byte, error) {
+	if apiName != ApiNameChatCompletion {
+		return nil, fmt.Errorf("OpenAI compatible mode only supports chat completions API")
+	}
+
+	// 解析请求进行模型映射
+	request := &chatCompletionRequest{}
+	if err := v.config.parseRequestAndMapModel(ctx, request, body); err != nil {
+		return nil, err
+	}
+
+	// 设置 OpenAI 兼容端点路径
+	path := v.getOpenAICompatibleRequestPath()
+	util.OverwriteRequestPathHeader(headers, path)
+
+	// 如果模型被映射，需要更新请求体中的模型字段
+	if request.Model != "" {
+		body, _ = sjson.SetBytes(body, "model", request.Model)
+	}
+
+	// 保持 OpenAI 格式，直接返回（可能更新了模型字段）
+	return body, nil
+}
+
 func (v *vertexProvider) onChatCompletionRequestBody(ctx wrapper.HttpContext, body []byte, headers http.Header) ([]byte, error) {
 	request := &chatCompletionRequest{}
 	err := v.config.parseRequestAndMapModel(ctx, request, body)
 	if err != nil {
 		return nil, err
 	}
-	path := v.getRequestPath(ApiNameChatCompletion, request.Model, request.Stream)
-	util.OverwriteRequestPathHeader(headers, path)
+	if strings.HasPrefix(request.Model, "claude") {
+		ctx.SetContext(contextClaudeMarker, true)
+		path := v.getAhthropicRequestPath(ApiNameChatCompletion, request.Model, request.Stream)
+		util.OverwriteRequestPathHeader(headers, path)
 
-	vertexRequest := v.buildVertexChatRequest(request)
-	return json.Marshal(vertexRequest)
+		claudeRequest := v.claude.buildClaudeTextGenRequest(request)
+		claudeRequest.Model = ""
+		claudeRequest.AnthropicVersion = vertexAnthropicVersion
+		claudeBody, err := json.Marshal(claudeRequest)
+		if err != nil {
+			return nil, err
+		}
+		return claudeBody, nil
+	} else {
+		path := v.getRequestPath(ApiNameChatCompletion, request.Model, request.Stream)
+		util.OverwriteRequestPathHeader(headers, path)
+
+		vertexRequest := v.buildVertexChatRequest(request)
+		return json.Marshal(vertexRequest)
+	}
 }
 
 func (v *vertexProvider) onEmbeddingsRequestBody(ctx wrapper.HttpContext, body []byte, headers http.Header) ([]byte, error) {
@@ -187,8 +339,20 @@ func (v *vertexProvider) onEmbeddingsRequestBody(ctx wrapper.HttpContext, body [
 }
 
 func (v *vertexProvider) OnStreamingResponseBody(ctx wrapper.HttpContext, name ApiName, chunk []byte, isLastChunk bool) ([]byte, error) {
+	// OpenAI 兼容模式: 透传响应，但需要解码 Unicode 转义序列
+	// Vertex AI OpenAI-compatible API 返回 ASCII-safe JSON，将非 ASCII 字符编码为 \uXXXX
+	if ctx.GetContext(contextOpenAICompatibleMarker) != nil && ctx.GetContext(contextOpenAICompatibleMarker).(bool) {
+		return util.DecodeUnicodeEscapesInSSE(chunk), nil
+	}
+
+	if ctx.GetContext(contextClaudeMarker) != nil && ctx.GetContext(contextClaudeMarker).(bool) {
+		return v.claude.OnStreamingResponseBody(ctx, name, chunk, isLastChunk)
+	}
 	log.Infof("[vertexProvider] receive chunk body: %s", string(chunk))
-	if isLastChunk || len(chunk) == 0 {
+	if isLastChunk {
+		return []byte(ssePrefix + "[DONE]\n\n"), nil
+	}
+	if len(chunk) == 0 {
 		return nil, nil
 	}
 	if name != ApiNameChatCompletion {
@@ -221,6 +385,15 @@ func (v *vertexProvider) OnStreamingResponseBody(ctx wrapper.HttpContext, name A
 }
 
 func (v *vertexProvider) TransformResponseBody(ctx wrapper.HttpContext, apiName ApiName, body []byte) ([]byte, error) {
+	// OpenAI 兼容模式: 透传响应，但需要解码 Unicode 转义序列
+	// Vertex AI OpenAI-compatible API 返回 ASCII-safe JSON，将非 ASCII 字符编码为 \uXXXX
+	if ctx.GetContext(contextOpenAICompatibleMarker) != nil && ctx.GetContext(contextOpenAICompatibleMarker).(bool) {
+		return util.DecodeUnicodeEscapes(body), nil
+	}
+
+	if ctx.GetContext(contextClaudeMarker) != nil && ctx.GetContext(contextClaudeMarker).(bool) {
+		return v.claude.TransformResponseBody(ctx, apiName, body)
+	}
 	if apiName == ApiNameChatCompletion {
 		return v.onChatCompletionResponseBody(ctx, body)
 	} else {
@@ -248,6 +421,9 @@ func (v *vertexProvider) buildChatCompletionResponse(ctx wrapper.HttpContext, re
 			PromptTokens:     response.UsageMetadata.PromptTokenCount,
 			CompletionTokens: response.UsageMetadata.CandidatesTokenCount,
 			TotalTokens:      response.UsageMetadata.TotalTokenCount,
+			CompletionTokensDetails: &completionTokensDetails{
+				ReasoningTokens: response.UsageMetadata.ThoughtsTokenCount,
+			},
 		},
 	}
 	for _, candidate := range response.Candidates {
@@ -259,7 +435,23 @@ func (v *vertexProvider) buildChatCompletionResponse(ctx wrapper.HttpContext, re
 			FinishReason: util.Ptr(candidate.FinishReason),
 		}
 		if len(candidate.Content.Parts) > 0 {
-			choice.Message.Content = candidate.Content.Parts[0].Text
+			part := candidate.Content.Parts[0]
+			if part.FunctionCall != nil {
+				args, _ := json.Marshal(part.FunctionCall.Args)
+				choice.Message.ToolCalls = []toolCall{
+					{
+						Type: "function",
+						Function: functionCall{
+							Name:      part.FunctionCall.Name,
+							Arguments: string(args),
+						},
+					},
+				}
+			} else if part.Thounght != nil && len(candidate.Content.Parts) > 1 {
+				choice.Message.Content = reasoningStartTag + part.Text + reasoningEndTag + candidate.Content.Parts[1].Text
+			} else if part.Text != "" {
+				choice.Message.Content = part.Text
+			}
 		} else {
 			choice.Message.Content = ""
 		}
@@ -300,8 +492,37 @@ func (v *vertexProvider) buildEmbeddingsResponse(ctx wrapper.HttpContext, vertex
 
 func (v *vertexProvider) buildChatCompletionStreamResponse(ctx wrapper.HttpContext, vertexResp *vertexChatResponse) *chatCompletionResponse {
 	var choice chatCompletionChoice
+	choice.Delta = &chatMessage{}
 	if len(vertexResp.Candidates) > 0 && len(vertexResp.Candidates[0].Content.Parts) > 0 {
-		choice.Delta = &chatMessage{Content: vertexResp.Candidates[0].Content.Parts[0].Text}
+		part := vertexResp.Candidates[0].Content.Parts[0]
+		if part.FunctionCall != nil {
+			args, _ := json.Marshal(part.FunctionCall.Args)
+			choice.Delta = &chatMessage{
+				ToolCalls: []toolCall{
+					{
+						Type: "function",
+						Function: functionCall{
+							Name:      part.FunctionCall.Name,
+							Arguments: string(args),
+						},
+					},
+				},
+			}
+		} else if part.Thounght != nil {
+			if ctx.GetContext("thinking_start") == nil {
+				choice.Delta = &chatMessage{Content: reasoningStartTag + part.Text}
+				ctx.SetContext("thinking_start", true)
+			} else {
+				choice.Delta = &chatMessage{Content: part.Text}
+			}
+		} else if part.Text != "" {
+			if ctx.GetContext("thinking_start") != nil && ctx.GetContext("thinking_end") == nil {
+				choice.Delta = &chatMessage{Content: reasoningEndTag + part.Text}
+				ctx.SetContext("thinking_end", true)
+			} else {
+				choice.Delta = &chatMessage{Content: part.Text}
+			}
+		}
 	}
 	streamResponse := chatCompletionResponse{
 		Id:      vertexResp.ResponseId,
@@ -313,6 +534,9 @@ func (v *vertexProvider) buildChatCompletionStreamResponse(ctx wrapper.HttpConte
 			PromptTokens:     vertexResp.UsageMetadata.PromptTokenCount,
 			CompletionTokens: vertexResp.UsageMetadata.CandidatesTokenCount,
 			TotalTokens:      vertexResp.UsageMetadata.TotalTokenCount,
+			CompletionTokensDetails: &completionTokensDetails{
+				ReasoningTokens: vertexResp.UsageMetadata.ThoughtsTokenCount,
+			},
 		},
 	}
 	return &streamResponse
@@ -320,6 +544,32 @@ func (v *vertexProvider) buildChatCompletionStreamResponse(ctx wrapper.HttpConte
 
 func (v *vertexProvider) appendResponse(responseBuilder *strings.Builder, responseBody string) {
 	responseBuilder.WriteString(fmt.Sprintf("%s %s\n\n", streamDataItemKey, responseBody))
+}
+
+func (v *vertexProvider) getAhthropicRequestPath(apiName ApiName, modelId string, stream bool) string {
+	action := ""
+	if stream {
+		action = vertexAnthropicMessageStreamAction
+	} else {
+		action = vertexAnthropicMessageAction
+	}
+
+	if v.isExpressMode() {
+		// Express Mode: 简化路径 + API Key 参数
+		basePath := fmt.Sprintf(vertexExpressPathAnthropicTemplate, modelId, action)
+		apiKey := v.config.GetRandomToken()
+		// 如果 action 已经包含 ?，使用 & 拼接
+		var fullPath string
+		if strings.Contains(action, "?") {
+			fullPath = basePath + "&key=" + apiKey
+		} else {
+			fullPath = basePath + "?key=" + apiKey
+		}
+		return fullPath
+	}
+
+	path := fmt.Sprintf(vertexPathAnthropicTemplate, v.config.vertexProjectId, v.config.vertexRegion, modelId, action)
+	return path
 }
 
 func (v *vertexProvider) getRequestPath(apiName ApiName, modelId string, stream bool) string {
@@ -331,7 +581,28 @@ func (v *vertexProvider) getRequestPath(apiName ApiName, modelId string, stream 
 	} else {
 		action = vertexChatCompletionAction
 	}
-	return fmt.Sprintf(vertexPathTemplate, v.config.vertexProjectId, v.config.vertexRegion, modelId, action)
+
+	if v.isExpressMode() {
+		// Express Mode: 简化路径 + API Key 参数
+		basePath := fmt.Sprintf(vertexExpressPathTemplate, modelId, action)
+		apiKey := v.config.GetRandomToken()
+		// 如果 action 已经包含 ?（如 streamGenerateContent?alt=sse），使用 & 拼接
+		var fullPath string
+		if strings.Contains(action, "?") {
+			fullPath = basePath + "&key=" + apiKey
+		} else {
+			fullPath = basePath + "?key=" + apiKey
+		}
+		return fullPath
+	}
+
+	path := fmt.Sprintf(vertexPathTemplate, v.config.vertexProjectId, v.config.vertexRegion, modelId, action)
+	return path
+}
+
+// getOpenAICompatibleRequestPath 获取 OpenAI 兼容模式的请求路径
+func (v *vertexProvider) getOpenAICompatibleRequestPath() string {
+	return fmt.Sprintf(vertexOpenAICompatiblePathTemplate, v.config.vertexProjectId, v.config.vertexRegion)
 }
 
 func (v *vertexProvider) buildVertexChatRequest(request *chatCompletionRequest) *vertexChatRequest {
@@ -351,6 +622,24 @@ func (v *vertexProvider) buildVertexChatRequest(request *chatCompletionRequest) 
 			MaxOutputTokens: request.MaxTokens,
 		},
 	}
+	if request.ReasoningEffort != "" {
+		thinkingConfig := vertexThinkingConfig{
+			IncludeThoughts: true,
+			ThinkingBudget:  1024,
+		}
+		switch request.ReasoningEffort {
+		case "none":
+			thinkingConfig.IncludeThoughts = false
+			thinkingConfig.ThinkingBudget = 0
+		case "low":
+			thinkingConfig.ThinkingBudget = 1024
+		case "medium":
+			thinkingConfig.ThinkingBudget = 4096
+		case "high":
+			thinkingConfig.ThinkingBudget = 16384
+		}
+		vertexRequest.GenerationConfig.ThinkingConfig = thinkingConfig
+	}
 	if request.Tools != nil {
 		functions := make([]function, 0, len(request.Tools))
 		for _, tool := range request.Tools {
@@ -363,20 +652,60 @@ func (v *vertexProvider) buildVertexChatRequest(request *chatCompletionRequest) 
 		}
 	}
 	shouldAddDummyModelMessage := false
+	var lastFunctionName string
 	for _, message := range request.Messages {
 		content := vertexChatContent{
-			Role: message.Role,
-			Parts: []vertexPart{
-				{
-					Text: message.StringContent(),
+			Role:  message.Role,
+			Parts: []vertexPart{},
+		}
+		if len(message.ToolCalls) > 0 {
+			lastFunctionName = message.ToolCalls[0].Function.Name
+			args := make(map[string]interface{})
+			if err := json.Unmarshal([]byte(message.ToolCalls[0].Function.Arguments), &args); err != nil {
+				log.Errorf("unable to unmarshal function arguments: %v", err)
+			}
+			content.Parts = append(content.Parts, vertexPart{
+				FunctionCall: &vertexFunctionCall{
+					Name: lastFunctionName,
+					Args: args,
 				},
-			},
+			})
+		} else {
+			for _, part := range message.ParseContent() {
+				switch part.Type {
+				case contentTypeText:
+					if message.Role == roleTool {
+						content.Parts = append(content.Parts, vertexPart{
+							FunctionResponse: &vertexFunctionResponse{
+								Name: lastFunctionName,
+								Response: vertexFunctionResponseDetail{
+									Output: part.Text,
+								},
+							},
+						})
+					} else {
+						content.Parts = append(content.Parts, vertexPart{
+							Text: part.Text,
+						})
+					}
+				case contentTypeImageUrl:
+					vpart, err := convertImageContent(part.ImageUrl.Url)
+					if err != nil {
+						log.Errorf("unable to convert image content: %v", err)
+					} else {
+						content.Parts = append(content.Parts, vpart)
+					}
+				}
+			}
 		}
 
 		// there's no assistant role in vertex and API shall vomit if role is not user or model
-		if content.Role == roleAssistant {
+		switch content.Role {
+		case roleAssistant:
 			content.Role = "model"
-		} else if content.Role == roleSystem { // converting system prompt to prompt from user for the same reason
+		case roleTool:
+			content.Role = roleUser
+		case roleSystem: // converting system prompt to prompt from user for the same reason
 			content.Role = roleUser
 			shouldAddDummyModelMessage = true
 		}
@@ -427,9 +756,12 @@ type vertexChatContent struct {
 }
 
 type vertexPart struct {
-	Text       string    `json:"text,omitempty"`
-	InlineData *blob     `json:"inlineData,omitempty"`
-	FileData   *fileData `json:"fileData,omitempty"`
+	Text             string                  `json:"text,omitempty"`
+	InlineData       *blob                   `json:"inlineData,omitempty"`
+	FileData         *fileData               `json:"fileData,omitempty"`
+	FunctionCall     *vertexFunctionCall     `json:"functionCall,omitempty"`
+	FunctionResponse *vertexFunctionResponse `json:"functionResponse,omitempty"`
+	Thounght         *bool                   `json:"thought,omitempty"`
 }
 
 type blob struct {
@@ -440,6 +772,21 @@ type blob struct {
 type fileData struct {
 	MimeType string `json:"mimeType"`
 	FileUri  string `json:"fileUri"`
+}
+
+type vertexFunctionCall struct {
+	Name string                 `json:"name"`
+	Args map[string]interface{} `json:"args,omitempty"`
+}
+
+type vertexFunctionResponse struct {
+	Name     string                       `json:"name"`
+	Response vertexFunctionResponseDetail `json:"response"`
+}
+
+type vertexFunctionResponseDetail struct {
+	Output string `json:"output,omitempty"`
+	Error  string `json:"error,omitempty"`
 }
 
 type vertexSystemInstruction struct {
@@ -457,11 +804,17 @@ type vertexChatSafetySetting struct {
 }
 
 type vertexChatGenerationConfig struct {
-	Temperature     float64 `json:"temperature,omitempty"`
-	TopP            float64 `json:"topP,omitempty"`
-	TopK            int     `json:"topK,omitempty"`
-	CandidateCount  int     `json:"candidateCount,omitempty"`
-	MaxOutputTokens int     `json:"maxOutputTokens,omitempty"`
+	Temperature     float64              `json:"temperature,omitempty"`
+	TopP            float64              `json:"topP,omitempty"`
+	TopK            int                  `json:"topK,omitempty"`
+	CandidateCount  int                  `json:"candidateCount,omitempty"`
+	MaxOutputTokens int                  `json:"maxOutputTokens,omitempty"`
+	ThinkingConfig  vertexThinkingConfig `json:"thinkingConfig,omitempty"`
+}
+
+type vertexThinkingConfig struct {
+	IncludeThoughts bool `json:"includeThoughts,omitempty"`
+	ThinkingBudget  int  `json:"thinkingBudget,omitempty"`
 }
 
 type vertexEmbeddingRequest struct {
@@ -506,6 +859,7 @@ type vertexUsageMetadata struct {
 	PromptTokenCount     int `json:"promptTokenCount,omitempty"`
 	CandidatesTokenCount int `json:"candidatesTokenCount,omitempty"`
 	TotalTokenCount      int `json:"totalTokenCount,omitempty"`
+	ThoughtsTokenCount   int `json:"thoughtsTokenCount,omitempty"`
 }
 
 type vertexEmbeddingResponse struct {
@@ -664,4 +1018,34 @@ func setCachedAccessToken(key string, accessToken string, expireTime int64) erro
 	}
 
 	return proxywasm.SetSharedData(key, data, cas)
+}
+
+func convertImageContent(imageUrl string) (vertexPart, error) {
+	part := vertexPart{}
+	if strings.HasPrefix(imageUrl, "http") {
+		arr := strings.Split(imageUrl, ".")
+		mimeType := "image/" + arr[len(arr)-1]
+		part.FileData = &fileData{
+			MimeType: mimeType,
+			FileUri:  imageUrl,
+		}
+		return part, nil
+	} else {
+		re := regexp.MustCompile(`^data:([^;]+);base64,`)
+		matches := re.FindStringSubmatch(imageUrl)
+		if len(matches) < 2 {
+			return part, fmt.Errorf("invalid base64 format")
+		}
+
+		mimeType := matches[1] // e.g. image/png
+		parts := strings.Split(mimeType, "/")
+		if len(parts) < 2 {
+			return part, fmt.Errorf("invalid mimeType")
+		}
+		part.InlineData = &blob{
+			MimeType: mimeType,
+			Data:     strings.TrimPrefix(imageUrl, matches[0]),
+		}
+		return part, nil
+	}
 }

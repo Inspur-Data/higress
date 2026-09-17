@@ -44,13 +44,14 @@ The command removes all the Kubernetes components associated with the chart and 
 | controller.autoscaling.minReplicas | int | `1` |  |
 | controller.autoscaling.targetCPUUtilizationPercentage | int | `80` |  |
 | controller.env | object | `{}` |  |
-| controller.hub | string | `"higress-registry.cn-hangzhou.cr.aliyuncs.com/higress"` |  |
+| controller.hub | string | `""` |  |
 | controller.image | string | `"higress"` |  |
 | controller.imagePullSecrets | list | `[]` |  |
 | controller.labels | object | `{}` |  |
 | controller.name | string | `"higress-controller"` |  |
 | controller.nodeSelector | object | `{}` |  |
 | controller.podAnnotations | object | `{}` |  |
+| controller.podLabels | object | `{}` | Labels to apply to the pod |
 | controller.podSecurityContext | object | `{}` |  |
 | controller.ports[0].name | string | `"http"` |  |
 | controller.ports[0].port | int | `8888` |  |
@@ -82,6 +83,7 @@ The command removes all the Kubernetes components associated with the chart and 
 | controller.serviceAccount.name | string | `""` | If not set and create is true, a name is generated using the fullname template |
 | controller.tag | string | `""` |  |
 | controller.tolerations | list | `[]` |  |
+| controller.topologySpreadConstraints | list | `[]` |  |
 | downstream | object | `{"connectionBufferLimits":32768,"http2":{"initialConnectionWindowSize":1048576,"initialStreamWindowSize":65535,"maxConcurrentStreams":100},"idleTimeout":180,"maxRequestHeadersKb":60,"routeTimeout":0}` | Downstream config settings |
 | gateway.affinity | object | `{}` |  |
 | gateway.annotations | object | `{}` | Annotations to apply to all resources |
@@ -94,7 +96,7 @@ The command removes all the Kubernetes components associated with the chart and 
 | gateway.hostNetwork | bool | `false` |  |
 | gateway.httpPort | int | `80` |  |
 | gateway.httpsPort | int | `443` |  |
-| gateway.hub | string | `"higress-registry.cn-hangzhou.cr.aliyuncs.com/higress"` |  |
+| gateway.hub | string | `""` |  |
 | gateway.image | string | `"gateway"` |  |
 | gateway.kind | string | `"Deployment"` | Use a `DaemonSet` or `Deployment` |
 | gateway.labels | object | `{}` | Labels to apply to all resources |
@@ -103,6 +105,7 @@ The command removes all the Kubernetes components associated with the chart and 
 | gateway.metrics.interval | string | `""` |  |
 | gateway.metrics.metricRelabelConfigs | list | `[]` | for operator.victoriametrics.com/v1beta1.VMPodScrape |
 | gateway.metrics.metricRelabelings | list | `[]` | for monitoring.coreos.com/v1.PodMonitor |
+| gateway.metrics.podMonitorSelector | object | `{"release":"kube-prome"}` | Selector for PodMonitor When using monitoring.coreos.com/v1.PodMonitor, the selector must match the label "release: kube-prome" is the default for kube-prometheus-stack |
 | gateway.metrics.provider | string | `"monitoring.coreos.com"` | provider group name for CustomResourceDefinition, can be monitoring.coreos.com or operator.victoriametrics.com |
 | gateway.metrics.rawSpec | object | `{}` | some more raw podMetricsEndpoints spec |
 | gateway.metrics.relabelConfigs | list | `[]` |  |
@@ -115,6 +118,7 @@ The command removes all the Kubernetes components associated with the chart and 
 | gateway.podAnnotations."prometheus.io/port" | string | `"15020"` |  |
 | gateway.podAnnotations."prometheus.io/scrape" | string | `"true"` |  |
 | gateway.podAnnotations."sidecar.istio.io/inject" | string | `"false"` |  |
+| gateway.podLabels | object | `{}` | Labels to apply to the pod |
 | gateway.rbac.enabled | bool | `true` | If enabled, roles will be created to enable accessing certificates from Gateways. This is not needed when using http://gateway-api.org/. |
 | gateway.readinessFailureThreshold | int | `30` | The number of successive failed probes before indicating readiness failure. |
 | gateway.readinessInitialDelaySeconds | int | `1` | The initial delay for readiness probes in seconds. |
@@ -128,7 +132,7 @@ The command removes all the Kubernetes components associated with the chart and 
 | gateway.resources.requests.memory | string | `"2048Mi"` |  |
 | gateway.revision | string | `""` | revision declares which revision this gateway is a part of |
 | gateway.rollingMaxSurge | string | `"100%"` |  |
-| gateway.rollingMaxUnavailable | string | `"25%"` |  |
+| gateway.rollingMaxUnavailable | string | `"25%"` | If global.local is true, the default value is 100%, otherwise it is 25% |
 | gateway.securityContext | string | `nil` | Define the security context for the pod. If unset, this will be automatically set to the minimum privileges required to bind to port 80 and 443. On Kubernetes 1.22+, this only requires the `net.ipv4.ip_unprivileged_port_start` sysctl. |
 | gateway.service.annotations | object | `{}` |  |
 | gateway.service.externalTrafficPolicy | string | `""` |  |
@@ -149,6 +153,8 @@ The command removes all the Kubernetes components associated with the chart and 
 | gateway.serviceAccount.name | string | `""` | The name of the service account to use. If not set, the release name is used |
 | gateway.tag | string | `""` |  |
 | gateway.tolerations | list | `[]` |  |
+| gateway.topologySpreadConstraints | list | `[]` |  |
+| gateway.unprivilegedPortSupported | string | `nil` |  |
 | global.autoscalingv2API | bool | `true` | whether to use autoscaling/v2 template for HPA settings for internal usage only, not to be configured by users. |
 | global.caAddress | string | `""` | The customized CA address to retrieve certificates for the pods in the cluster. CSR clients such as the Istio Agent and ingress gateways can use this to specify the CA endpoint. If not set explicitly, default to the Istio discovery address. |
 | global.caName | string | `""` | The name of the CA for workload certificates. For example, when caName=GkeWorkloadCertificate, GKE workload certificates will be used as the certificates for workloads. The default value is "" and when caName="", the CA will be configured by other mechanisms (e.g., environmental variable CA_PROVIDER). |
@@ -159,10 +165,13 @@ The command removes all the Kubernetes components associated with the chart and 
 | global.disableAlpnH2 | bool | `false` | Whether to disable HTTP/2 in ALPN |
 | global.enableGatewayAPI | bool | `false` | If true, Higress Controller will monitor Gateway API resources as well |
 | global.enableH3 | bool | `false` |  |
-| global.enableHigressIstio | bool | `false` |  |
 | global.enableIPv6 | bool | `false` |  |
 | global.enableIstioAPI | bool | `true` | If true, Higress Controller will monitor istio resources as well |
+| global.enableLDSCache | bool | `false` |  |
+| global.enablePluginServer | bool | `false` |  |
 | global.enableProxyProtocol | bool | `false` |  |
+| global.enablePushAllMCPClusters | bool | `true` |  |
+| global.enableRedis | bool | `false` | Whether to enable Redis(redis-stack-server) for Higress, default is false. |
 | global.enableSRDS | bool | `true` |  |
 | global.enableStatus | bool | `true` | If true, Higress Controller will update the status field of Ingress resources. When migrating from Nginx Ingress, in order to avoid status field of Ingress objects being overwritten, this parameter needs to be set to false, so Higress won't write the entry IP to the status field of the corresponding Ingress object. |
 | global.externalIstiod | bool | `false` | Configure a remote cluster data plane controlled by an external istiod. When set to true, istiod is not deployed locally and only a subset of the other discovery charts are enabled. |
@@ -175,7 +184,7 @@ The command removes all the Kubernetes components associated with the chart and 
 | global.istiod | object | `{"enableAnalysis":false}` | Enabled by default in master for maximising testing. |
 | global.jwtPolicy | string | `"third-party-jwt"` | Configure the policy for validating JWT. Currently, two options are supported: "third-party-jwt" and "first-party-jwt". |
 | global.kind | bool | `false` |  |
-| global.liteMetrics | bool | `true` |  |
+| global.liteMetrics | bool | `false` |  |
 | global.local | bool | `false` | When deploying to a local cluster (e.g.: kind cluster), set this to true. |
 | global.logAsJson | bool | `false` |  |
 | global.logging | object | `{"level":"default:info"}` | Comma-separated minimum per-scope logging level of messages to output, in the form of <scope>:<level>,<scope>:<level> The control plane has different scopes depending on component, but can configure default log level across all components If empty, default scope and level will be used as configured in code |
@@ -185,7 +194,7 @@ The command removes all the Kubernetes components associated with the chart and 
 | global.multiCluster.clusterName | string | `""` | Should be set to the name of the cluster this installation will run in. This is required for sidecar injection to properly label proxies |
 | global.multiCluster.enabled | bool | `true` | Set to true to connect two kubernetes clusters via their respective ingressgateway services when pods in each cluster cannot directly talk to one another. All clusters should be using Istio mTLS and must have a shared root CA for this model to work. |
 | global.network | string | `""` | Network defines the network this cluster belong to. This name corresponds to the networks in the map of mesh networks. |
-| global.o11y | object | `{"enabled":false,"promtail":{"image":{"repository":"higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/promtail","tag":"2.9.4"},"port":3101,"resources":{"limits":{"cpu":"500m","memory":"2Gi"}},"securityContext":{}}}` | Observability (o11y) configurations |
+| global.o11y | object | `{"enabled":false,"promtail":{"image":{"repository":"","tag":"2.9.4"},"port":3101,"resources":{"limits":{"cpu":"500m","memory":"2Gi"}},"securityContext":{}}}` | Observability (o11y) configurations |
 | global.omitSidecarInjectorConfigMap | bool | `false` |  |
 | global.onDemandRDS | bool | `false` |  |
 | global.oneNamespace | bool | `false` | Whether to restrict the applications namespace the controller manages; If not set, controller watches all namespaces |
@@ -207,6 +216,7 @@ The command removes all the Kubernetes components associated with the chart and 
 | global.proxy.includeOutboundPorts | string | `""` |  |
 | global.proxy.logLevel | string | `"warning"` | Log level for proxy, applies to gateways and sidecars. Expected values are: trace|debug|info|warning|error|critical|off |
 | global.proxy.privileged | bool | `false` | If set to true, istio-proxy container will have privileged securityContext |
+| global.proxy.proxyStatsMatcher | object | `{"inclusionRegexps":[".*"]}` | Proxy stats name regexps matcher for inclusion |
 | global.proxy.readinessFailureThreshold | int | `30` | The number of successive failed probes before indicating readiness failure. |
 | global.proxy.readinessInitialDelaySeconds | int | `1` | The initial delay for readiness probes in seconds. |
 | global.proxy.readinessPeriodSeconds | int | `2` | The period between readiness probes. |
@@ -235,7 +245,8 @@ The command removes all the Kubernetes components associated with the chart and 
 | global.useMCP | bool | `false` | Use the Mesh Control Protocol (MCP) for configuring Istiod. Requires an MCP source. |
 | global.watchNamespace | string | `""` | If not empty, Higress Controller will only watch resources in the specified namespace. When isolating different business systems using K8s namespace, if each namespace requires a standalone gateway instance, this parameter can be used to confine the Ingress watching of Higress within the given namespace. |
 | global.xdsMaxRecvMsgSize | string | `"104857600"` |  |
-| hub | string | `"higress-registry.cn-hangzhou.cr.aliyuncs.com/higress"` |  |
+| gzip | object | `{"chunkSize":4096,"compressionLevel":"BEST_COMPRESSION","compressionStrategy":"DEFAULT_STRATEGY","contentType":["text/html","text/css","text/plain","text/xml","application/json","application/javascript","application/xhtml+xml","image/svg+xml"],"disableOnEtagHeader":true,"enable":true,"memoryLevel":5,"minContentLength":1024,"windowBits":12}` | Gzip compression settings |
+| hub | string | `""` |  |
 | meshConfig | object | `{"enablePrometheusMerge":true,"rootNamespace":null,"trustDomain":"cluster.local"}` | meshConfig defines runtime configuration of components, including Istiod and istio-agent behavior See https://istio.io/docs/reference/config/istio.mesh.v1alpha1/ for all available options |
 | meshConfig.rootNamespace | string | `nil` | The namespace to treat as the administrative root namespace for Istio configuration. When processing a leaf namespace Istio will search for declarations in that namespace first and if none are found it will search in the root namespace. Any matching declaration found in the root namespace is processed as if it were declared in the leaf namespace. |
 | meshConfig.trustDomain | string | `"cluster.local"` | The trust domain corresponds to the trust root of a system Refer to https://github.com/spiffe/spiffe/blob/master/standards/SPIFFE-ID.md#21-trust-domain |
@@ -252,7 +263,7 @@ The command removes all the Kubernetes components associated with the chart and 
 | pilot.env.PILOT_ENABLE_METADATA_EXCHANGE | string | `"false"` |  |
 | pilot.env.PILOT_SCOPE_GATEWAY_TO_NAMESPACE | string | `"false"` |  |
 | pilot.env.VALIDATION_ENABLED | string | `"false"` |  |
-| pilot.hub | string | `"higress-registry.cn-hangzhou.cr.aliyuncs.com/higress"` |  |
+| pilot.hub | string | `""` |  |
 | pilot.image | string | `"pilot"` | Can be a full hub/image:tag |
 | pilot.jwksResolverExtraRootCA | string | `""` | You can use jwksResolverExtraRootCA to provide a root certificate in PEM format. This will then be trusted by pilot when resolving JWKS URIs. |
 | pilot.keepaliveMaxServerConnectionAge | string | `"30m"` | The following is used to limit how long a sidecar can be connected to a pilot. It balances out load across pilot instances at the cost of increasing system churn. |
@@ -267,10 +278,37 @@ The command removes all the Kubernetes components associated with the chart and 
 | pilot.serviceAnnotations | object | `{}` |  |
 | pilot.tag | string | `""` |  |
 | pilot.traceSampling | float | `1` |  |
+| pluginServer.hub | string | `""` |  |
+| pluginServer.image | string | `"plugin-server"` |  |
+| pluginServer.imagePullSecrets | list | `[]` |  |
+| pluginServer.labels | object | `{}` |  |
+| pluginServer.name | string | `"higress-plugin-server"` |  |
+| pluginServer.podLabels | object | `{}` | Labels to apply to the pod |
+| pluginServer.replicas | int | `2` | Number of Higress Plugin Server pods, 2 recommended for high availability |
+| pluginServer.resources.limits.cpu | string | `"500m"` |  |
+| pluginServer.resources.limits.memory | string | `"256Mi"` |  |
+| pluginServer.resources.requests.cpu | string | `"200m"` |  |
+| pluginServer.resources.requests.memory | string | `"128Mi"` |  |
+| pluginServer.service.port | int | `80` |  |
+| pluginServer.tag | string | `""` |  |
+| redis.redis.affinity | object | `{}` | Affinity for Redis |
+| redis.redis.image | string | `"redis-stack-server"` | Specify the image |
+| redis.redis.name | string | `"redis-stack-server"` |  |
+| redis.redis.nodeSelector | object | `{}` | NodeSelector Node labels for Redis |
+| redis.redis.password | string | `""` | Specify the password, if not set, no password is used |
+| redis.redis.persistence.accessModes | list | `["ReadWriteOnce"]` | Persistent Volume access modes |
+| redis.redis.persistence.enabled | bool | `false` | Enable persistence on Redis, default is false |
+| redis.redis.persistence.size | string | `"1Gi"` | Persistent Volume size |
+| redis.redis.persistence.storageClass | string | `""` | If undefined (the default) or set to null, no storageClassName spec is set, choosing the default provisioner |
+| redis.redis.replicas | int | `1` | Specify the number of replicas |
+| redis.redis.resources | object | `{}` | Specify the resources |
+| redis.redis.service | object | `{"port":6379,"type":"ClusterIP"}` | Service parameters |
+| redis.redis.service.port | int | `6379` | Exporter service port |
+| redis.redis.service.type | string | `"ClusterIP"` | Exporter service type |
+| redis.redis.tag | string | `"7.4.0-v3"` | Specify the tag |
+| redis.redis.tolerations | list | `[]` | Tolerations for Redis |
 | revision | string | `""` |  |
 | tracing.enable | bool | `false` |  |
 | tracing.sampling | int | `100` |  |
-| tracing.skywalking.port | int | `11800` |  |
-| tracing.skywalking.service | string | `""` |  |
 | tracing.timeout | int | `500` |  |
 | upstream | object | `{"connectionBufferLimits":10485760,"idleTimeout":10}` | Upstream config settings |

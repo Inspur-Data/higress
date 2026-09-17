@@ -3,6 +3,7 @@ package provider
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"math/rand"
 	"net/http"
 	"path"
@@ -55,6 +56,10 @@ const (
 	ApiNamePauseFineTuningJob                   ApiName = "openai/v1/pausefine-tuningjob"
 	ApiNameFineTuningCheckpointPermissions      ApiName = "openai/v1/fine-tuningjobcheckpointpermissions"
 	ApiNameDeleteFineTuningCheckpointPermission ApiName = "openai/v1/deletefine-tuningjobcheckpointpermission"
+	ApiNameVideos                               ApiName = "openai/v1/videos"
+	ApiNameRetrieveVideo                        ApiName = "openai/v1/retrievevideo"
+	ApiNameVideoRemix                           ApiName = "openai/v1/videoremix"
+	ApiNameRetrieveVideoContent                 ApiName = "openai/v1/retrievevideocontent"
 
 	// TODO: 以下是一些非标准的API名称，需要进一步确认是否支持
 	ApiNameCohereV1Rerank              ApiName = "cohere/v1/rerank"
@@ -92,6 +97,10 @@ const (
 	PathOpenAIPauseFineTuningJob                   = "/v1/fine_tuning/jobs/{fine_tuning_job_id}/pause"
 	PathOpenAIFineTuningCheckpointPermissions      = "/v1/fine_tuning/checkpoints/{fine_tuned_model_checkpoint}/permissions"
 	PathOpenAIFineDeleteTuningCheckpointPermission = "/v1/fine_tuning/checkpoints/{fine_tuned_model_checkpoint}/permissions/{permission_id}"
+	PathOpenAIVideos                               = "/v1/videos"
+	PathOpenAIRetrieveVideo                        = "/v1/videos/{video_id}"
+	PathOpenAIVideoRemix                           = "/v1/videos/{video_id}/remix"
+	PathOpenAIRetrieveVideoContent                 = "/v1/videos/{video_id}/content"
 
 	// Anthropic
 	PathAnthropicMessages = "/v1/messages"
@@ -130,6 +139,12 @@ const (
 	providerTypeDify       = "dify"
 	providerTypeBedrock    = "bedrock"
 	providerTypeVertex     = "vertex"
+	providerTypeTriton     = "triton"
+	providerTypeOpenRouter = "openrouter"
+	providerTypeLongcat    = "longcat"
+	providerTypeFireworks  = "fireworks"
+	providerTypeVllm       = "vllm"
+	providerTypeGeneric    = "generic"
 
 	protocolOpenAI   = "openai"
 	protocolOriginal = "original"
@@ -137,9 +152,11 @@ const (
 	roleSystem    = "system"
 	roleAssistant = "assistant"
 	roleUser      = "user"
+	roleTool      = "tool"
 
-	finishReasonStop   = "stop"
-	finishReasonLength = "length"
+	finishReasonStop     = "stop"
+	finishReasonLength   = "length"
+	finishReasonToolCall = "tool_calls"
 
 	ctxKeyIncrementalStreaming   = "incrementalStreaming"
 	ctxKeyApiKey                 = "apiKey"
@@ -206,6 +223,12 @@ var (
 		providerTypeDify:       &difyProviderInitializer{},
 		providerTypeBedrock:    &bedrockProviderInitializer{},
 		providerTypeVertex:     &vertexProviderInitializer{},
+		providerTypeTriton:     &tritonProviderInitializer{},
+		providerTypeOpenRouter: &openrouterProviderInitializer{},
+		providerTypeLongcat:    &longcatProviderInitializer{},
+		providerTypeFireworks:  &fireworksProviderInitializer{},
+		providerTypeVllm:       &vllmProviderInitializer{},
+		providerTypeGeneric:    &genericProviderInitializer{},
 	}
 )
 
@@ -364,6 +387,9 @@ type ProviderConfig struct {
 	// @Title zh-CN Vertex token刷新提前时间
 	// @Description zh-CN 用于Google服务账号认证，access token过期时间判定提前刷新，单位为秒，默认值为60秒
 	vertexTokenRefreshAhead int64 `required:"false" yaml:"vertexTokenRefreshAhead" json:"vertexTokenRefreshAhead"`
+	// @Title zh-CN Vertex AI OpenAI兼容模式
+	// @Description zh-CN 启用后将使用Vertex AI的OpenAI兼容API，请求和响应均使用OpenAI格式，无需协议转换。与Express Mode(apiTokens)互斥。
+	vertexOpenAICompatible bool `required:"false" yaml:"vertexOpenAICompatible" json:"vertexOpenAICompatible"`
 	// @Title zh-CN 翻译服务需指定的目标语种
 	// @Description zh-CN 翻译结果的语种，目前仅适用于DeepL服务。
 	targetLang string `required:"false" yaml:"targetLang" json:"targetLang"`
@@ -388,9 +414,27 @@ type ProviderConfig struct {
 	basePath string `required:"false" yaml:"basePath" json:"basePath"`
 	// @Title zh-CN basePathHandling用于指定basePath的处理方式，可选值：removePrefix、prepend
 	basePathHandling basePathHandling `required:"false" yaml:"basePathHandling" json:"basePathHandling"`
+	// @Title zh-CN generic Provider 对应的Host
+	// @Description zh-CN 仅适用于generic provider，用于覆盖请求转发的目标Host
+	genericHost string `required:"false" yaml:"genericHost" json:"genericHost"`
 	// @Title zh-CN 首包超时
 	// @Description zh-CN 流式请求中收到上游服务第一个响应包的超时时间，单位为毫秒。默认值为 0，表示不开启首包超时
 	firstByteTimeout uint32 `required:"false" yaml:"firstByteTimeout" json:"firstByteTimeout"`
+	// @Title zh-CN Triton Model Version
+	// @Description 仅适用于 NVIDIA Triton Interference Server :path 中的 modelVersion 参考："https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/protocol/extension_generate.html"
+	tritonModelVersion string `required:"false" yaml:"tritonModelVersion" json:"tritonModelVersion"`
+	// @Title zh-CN Triton Server 部署的 Domain
+	// @Description 仅适用于 NVIDIA Triton Interference Server :path 中的 modelVersion 参考："https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/protocol/extension_generate.html"
+	tritonDomain string `required:"false" yaml:"tritonDomain" json:"tritonDomain"`
+	// @Title zh-CN vLLM自定义后端URL
+	// @Description zh-CN 仅适用于vLLM服务。vLLM服务的完整URL，包含协议、域名、端口等
+	vllmCustomUrl string `required:"false" yaml:"vllmCustomUrl" json:"vllmCustomUrl"`
+	// @Title zh-CN vLLM主机地址
+	// @Description zh-CN 仅适用于vLLM服务，指定vLLM服务器的主机地址，例如：vllm-service.cluster.local
+	vllmServerHost string `required:"false" yaml:"vllmServerHost" json:"vllmServerHost"`
+	// @Title zh-CN 豆包服务域名
+	// @Description zh-CN 仅适用于豆包服务，默认转发域名为 ark.cn-beijing.volces.com
+	doubaoDomain string `required:"false" yaml:"doubaoDomain" json:"doubaoDomain"`
 }
 
 func (c *ProviderConfig) GetId() string {
@@ -403,6 +447,14 @@ func (c *ProviderConfig) GetType() string {
 
 func (c *ProviderConfig) GetProtocol() string {
 	return c.protocol
+}
+
+func (c *ProviderConfig) GetVllmCustomUrl() string {
+	return c.vllmCustomUrl
+}
+
+func (c *ProviderConfig) GetVllmServerHost() string {
+	return c.vllmServerHost
 }
 
 func (c *ProviderConfig) IsOpenAIProtocol() bool {
@@ -430,7 +482,12 @@ func (c *ProviderConfig) FromJson(json gjson.Result) {
 		c.qwenFileIds = append(c.qwenFileIds, fileId.String())
 	}
 	c.qwenEnableSearch = json.Get("qwenEnableSearch").Bool()
-	c.qwenEnableCompatible = json.Get("qwenEnableCompatible").Bool()
+	if compatible := json.Get("qwenEnableCompatible"); compatible.Exists() {
+		c.qwenEnableCompatible = compatible.Bool()
+	} else {
+		// Default use official compatiable mode
+		c.qwenEnableCompatible = true
+	}
 	c.qwenDomain = json.Get("qwenDomain").String()
 	if c.qwenDomain != "" {
 		// TODO: validate the domain, if not valid, set to default
@@ -486,6 +543,7 @@ func (c *ProviderConfig) FromJson(json gjson.Result) {
 	if c.vertexTokenRefreshAhead == 0 {
 		c.vertexTokenRefreshAhead = 60
 	}
+	c.vertexOpenAICompatible = json.Get("vertexOpenAICompatible").Bool()
 	c.targetLang = json.Get("targetLang").String()
 
 	if schemaValue, ok := json.Get("responseJsonSchema").Value().(map[string]interface{}); ok {
@@ -520,10 +578,9 @@ func (c *ProviderConfig) FromJson(json gjson.Result) {
 		c.reasoningContentMode = strings.ToLower(c.reasoningContentMode)
 		switch c.reasoningContentMode {
 		case reasoningBehaviorPassThrough, reasoningBehaviorIgnore, reasoningBehaviorConcat:
-			break
+			// valid values, no action needed
 		default:
 			c.reasoningContentMode = reasoningBehaviorPassThrough
-			break
 		}
 	}
 
@@ -547,6 +604,10 @@ func (c *ProviderConfig) FromJson(json gjson.Result) {
 	c.inputVariable = json.Get("inputVariable").String()
 	c.outputVariable = json.Get("outputVariable").String()
 
+	// NVIDIA triton
+	c.tritonModelVersion = json.Get("tritonModelVersion").String()
+	c.tritonDomain = json.Get("tritonDomain").String()
+
 	c.capabilities = make(map[string]string)
 	for capability, pathJson := range json.Get("capabilities").Map() {
 		// 过滤掉不受支持的能力
@@ -557,7 +618,11 @@ func (c *ProviderConfig) FromJson(json gjson.Result) {
 			string(ApiNameImageVariation),
 			string(ApiNameImageEdit),
 			string(ApiNameAudioSpeech),
-			string(ApiNameCohereV1Rerank):
+			string(ApiNameCohereV1Rerank),
+			string(ApiNameVideos),
+			string(ApiNameRetrieveVideo),
+			string(ApiNameRetrieveVideoContent),
+			string(ApiNameVideoRemix):
 			c.capabilities[capability] = pathJson.String()
 		}
 	}
@@ -566,6 +631,10 @@ func (c *ProviderConfig) FromJson(json gjson.Result) {
 	if c.basePath != "" && c.basePathHandling == "" {
 		c.basePathHandling = basePathHandlingRemovePrefix
 	}
+	c.genericHost = json.Get("genericHost").String()
+	c.vllmServerHost = json.Get("vllmServerHost").String()
+	c.vllmCustomUrl = json.Get("vllmCustomUrl").String()
+	c.doubaoDomain = json.Get("doubaoDomain").String()
 }
 
 func (c *ProviderConfig) Validate() error {
@@ -809,6 +878,7 @@ func ExtractStreamingEvents(ctx wrapper.HttpContext, chunk []byte) []StreamEvent
 			value := string(body[valueStartIndex:i])
 			currentEvent.SetValue(currentKey, value)
 		} else {
+			currentEvent.RawEvent = string(body[eventStartIndex : i+1])
 			// Extra new line. The current event is complete.
 			events = append(events, *currentEvent)
 			// Reset event parsing state.
@@ -830,7 +900,14 @@ func (c *ProviderConfig) isSupportedAPI(apiName ApiName) bool {
 	return exist
 }
 
+func (c *ProviderConfig) IsSupportedAPI(apiName ApiName) bool {
+	return c.isSupportedAPI(apiName)
+}
+
 func (c *ProviderConfig) setDefaultCapabilities(capabilities map[string]string) {
+	if c.capabilities == nil {
+		c.capabilities = make(map[string]string)
+	}
 	for capability, path := range capabilities {
 		c.capabilities[capability] = path
 	}
@@ -853,8 +930,22 @@ func (c *ProviderConfig) handleRequestBody(
 		return types.ActionContinue, nil
 	}
 
-	// use openai protocol
 	var err error
+
+	// handle claude protocol input - auto-detect based on conversion marker
+	// If main.go detected a Claude request that needs conversion, convert the body
+	needClaudeConversion, _ := ctx.GetContext("needClaudeResponseConversion").(bool)
+	if needClaudeConversion {
+		// Convert Claude protocol to OpenAI protocol
+		converter := &ClaudeToOpenAIConverter{}
+		body, err = converter.ConvertClaudeRequestToOpenAI(body)
+		if err != nil {
+			return types.ActionContinue, fmt.Errorf("failed to convert claude request to openai: %v", err)
+		}
+		log.Debugf("[Auto Protocol] converted Claude request body to OpenAI format")
+	}
+
+	// use openai protocol (either original openai or converted from claude)
 	if handler, ok := provider.(TransformRequestBodyHandler); ok {
 		body, err = handler.TransformRequestBody(ctx, apiName, body)
 	} else if handler, ok := provider.(TransformRequestBodyHeadersHandler); ok {
@@ -886,12 +977,33 @@ func (c *ProviderConfig) handleRequestBody(
 func (c *ProviderConfig) handleRequestHeaders(provider Provider, ctx wrapper.HttpContext, apiName ApiName) {
 	headers := util.GetRequestHeaders()
 	originPath := headers.Get(":path")
+
+	// Record the path after removePrefix processing
+	var removePrefixPath string
 	if c.basePath != "" && c.basePathHandling == basePathHandlingRemovePrefix {
-		headers.Set(":path", strings.TrimPrefix(originPath, c.basePath))
+		removePrefixPath = strings.TrimPrefix(originPath, c.basePath)
+		headers.Set(":path", removePrefixPath)
 	}
+
 	if handler, ok := provider.(TransformRequestHeadersHandler); ok {
 		handler.TransformRequestHeaders(ctx, apiName, headers)
 	}
+
+	// When using original protocol with removePrefix, restore the basePath-processed path.
+	// This ensures basePathHandling works correctly even when TransformRequestHeaders
+	// overwrites the path (which most providers do).
+	//
+	// TODO: Most providers (OpenAI, vLLM, DeepSeek, Claude, etc.) unconditionally overwrite
+	// the path in TransformRequestHeaders without checking IsOriginal(). Ideally, each provider
+	// should check IsOriginal() before overwriting the path (like Qwen does). Once all providers
+	// are updated to handle protocol correctly, this workaround can be removed.
+	// Affected providers: OpenAI, vLLM, ZhipuAI, Moonshot, Longcat, DeepSeek, Azure, Yi,
+	// TogetherAI, Stepfun, Ollama, Hunyuan, GitHub, Doubao, Cohere, Baichuan, AI360, Claude,
+	// Groq, Grok, Spark, Fireworks, Cloudflare, Baidu, OpenRouter, DeepL (24+ providers)
+	if c.IsOriginal() && removePrefixPath != "" {
+		headers.Set(":path", removePrefixPath)
+	}
+
 	if c.basePath != "" && c.basePathHandling == basePathHandlingPrepend && !strings.HasPrefix(headers.Get(":path"), c.basePath) {
 		headers.Set(":path", path.Join(c.basePath, headers.Get(":path")))
 	}
@@ -901,7 +1013,9 @@ func (c *ProviderConfig) handleRequestHeaders(provider Provider, ctx wrapper.Htt
 // defaultTransformRequestBody 默认的请求体转换方法，只做模型映射，用slog替换模型名称，不用序列化和反序列化，提高性能
 func (c *ProviderConfig) defaultTransformRequestBody(ctx wrapper.HttpContext, apiName ApiName, body []byte) ([]byte, error) {
 	switch apiName {
-	case ApiNameChatCompletion:
+	case ApiNameChatCompletion,
+		ApiNameVideos,
+		ApiNameVideoRemix:
 		stream := gjson.GetBytes(body, "stream").Bool()
 		if stream {
 			_ = proxywasm.ReplaceHttpRequestHeader("Accept", "text/event-stream")
@@ -946,6 +1060,8 @@ func (c *ProviderConfig) isStreamingAPI(apiName ApiName, body []byte) bool {
 func (c *ProviderConfig) needToProcessRequestBody(apiName ApiName) bool {
 	switch apiName {
 	case ApiNameChatCompletion,
+		ApiNameVideos,
+		ApiNameVideoRemix,
 		ApiNameCompletion,
 		ApiNameEmbeddings,
 		ApiNameImageGeneration,

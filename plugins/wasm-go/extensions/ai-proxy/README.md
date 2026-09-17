@@ -9,9 +9,20 @@ description: AI 代理插件配置参考
 `AI 代理`插件实现了基于 OpenAI API 契约的 AI 代理功能。目前支持 OpenAI、Azure OpenAI、月之暗面（Moonshot）和通义千问等 AI
 服务提供商。
 
-> **注意：**
+**🚀 自动协议兼容 (Auto Protocol Compatibility)**
+
+插件现在支持**自动协议检测**，无需配置即可同时兼容 OpenAI 和 Claude 两种协议格式：
+
+- **OpenAI 协议**: 请求路径 `/v1/chat/completions`，使用标准的 OpenAI Messages API 格式
+- **Claude 协议**: 请求路径 `/v1/messages`，使用 Anthropic Claude Messages API 格式  
+- **智能转换**: 自动检测请求协议，如果目标供应商不原生支持该协议，则自动进行协议转换
+- **零配置**: 用户无需设置 `protocol` 字段，插件自动处理
+
+> **协议支持说明：**
 
 > 请求路径后缀匹配 `/v1/chat/completions` 时，对应文生文场景，会用 OpenAI 的文生文协议解析请求 Body，再转换为对应 LLM 厂商的文生文协议
+
+> 请求路径后缀匹配 `/v1/messages` 时，对应 Claude 文生文场景，会自动检测供应商能力：如果支持原生 Claude 协议则直接转发，否则先转换为 OpenAI 协议再转发给供应商
 
 > 请求路径后缀匹配 `/v1/embeddings` 时，对应文本向量场景，会用 OpenAI 的文本向量协议解析请求 Body，再转换为对应 LLM 厂商的文本向量协议
 
@@ -118,7 +129,15 @@ Azure OpenAI 所对应的 `type` 为 `azure`。它特有的配置字段如下：
 | ----------------- | -------- | -------- | ------ | -------------------------------------------------------- |
 | `azureServiceUrl` | string   | 必填     | -      | Azure OpenAI 服务的 URL，须包含 `api-version` 查询参数。 |
 
-**注意：** Azure OpenAI 只支持配置一个 API Token。
+**注意：**
+1. Azure OpenAI 只支持配置一个 API Token。
+2. `azureServiceUrl` 支持以下三种配置格式：
+   1. 完整路径格式，例如：`https://YOUR_RESOURCE_NAME.openai.azure.com/openai/deployments/YOUR_DEPLOYMENT_NAME/chat/completions?api-version=2024-02-15-preview`
+      - 插件会直接将请求转发至该 URL，不会参考实际的请求路径。
+   2. 部署名称格式，例如：`https://YOUR_RESOURCE_NAME.openai.azure.com/openai/deployments/YOUR_DEPLOYMENT_NAME?api-version=2024-02-15-preview`
+      - 插件会根据实际的请求路径拼接后续路径。路径中的部署名称会保留不变，不会按照模型映射规则进行修改。同时支持 URL 中不包含部署名称的接口。
+   3. 资源名称格式，例如：`https://YOUR_RESOURCE_NAME.openai.azure.com?api-version=2024-02-15-preview` 
+      - 插件会根据实际的请求路径拼接后续路径。路径中的部署名称会根据请求中的模型名称结合模型映射规则进行填入。同时支持 URL 中不包含部署名称的接口。
 
 #### 月之暗面（Moonshot）
 
@@ -162,6 +181,14 @@ Groq 所对应的 `type` 为 `groq`。它并无特有的配置字段。
 
 Grok 所对应的 `type` 为 `grok`。它并无特有的配置字段。
 
+#### OpenRouter
+
+OpenRouter 所对应的 `type` 为 `openrouter`。它并无特有的配置字段。
+
+#### Fireworks AI
+
+Fireworks AI 所对应的 `type` 为 `fireworks`。它并无特有的配置字段。
+
 #### 文心一言（Baidu）
 
 文心一言所对应的 `type` 为 `baidu`。它并无特有的配置字段。
@@ -203,6 +230,18 @@ Ollama 所对应的 `type` 为 `ollama`。它特有的配置字段如下：
 | ------------------ | -------- | -------- | ------ | ----------------------------------- |
 | `ollamaServerHost` | string   | 必填     | -      | Ollama 服务器的主机地址             |
 | `ollamaServerPort` | number   | 必填     | -      | Ollama 服务器的端口号，默认为 11434 |
+
+#### 通用代理（Generic）
+
+当只需要借助 AI Proxy 的鉴权、basePath 处理或首包超时能力，且不希望插件改写路径时，可将 `provider.type` 设置为 `generic`。该 Provider 不绑定任何模型厂商，也不会做能力映射。
+
+| 名称          | 数据类型 | 填写要求 | 默认值 | 描述                                                                 |
+| ------------- | -------- | -------- | ------ | -------------------------------------------------------------------- |
+| `genericHost` | string   | 非必填   | -      | 指定要转发到的目标 Host；未配置时沿用客户端请求的 Host。 |
+
+- 配置了 `apiTokens` 时，会自动写入 `Authorization: Bearer <token>` 请求头，复用全局的 Token 轮询能力。
+- 当配置了 `firstByteTimeout` 时，会自动注入 `x-envoy-upstream-rq-first-byte-timeout-ms`。
+- `basePath` 与 `basePathHandling` 同样适用，可在通用转发中快捷地移除或添加统一前缀。
 
 #### 混元
 
@@ -270,7 +309,9 @@ Dify 所对应的 `type` 为 `dify`。它特有的配置字段如下:
 
 #### Google Vertex AI
 
-Google Vertex AI 所对应的 type 为 vertex。它特有的配置字段如下：
+Google Vertex AI 所对应的 type 为 vertex。支持两种认证模式：
+
+**标准模式**（使用 Service Account）：
 
 | 名称                         | 数据类型       | 填写要求   | 默认值    | 描述                                                                            |
 |-----------------------------|---------------|--------|--------|-------------------------------------------------------------------------------|
@@ -281,16 +322,56 @@ Google Vertex AI 所对应的 type 为 vertex。它特有的配置字段如下�
 | `geminiSafetySetting`       | map of string | 非必填   | -      | Gemini AI 内容过滤和安全级别设定。参考[Safety settings](https://ai.google.dev/gemini-api/docs/safety-settings)                             |
 | `vertexTokenRefreshAhead`   | number        | 非必填   | -      | Vertex access token刷新提前时间(单位秒)                                                |
 
+**Express Mode**（使用 API Key，简化配置）：
+
+Express Mode 是 Vertex AI 推出的简化访问模式，只需 API Key 即可快速开始使用，无需配置 Service Account。详见 [Vertex AI Express Mode 文档](https://cloud.google.com/vertex-ai/generative-ai/docs/start/express-mode/overview)。
+
+| 名称                         | 数据类型       | 填写要求   | 默认值    | 描述                                                                            |
+|-----------------------------|---------------|--------|--------|-------------------------------------------------------------------------------|
+| `apiTokens`                 | array of string | 必填   | -      | Express Mode 使用的 API Key，从 Google Cloud Console 的 API & Services > Credentials 获取 |
+| `geminiSafetySetting`       | map of string | 非必填   | -      | Gemini AI 内容过滤和安全级别设定。参考[Safety settings](https://ai.google.dev/gemini-api/docs/safety-settings)                             |
+
+**OpenAI 兼容模式**（使用 Vertex AI Chat Completions API）：
+
+Vertex AI 提供了 OpenAI 兼容的 Chat Completions API 端点，可以直接使用 OpenAI 格式的请求和响应，无需进行协议转换。详见 [Vertex AI OpenAI 兼容性文档](https://cloud.google.com/vertex-ai/generative-ai/docs/migrate/openai/overview)。
+
+| 名称                         | 数据类型       | 填写要求   | 默认值    | 描述                                                                            |
+|-----------------------------|---------------|--------|--------|-------------------------------------------------------------------------------|
+| `vertexOpenAICompatible`    | boolean       | 非必填   | false  | 启用 OpenAI 兼容模式。启用后将使用 Vertex AI 的 OpenAI-compatible Chat Completions API |
+| `vertexAuthKey`             | string        | 必填     | -      | 用于认证的 Google Service Account JSON Key |
+| `vertexRegion`              | string        | 必填     | -      | Google Cloud 区域（如 us-central1, europe-west4 等） |
+| `vertexProjectId`           | string        | 必填     | -      | Google Cloud 项目 ID |
+| `vertexAuthServiceName`     | string        | 必填     | -      | 用于 OAuth2 认证的服务名称 |
+
+**注意**：OpenAI 兼容模式与 Express Mode 互斥，不能同时配置 `apiTokens` 和 `vertexOpenAICompatible`。
+
 #### AWS Bedrock
 
-AWS Bedrock 所对应的 type 为 bedrock。它特有的配置字段如下：
+AWS Bedrock 所对应的 type 为 bedrock。它支持两种认证方式：
 
-| 名称                        | 数据类型   | 填写要求 | 默认值 | 描述                           |
-|---------------------------|--------|------|-----|------------------------------|
-| `awsAccessKey`            | string | 必填   | -   | AWS Access Key，用于身份认证        |
-| `awsSecretKey`            | string | 必填   | -   | AWS Secret Access Key，用于身份认证 |
-| `awsRegion`               | string | 必填   | -   | AWS 区域，例如：us-east-1          |
-| `bedrockAdditionalFields` | map    | 非必填  | -   | Bedrock 额外模型请求参数             |
+1. **AWS Signature V4 认证**：使用 `awsAccessKey` 和 `awsSecretKey` 进行 AWS 标准签名认证
+2. **Bearer Token 认证**：使用 `apiTokens` 配置 AWS Bearer Token（适用于 IAM Identity Center 等场景）
+
+**注意**：两种认证方式二选一，如果同时配置了 `apiTokens`，将优先使用 Bearer Token 认证方式。
+
+它特有的配置字段如下：
+
+| 名称                        | 数据类型        | 填写要求            | 默认值 | 描述                                                |
+|---------------------------|---------------|-------------------|-------|---------------------------------------------------|
+| `apiTokens`               | array of string | 与 ak/sk 二选一   | -     | AWS Bearer Token，用于 Bearer Token 认证方式          |
+| `awsAccessKey`            | string        | 与 apiTokens 二选一 | -     | AWS Access Key，用于 AWS Signature V4 认证            |
+| `awsSecretKey`            | string        | 与 apiTokens 二选一 | -     | AWS Secret Access Key，用于 AWS Signature V4 认证     |
+| `awsRegion`               | string        | 必填              | -     | AWS 区域，例如：us-east-1                              |
+| `bedrockAdditionalFields` | map           | 非必填            | -     | Bedrock 额外模型请求参数                               |
+
+#### NVIDIA Triton Interference Server
+
+NVIDIA Triton Interference Server 所对应的 type 为 triton。它特有的配置字段如下：
+
+| 名称                   | 数据类型 | 填写要求 | 默认值 | 描述                                      |
+|----------------------|--------|--------|-------|------------------------------------------|
+| `tritonModelVersion` | string | 非必填   | -     | 用于指定 Triton Server 中 model version     |
+| `tritonDomain`       | string | 非必填   | -     | Triton Server 部署的指定请求 Domain          |
 
 ## 用法示例
 
@@ -937,19 +1018,154 @@ provider:
 }
 ```
 
-### 使用 OpenAI 协议代理 Claude 服务
+### 使用 OpenAI 协议代理 OpenRouter 服务
 
 **配置信息**
 
 ```yaml
 provider:
-  type: claude
+  type: openrouter
+  apiTokens:
+    - 'YOUR_OPENROUTER_API_TOKEN'
+  modelMapping:
+    'gpt-4': 'openai/gpt-4-turbo-preview'
+    'gpt-3.5-turbo': 'openai/gpt-3.5-turbo'
+    'claude-3': 'anthropic/claude-3-opus'
+    '*': 'openai/gpt-3.5-turbo'
+```
+
+**请求示例**
+
+```json
+{
+  "model": "gpt-4",
+  "messages": [
+    {
+      "role": "user",
+      "content": "你好，你是谁？"
+    }
+  ],
+  "temperature": 0.7
+}
+```
+
+**响应示例**
+
+```json
+{
+  "id": "gen-1234567890abcdef",
+  "object": "chat.completion",
+  "created": 1699123456,
+  "model": "openai/gpt-4-turbo-preview",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "你好！我是一个AI助手，通过OpenRouter平台提供服务。我可以帮助回答问题、协助创作、进行对话等。有什么我可以帮助你的吗？"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 12,
+    "completion_tokens": 46,
+    "total_tokens": 58
+  }
+}
+```
+
+### 使用 OpenAI 协议代理 Fireworks AI 服务
+
+**配置信息**
+
+```yaml
+provider:
+  type: fireworks
+  apiTokens:
+    - "YOUR_FIREWORKS_API_TOKEN"
+  modelMapping:
+    "gpt-4": "accounts/fireworks/models/llama-v3p1-70b-instruct"
+    "gpt-3.5-turbo": "accounts/fireworks/models/llama-v3p1-8b-instruct"
+    "*": "accounts/fireworks/models/llama-v3p1-8b-instruct"
+```
+
+**请求示例**
+
+```json
+{
+  "model": "gpt-4",
+  "messages": [
+    {
+      "role": "user",
+      "content": "你好，你是谁？"
+    }
+  ],
+  "temperature": 0.7,
+  "max_tokens": 100
+}
+```
+
+**响应示例**
+
+```json
+{
+  "id": "fw-123456789",
+  "object": "chat.completion",
+  "created": 1699123456,
+  "model": "accounts/fireworks/models/llama-v3p1-70b-instruct",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "你好！我是一个由 Fireworks AI 提供的人工智能助手，基于 Llama 3.1 模型。我可以帮助回答问题、进行对话和提供各种信息。有什么我可以帮助你的吗？"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 15,
+    "completion_tokens": 45,
+    "total_tokens": 60
+  }
+}
+```
+
+### 使用自动协议兼容功能
+
+插件现在支持自动协议检测，可以同时处理 OpenAI 和 Claude 两种协议格式的请求。
+
+**配置信息**
+
+```yaml
+provider:
+  type: claude  # 原生支持 Claude 协议的供应商
   apiTokens:
     - 'YOUR_CLAUDE_API_TOKEN'
   version: '2023-06-01'
 ```
 
-**请求示例**
+**OpenAI 协议请求示例**
+
+URL: `http://your-domain/v1/chat/completions`
+
+```json
+{
+  "model": "claude-3-opus-20240229",
+  "max_tokens": 1024,
+  "messages": [
+    {
+      "role": "user",
+      "content": "你好，你是谁？"
+    }
+  ]
+}
+```
+
+**Claude 协议请求示例**
+
+URL: `http://your-domain/v1/messages`
 
 ```json
 {
@@ -965,6 +1181,8 @@ provider:
 ```
 
 **响应示例**
+
+两种协议格式的请求都会返回相应格式的响应：
 
 ```json
 {
@@ -987,6 +1205,39 @@ provider:
     "completion_tokens": 126,
     "total_tokens": 142
   }
+}
+```
+
+### 使用智能协议转换
+
+当目标供应商不原生支持 Claude 协议时，插件会自动进行协议转换：
+
+**配置信息**
+
+```yaml
+provider:
+  type: qwen  # 不原生支持 Claude 协议，会自动转换
+  apiTokens:
+    - 'YOUR_QWEN_API_TOKEN'
+  modelMapping:
+    'claude-3-opus-20240229': 'qwen-max'
+    '*': 'qwen-turbo'
+```
+
+**Claude 协议请求**
+
+URL: `http://your-domain/v1/messages` (自动转换为 OpenAI 协议调用供应商)
+
+```json
+{
+  "model": "claude-3-opus-20240229",
+  "max_tokens": 1024,
+  "messages": [
+    {
+      "role": "user",
+      "content": "你好，你是谁？"
+    }
+  ]
 }
 ```
 
@@ -1729,7 +1980,7 @@ provider:
 }
 ```
 
-### 使用 OpenAI 协议代理 Google Vertex 服务
+### 使用 OpenAI 协议代理 Google Vertex 服务（标准模式）
 
 **配置信息**
 
@@ -1791,7 +2042,133 @@ provider:
 }
 ```
 
+### 使用 OpenAI 协议代理 Google Vertex 服务（Express Mode）
+
+Express Mode 是 Vertex AI 的简化访问模式，只需 API Key 即可快速开始使用。
+
+**配置信息**
+
+```yaml
+provider:
+  type: vertex
+  apiTokens:
+    - "YOUR_API_KEY"
+```
+
+**请求示例**
+
+```json
+{
+  "model": "gemini-2.5-flash",
+  "messages": [
+    {
+      "role": "user",
+      "content": "你好，你是谁？"
+    }
+  ],
+  "stream": false
+}
+```
+
+**响应示例**
+
+```json
+{
+  "id": "chatcmpl-0000000000000",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "你好！我是 Gemini，由 Google 开发的人工智能助手。有什么我可以帮您的吗？"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "created": 1729986750,
+  "model": "gemini-2.5-flash",
+  "object": "chat.completion",
+  "usage": {
+    "prompt_tokens": 10,
+    "completion_tokens": 25,
+    "total_tokens": 35
+  }
+}
+```
+
+### 使用 OpenAI 协议代理 Google Vertex 服务（OpenAI 兼容模式）
+
+OpenAI 兼容模式使用 Vertex AI 的 OpenAI-compatible Chat Completions API，请求和响应都使用 OpenAI 格式，无需进行协议转换。
+
+**配置信息**
+
+```yaml
+provider:
+  type: vertex
+  vertexOpenAICompatible: true
+  vertexAuthKey: |
+    {
+      "type": "service_account",
+      "project_id": "your-project-id",
+      "private_key_id": "your-private-key-id",
+      "private_key": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n",
+      "client_email": "your-service-account@your-project.iam.gserviceaccount.com",
+      "token_uri": "https://oauth2.googleapis.com/token"
+    }
+  vertexRegion: us-central1
+  vertexProjectId: your-project-id
+  vertexAuthServiceName: your-auth-service-name
+  modelMapping:
+    "gpt-4": "gemini-2.0-flash"
+    "*": "gemini-1.5-flash"
+```
+
+**请求示例**
+
+```json
+{
+  "model": "gpt-4",
+  "messages": [
+    {
+      "role": "user",
+      "content": "你好，你是谁？"
+    }
+  ],
+  "stream": false
+}
+```
+
+**响应示例**
+
+```json
+{
+  "id": "chatcmpl-abc123",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "你好！我是由 Google 开发的 Gemini 模型。我可以帮助回答问题、提供信息和进行对话。有什么我可以帮您的吗？"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "created": 1729986750,
+  "model": "gemini-2.0-flash",
+  "object": "chat.completion",
+  "usage": {
+    "prompt_tokens": 12,
+    "completion_tokens": 35,
+    "total_tokens": 47
+  }
+}
+```
+
 ### 使用 OpenAI 协议代理 AWS Bedrock 服务
+
+AWS Bedrock 支持两种认证方式：
+
+#### 方式一：使用 AWS Access Key/Secret Key 认证（AWS Signature V4）
 
 **配置信息**
 
@@ -1800,7 +2177,21 @@ provider:
   type: bedrock
   awsAccessKey: "YOUR_AWS_ACCESS_KEY_ID"
   awsSecretKey: "YOUR_AWS_SECRET_ACCESS_KEY"
-  awsRegion: "YOUR_AWS_REGION"
+  awsRegion: "us-east-1"
+  bedrockAdditionalFields:
+    top_k: 200
+```
+
+#### 方式二：使用 Bearer Token 认证（适用于 IAM Identity Center 等场景）
+
+**配置信息**
+
+```yaml
+provider:
+  type: bedrock
+  apiTokens:
+    - "YOUR_AWS_BEARER_TOKEN"
+  awsRegion: "us-east-1"
   bedrockAdditionalFields:
     top_k: 200
 ```
@@ -1809,7 +2200,7 @@ provider:
 
 ```json
 {
-  "model": "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-3-5-haiku-20241022-v1:0",
+  "model": "us.anthropic.claude-3-5-haiku-20241022-v1:0",
   "messages": [
     {
       "role": "user",
@@ -1845,6 +2236,59 @@ provider:
   }
 }
 ```
+
+### 使用 OpenAI 协议代理 NVIDIA Triton Interference Server 服务
+
+**配置信息**
+
+```yaml
+providers:
+  - type: triton
+    tritonDomain: <LOCAL_TRITON_DOMAIN>
+    tritonModelVersion: <MODEL_VERSION>
+    apiTokens:
+      - "****"
+    modelMapping:
+      "*": gpt2
+```
+
+**请求示例**
+
+```json
+{
+  "model": "gpt2",
+  "messages": [
+    {
+      "role": "user",
+      "content": "你好，你是谁？"
+    }
+  ],
+  "stream": false
+}
+```
+
+**响应示例**
+
+```json
+{
+    "choices": [
+        {
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "我是一个AI模型"
+            },
+            "finish_reason": "stop",
+        }
+    ],
+    "model": "gpt2",
+}
+```
+
+
+
+
+
 
 
 ## 完整配置示例

@@ -18,9 +18,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/alibaba/higress/test/e2e/conformance/utils/config"
-	"github.com/alibaba/higress/test/e2e/conformance/utils/kubernetes"
-	"github.com/alibaba/higress/test/e2e/conformance/utils/roundtripper"
+	"github.com/alibaba/higress/v2/test/e2e/conformance/utils/config"
+	"github.com/alibaba/higress/v2/test/e2e/conformance/utils/kubernetes"
+	"github.com/alibaba/higress/v2/test/e2e/conformance/utils/roundtripper"
 	"istio.io/istio/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -29,7 +29,7 @@ const (
 	TestAreaAll   = "all"
 	TestAreaSetup = "setup"
 	TestAreaRun   = "run"
-	TessAreaClean = "clean"
+	TestAreaClean = "clean"
 )
 
 // ConformanceTestSuite defines the test suite used to run Gateway API
@@ -136,6 +136,7 @@ func New(s Options) *ConformanceTestSuite {
 			"base/nacos.yaml",
 			"base/dubbo.yaml",
 			"base/opa.yaml",
+			"base/llm-mock.yaml",
 		}
 	}
 
@@ -173,6 +174,7 @@ func (suite *ConformanceTestSuite) Setup(t *testing.T) {
 		"higress-conformance-infra",
 		"higress-conformance-app-backend",
 		"higress-conformance-web-backend",
+		"higress-conformance-ai-backend",
 	}
 	kubernetes.NamespacesMustBeAccepted(t, suite.Client, suite.TimeoutConfig, namespaces)
 
