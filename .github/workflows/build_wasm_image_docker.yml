@@ -84,7 +84,7 @@ jobs:
           if [ -d "${{ github.workspace }}/plugins/wasm-${PLUGIN_TYPE}/extensions/${PLUGIN_NAME}" ]; then
             plugin_dir="plugins/wasm-${PLUGIN_TYPE}/extensions/${PLUGIN_NAME}"
           else
-            plugin_dir="plugins/wasm-${PLUGIN_TYPE}/${PLUGIN_NAME}"
+            plugin_dir="plugins/wasm-${PLUGIN_TYPE}/mcp-servers/${PLUGIN_NAME}"
           fi
           echo "Using plugin directory: ${plugin_dir}"
           echo "PLUGIN_DIR=${plugin_dir}" >> $GITHUB_ENV
