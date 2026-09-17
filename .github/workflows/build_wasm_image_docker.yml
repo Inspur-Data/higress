@@ -77,6 +77,18 @@ jobs:
         with:
           ref: ${{ github.event.inputs.branch || github.ref_name }}
 
+      - name: Resolve plugin directory
+        run: |
+          # 大多数插件在 plugins/wasm-${PLUGIN_TYPE}/extensions/ 下，
+          # 少数插件（如 mcp-server）直接在 plugins/wasm-${PLUGIN_TYPE}/ 下
+          if [ -d "${{ github.workspace }}/plugins/wasm-${PLUGIN_TYPE}/extensions/${PLUGIN_NAME}" ]; then
+            plugin_dir="plugins/wasm-${PLUGIN_TYPE}/extensions/${PLUGIN_NAME}"
+          else
+            plugin_dir="plugins/wasm-${PLUGIN_TYPE}/${PLUGIN_NAME}"
+          fi
+          echo "Using plugin directory: ${plugin_dir}"
+          echo "PLUGIN_DIR=${plugin_dir}" >> $GITHUB_ENV
+
       - name: Run a wasm-builder
         env:
           PLUGIN_NAME: ${{ env.PLUGIN_NAME }}
@@ -86,7 +98,7 @@ jobs:
 
       - name: Build Wasm Binary
         run: |
-          cd ${{ github.workspace }}/plugins/wasm-${PLUGIN_TYPE}/extensions/${PLUGIN_NAME}
+          cd ${{ github.workspace }}/${PLUGIN_DIR}
           if [ -f ./.buildrc ]; then
             echo 'Found .buildrc file, sourcing it...'
             . ./.buildrc
@@ -98,7 +110,7 @@ jobs:
           if [ "${PLUGIN_TYPE}" == "go" ]; then
           command="
           set -e
-          cd /workspace/plugins/wasm-go/extensions/${PLUGIN_NAME}
+          cd /workspace/${PLUGIN_DIR}
           go clean -modcache
           go mod tidy
           GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -o plugin.wasm .
@@ -106,7 +118,7 @@ jobs:
           elif [ "${PLUGIN_TYPE}" == "rust" ]; then
           command="
           set -e
-          cd /workspace/plugins/wasm-rust/extensions/${PLUGIN_NAME}
+          cd /workspace/${PLUGIN_DIR}
           cargo build --target wasm32-wasi --release
           cp target/wasm32-wasi/release/*.wasm plugin.wasm
           "
@@ -120,7 +132,7 @@ jobs:
 
       - name: Copy binary from container to local
         run: |
-          docker cp builder:/workspace/plugins/wasm-${PLUGIN_TYPE}/extensions/${PLUGIN_NAME}/plugin.wasm ./plugin.wasm
+          docker cp builder:/workspace/${PLUGIN_DIR}/plugin.wasm ./plugin.wasm
           ls -lh ./plugin.wasm
 
       - name: Build Docker image with WASM binary
