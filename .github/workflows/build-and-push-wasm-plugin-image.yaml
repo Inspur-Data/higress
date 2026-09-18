@@ -105,9 +105,7 @@ jobs:
           command="
           set -ex
           cd /workspace/plugins/wasm-go/extensions/${PLUGIN_NAME}
-          go clean -modcache
-          go mod tidy
-          GOOS=wasip1 GOARCH=wasm go build -o plugin.wasm .
+          GOOS=wasip1 GOARCH=wasm go build -mod=readonly -tags \"${EXTRA_TAGS}\" -o plugin.wasm .
           tar czvf plugin.tar.gz plugin.wasm
           echo ${{ secrets.PASSWORD_ALI }} | oras login -u ${{ secrets.USERNAME_ALI }} --password-stdin ${{ env.IMAGE_REGISTRY_SERVICE }}
           oras push ${target_image} ${push_command}
