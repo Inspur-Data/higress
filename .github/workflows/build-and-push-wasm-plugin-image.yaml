@@ -32,8 +32,7 @@ jobs:
       IMAGE_REGISTRY_SERVICE: ${{ vars.IMAGE_REGISTRY || 'registry.cn-hangzhou.aliyuncs.com' }}
       IMAGE_REPOSITORY: ${{ vars.PLUGIN_IMAGE_REPOSITORY || 'testwydimage' }}
       RUST_VERSION: 1.82
-      GO_VERSION: 1.19
-      TINYGO_VERSION: 0.28.1
+      GO_VERSION: 1.24.4
       # 注意：ORAS_VERSION 参与拼 builder 镜像 tag，官方只有 oras1.0.0 的镜像，不要改
       ORAS_VERSION: 1.0.0
       # 兜底：禁止 buildx 默认附加 provenance/SBOM attestation
@@ -58,7 +57,7 @@ jobs:
           if [[ "$plugin_type" == "rust" ]]; then
             builder_image="higress-registry.cn-hangzhou.cr.aliyuncs.com/plugins/wasm-rust-builder:rust${{ env.RUST_VERSION }}-oras${{ env.ORAS_VERSION }}"
           else
-            builder_image="higress-registry.cn-hangzhou.cr.aliyuncs.com/plugins/wasm-go-builder:go${{ env.GO_VERSION }}-tinygo${{ env.TINYGO_VERSION }}-oras${{ env.ORAS_VERSION }}"
+            builder_image="higress-registry.cn-hangzhou.cr.aliyuncs.com/plugins/wasm-go-builder:go${{ env.GO_VERSION }}-oras${{ env.ORAS_VERSION }}"
           fi
           echo "PLUGIN_TYPE=$plugin_type" >> $GITHUB_ENV
           echo "PLUGIN_NAME=$plugin_name" >> $GITHUB_ENV
@@ -106,8 +105,7 @@ jobs:
           command="
           set -ex
           cd /workspace/plugins/wasm-go/extensions/${PLUGIN_NAME}
-          go mod tidy
-          tinygo build -o ./plugin.wasm -scheduler=none -target=wasi -gc=custom -tags=\"custommalloc nottinygc_finalizer ${EXTRA_TAGS}\" .
+          GOOS=wasip1 GOARCH=wasm go build -mod=readonly -tags \"${EXTRA_TAGS}\" -o plugin.wasm .
           tar czvf plugin.tar.gz plugin.wasm
           echo ${{ secrets.PASSWORD_ALI }} | oras login -u ${{ secrets.USERNAME_ALI }} --password-stdin ${{ env.IMAGE_REGISTRY_SERVICE }}
           oras push ${target_image} ${push_command}
