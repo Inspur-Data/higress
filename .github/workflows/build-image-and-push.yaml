@@ -6,6 +6,12 @@ on:
     - "inspurdata-v2.1.11"
   workflow_dispatch: ~
 
+env:
+  # 阿里云镜像仓库不支持 buildx 默认附加的 provenance/SBOM attestation 清单
+  # (application/vnd.oci.empty.v1+json)，推送时会报 "unknown manifest class"。
+  # 关闭默认 attestation，controller 的 buildx build 与 pilot/gateway 的 buildx bake 均生效。
+  BUILDX_NO_DEFAULT_ATTESTATIONS: 1
+
 jobs:
   build-controller-image:
     runs-on: ubuntu-latest
