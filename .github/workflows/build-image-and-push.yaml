@@ -231,7 +231,7 @@ jobs:
           echo "BUILT_IMAGE=${{ env.GATEWAY_IMAGE_REGISTRY }}/${{ env.GATEWAY_IMAGE_NAME }}"
           echo "IMAGES=${{ steps.docker-meta.outputs.tags }}"
       - name: Ensure build scripts are executable
-        run: find ./tools/hack -maxdepth 1 -type f -name '*.sh' -exec chmod +x {} +
+        run: find ./tools/hack -type f -name '*.sh' -exec chmod +x {} +
       - name: Build Gateway Image and Push
         run: |
           GOPROXY="https://proxy.golang.org,direct" make build-gateway
