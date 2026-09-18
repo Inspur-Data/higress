@@ -1453,10 +1453,10 @@ func getGatewayClasses(r GatewayResources) map[string]k8s.GatewayController {
 	}
 	for _, obj := range r.GatewayClass {
 		gwc := obj.Spec.(*k8s.GatewayClassSpec)
-		_, known := classInfos[gwc.ControllerName]
-		if !known {
-			continue
-		}
+		// _, known := classInfos[gwc.ControllerName]
+		// if !known {
+		// 	continue
+		// }
 		res[obj.Name] = gwc.ControllerName
 
 		// Set status. If we created it, it may already be there. If not, set it again
@@ -1583,14 +1583,14 @@ func convertGateways(r configContext) ([]config.Config, map[parentKey][]*parentI
 			// No gateway class found, this may be meant for another controller; should be skipped.
 			continue
 		}
-		classInfo, f := classInfos[controllerName]
-		if !f {
-			continue
-		}
-		if classInfo.disableRouteGeneration {
-			// We found it, but don't want to handle this class
-			continue
-		}
+		// classInfo, f := classInfos[controllerName]
+		// if !f {
+		// 	continue
+		// }
+		// if classInfo.disableRouteGeneration {
+		// 	// We found it, but don't want to handle this class
+		// 	continue
+		// }
 
 		servers := []*istio.Server{}
 
