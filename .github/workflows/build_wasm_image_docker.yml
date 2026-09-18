@@ -4,7 +4,8 @@ name: Build and Push Wasm Plugin Image For Docker
 on:
   push:
     branches:
-    - upgrade-plugin
+    - wasm-go-*-v*
+    - wasm-rust-*-v*
   workflow_dispatch:
     inputs:
       plugin_type:
