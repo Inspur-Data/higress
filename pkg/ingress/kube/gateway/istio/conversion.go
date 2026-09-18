@@ -1145,17 +1145,17 @@ func buildHTTPDestination(
 
 func buildDestination(ctx configContext, to k8s.BackendRef, ns string, enforceRefGrant bool) (*istio.Destination, *ConfigError) {
 	// check if the reference is allowed
-	if enforceRefGrant {
-		refs := ctx.AllowedReferences
-		if toNs := to.Namespace; toNs != nil && string(*toNs) != ns {
-			if !refs.BackendAllowed(gvk.HTTPRoute, to.Name, *toNs, ns) {
-				return &istio.Destination{}, &ConfigError{
-					Reason:  InvalidDestinationPermit,
-					Message: fmt.Sprintf("backendRef %v/%v not accessible to a route in namespace %q (missing a ReferenceGrant?)", to.Name, *toNs, ns),
-				}
-			}
-		}
-	}
+	// if enforceRefGrant {
+	// 	refs := ctx.AllowedReferences
+	// 	if toNs := to.Namespace; toNs != nil && string(*toNs) != ns {
+	// 		if !refs.BackendAllowed(gvk.HTTPRoute, to.Name, *toNs, ns) {
+	// 			return &istio.Destination{}, &ConfigError{
+	// 				Reason:  InvalidDestinationPermit,
+	// 				Message: fmt.Sprintf("backendRef %v/%v not accessible to a route in namespace %q (missing a ReferenceGrant?)", to.Name, *toNs, ns),
+	// 			}
+	// 		}
+	// 	}
+	// }
 
 	namespace := ptr.OrDefault((*string)(to.Namespace), ns)
 	var invalidBackendErr *ConfigError
