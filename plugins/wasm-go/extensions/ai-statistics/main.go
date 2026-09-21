@@ -979,7 +979,9 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body 
 	requestModel := "UNKNOWN"
 	if len(body) > 0 {
 		if model := gjson.GetBytes(body, "model"); model.Exists() {
-			requestModel = model.String()
+		    if model.Type == gjson.String{
+			    requestModel = model.String()
+			}
 		}
 	}
 	if requestModel == "UNKNOWN" {
