@@ -52,7 +52,7 @@ func (c *Controller) addConfigmap(obj interface{}) {
 		return
 	}
 	namespace, name, _ := cache.SplitMetaNamespaceKey(key)
-	if namespace != c.namespace || name != configMapName {
+	if namespace != c.namespace || name != c.configMgr.name {
 		return
 	}
 	c.enqueue(name)
@@ -64,7 +64,7 @@ func (c *Controller) updateConfigmap(oldObj interface{}, newObj interface{}) {
 		return
 	}
 	namespace, name, _ := cache.SplitMetaNamespaceKey(key)
-	if namespace != c.namespace || name != configMapName {
+	if namespace != c.namespace || name != c.configMgr.name {
 		return
 	}
 	if reflect.DeepEqual(oldObj, newObj) {

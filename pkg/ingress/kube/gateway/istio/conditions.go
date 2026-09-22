@@ -43,12 +43,19 @@ type RouteParentResult struct {
 }
 
 func createRouteStatus(parentResults []RouteParentResult, obj config.Config, currentParents []k8s.RouteParentStatus) []k8s.RouteParentStatus {
+	route := obj.Spec.(*k8s.HTTPRouteSpec)
+	controllerName := constants.ManagedGatewayController
+	if len(route.ParentRefs) > 0 {
+		controllerName = "higress.io/" + string(route.ParentRefs[0].Name) + "-" + string(*route.ParentRefs[0].Namespace)
+	} else {
+		return []k8s.RouteParentStatus{}
+	}
 	parents := make([]k8s.RouteParentStatus, 0, len(parentResults))
 	// Fill in all the gateways that are already present but not owned by us. This is non-trivial as there may be multiple
 	// gateway controllers that are exposing their status on the same route. We need to attempt to manage ours properly (including
 	// removing gateway references when they are removed), without mangling other Controller's status.
 	for _, r := range currentParents {
-		if r.ControllerName != constants.ManagedGatewayController {
+		if r.ControllerName != k8sbeta.GatewayController(controllerName) {
 			// We don't own this status, so keep it around
 			parents = append(parents, r)
 		}
@@ -160,7 +167,7 @@ func createRouteStatus(parentResults []RouteParentResult, obj config.Config, cur
 		}
 		parents = append(parents, k8s.RouteParentStatus{
 			ParentRef:      gw.OriginalReference,
-			ControllerName: constants.ManagedGatewayController,
+			ControllerName: k8sbeta.GatewayController(controllerName),
 			Conditions:     setConditions(obj.Generation, currentConditions, conds),
 		})
 	}

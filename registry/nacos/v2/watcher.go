@@ -65,6 +65,7 @@ type watcher struct {
 	WatchingServices     map[string]bool              `json:"watching_services"`
 	RegistryType         provider.ServiceRegistryType `json:"registry_type"`
 	Status               provider.WatcherStatus       `json:"status"`
+	Name                 string                       `json:"name"`
 	namingClient         naming_client.INamingClient
 	cache                memory.Cache
 	mutex                *sync.Mutex
@@ -405,7 +406,7 @@ func (w *watcher) fetchAllServices() error {
 				if w.addrProvider != nil {
 					w.addrProvider.Trigger()
 				}
-				log.Errorf("fetch nacos service list failed, err:%v, pageNo:%d", err, page)
+				log.Errorf("fetch nacos service list failed, err:%v, pageNo:%d,mcpname: %s, group: %s, namespace: %s", err, page, w.Name, groupName, w.NacosNamespace)
 				page--
 				tries++
 				continue
@@ -495,7 +496,7 @@ func (w *watcher) unsubscribe(groupName string, serviceName string) error {
 }
 
 func (w *watcher) getSubscribeCallback(groupName string, serviceName string) func(services []model.Instance, err error) {
-	suffix := strings.Join([]string{groupName, w.NacosNamespace, "nacos"}, common.DotSeparator)
+	suffix := strings.Join([]string{groupName, w.NacosNamespace, w.Name, "nacos"}, common.DotSeparator)
 	suffix = strings.ReplaceAll(suffix, common.Underscore, common.Hyphen)
 	host := strings.Join([]string{serviceName, suffix}, common.DotSeparator)
 
@@ -596,7 +597,7 @@ func (w *watcher) Stop() {
 		}
 
 		// clean the cache
-		suffix := strings.Join([]string{s[0], w.NacosNamespace, "nacos"}, common.DotSeparator)
+		suffix := strings.Join([]string{s[0], w.NacosNamespace, w.Name, "nacos"}, common.DotSeparator)
 		suffix = strings.ReplaceAll(suffix, common.Underscore, common.Hyphen)
 		host := strings.Join([]string{s[1], suffix}, common.DotSeparator)
 		w.cache.DeleteServiceWrapper(host)
