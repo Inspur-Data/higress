@@ -1002,7 +1002,7 @@ func (m *IngressConfig) applyInternalActiveRedirect(convertOptions *common.Conve
 
 func (m *IngressConfig) convertIstioWasmPlugin(obj *higressext.WasmPlugin) (*extensions.WasmPlugin, error) {
 	gatewayName := env.RegisterStringVar("GATEWAY_NAME", "", "").Get()
-	IngressLog.Info("gatewayName %s", gatewayName)
+	IngressLog.Infof("gatewayName %s", gatewayName)
 	result := &extensions.WasmPlugin{
 		Selector: &istiotype.WorkloadSelector{
 			MatchLabels: map[string]string{
@@ -1217,15 +1217,15 @@ func (m *IngressConfig) DeleteWasmPlugin(clusterNamespacedName util.ClusterNames
 
 func (m *IngressConfig) AddOrUpdateMcpBridge(clusterNamespacedName util.ClusterNamespacedName) {
 	// TODO: get resource name from config
-	IngressLog.Info("mcp ingressClass:%s, name:%s, namespace:%s", m.ingressClass, clusterNamespacedName.Name, clusterNamespacedName.Namespace)
+	IngressLog.Infof("mcp ingressClass:%s, name:%s, namespace:%s", m.ingressClass, clusterNamespacedName.Name, clusterNamespacedName.Namespace)
 	mcpbridgeName := m.ingressClass + "-default"
 	mcpbridge, err := m.mcpbridgeLister.McpBridges(clusterNamespacedName.Namespace).Get(mcpbridgeName)
 	if err != nil {
-		IngressLog.Info("Mcpbridge is not found, namespace:%s, name:%s",
+		IngressLog.Infof("Mcpbridge is not found, namespace:%s, name:%s",
 			clusterNamespacedName.Namespace, clusterNamespacedName.Name)
 		return
 	}
-	IngressLog.Info("start reconcile, mcpbridge name:%s", mcpbridge.Name)
+	IngressLog.Infof("start reconcile, mcpbridge name:%s", mcpbridge.Name)
 	if m.RegistryReconciler == nil {
 		m.RegistryReconciler = reconcile.NewReconciler(func() {
 			seMetadata := config.Meta{
