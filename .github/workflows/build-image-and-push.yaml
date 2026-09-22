@@ -59,10 +59,7 @@ jobs:
           images: |
             ${{ env.CONTROLLER_IMAGE_REGISTRY }}/${{ env.CONTROLLER_IMAGE_NAME }}
           tags: |
-            type=sha
-            type=ref,event=tag
-            type=semver,pattern={{version}}
-            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
+            type=raw,value=latest
 
       - name: Login to Docker Registry
         uses: docker/login-action@v3
@@ -145,10 +142,7 @@ jobs:
           images: |
             ${{ env.PILOT_IMAGE_REGISTRY }}/${{ env.PILOT_IMAGE_NAME }}
           tags: |
-            type=sha
-            type=ref,event=tag
-            type=semver,pattern={{version}}
-            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
+            type=raw,value=latest
 
       - name: Login to Docker Registry
         uses: docker/login-action@v3
@@ -235,10 +229,7 @@ jobs:
           images: |
             ${{ env.GATEWAY_IMAGE_REGISTRY }}/${{ env.GATEWAY_IMAGE_NAME }}
           tags: |
-            type=sha
-            type=ref,event=tag
-            type=semver,pattern={{version}}
-            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
+            type=raw,value=latest
 
       - name: Login to Docker Registry
         uses: docker/login-action@v3
