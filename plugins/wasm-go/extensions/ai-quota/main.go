@@ -58,6 +58,7 @@ type QuotaConfig struct {
 	redisInfo          RedisInfo         `yaml:"redis"`
 	RedisKeyPrefix     string            `yaml:"redis_key_prefix"`
 	AdminConsumer      string            `yaml:"admin_consumer"`
+	AdminBasePath      string            `yaml:"admin_base_path"`
 	AdminPath          string            `yaml:"admin_path"`
 	EnablePathSuffixes   []string          `yaml:"enable_path_suffixes"`
 	FailOpenOnRedisError bool              `yaml:"fail_open_on_redis_error"`
@@ -86,6 +87,16 @@ func parseConfig(json gjson.Result, config *QuotaConfig) error {
 	config.AdminConsumer = json.Get("admin_consumer").String()
 	if config.AdminPath == "" {
 		config.AdminPath = "/quota"
+	}
+	config.AdminBasePath = json.Get("admin_base_path").String()
+	if config.AdminBasePath == "" {
+		config.AdminBasePath = "/v1/chat/completions"
+	}
+	if !strings.HasPrefix(config.AdminBasePath, "/") {
+		config.AdminBasePath = "/" + config.AdminBasePath
+	}
+	if strings.HasSuffix(config.AdminBasePath, "/") {
+		config.AdminBasePath = strings.TrimSuffix(config.AdminBasePath, "/")
 	}
 	suffixResult := json.Get("enable_path_suffixes")
 	if !suffixResult.Exists() {
@@ -167,7 +178,7 @@ func onHttpRequestHeaders(context wrapper.HttpContext, config QuotaConfig) types
 
 	rawPath := context.Path()
 	path, _ := url.Parse(rawPath)
-	chatMode, adminMode := getOperationMode(path.Path, config.AdminPath, config.EnablePathSuffixes)
+	chatMode, adminMode := getOperationMode(path.Path, config.AdminBasePath+config.AdminPath, config.EnablePathSuffixes)
 	context.SetContext("chatMode", chatMode)
 	context.SetContext("adminMode", adminMode)
 	context.SetContext("consumer", consumer)
@@ -299,8 +310,7 @@ func deniedUnauthorizedConsumer() types.Action {
 	return types.ActionContinue
 }
 
-func getOperationMode(path string, adminPath string, pathSuffixes []string) (ChatMode, AdminMode) {
-	fullAdminPath := "/v1/chat/completions" + adminPath
+func getOperationMode(path string, fullAdminPath string, pathSuffixes []string) (ChatMode, AdminMode) {
 	if strings.HasSuffix(path, fullAdminPath+"/refresh") {
 		return ChatModeAdmin, AdminModeRefresh
 	}
@@ -374,21 +384,21 @@ func queryQuota(ctx wrapper.HttpContext, config QuotaConfig, adminConsumer strin
 	}
 	queryConsumer := values["consumer"]
 	err := config.redisClient.Get(config.RedisKeyPrefix+queryConsumer, func(response resp.Value) {
-		quota := 0
 		if err := response.Error(); err != nil {
 			util.SendResponse(http.StatusServiceUnavailable, "ai-quota.error", "text/plain", fmt.Sprintf("redis error:%v", err))
 			return
-		} else if response.IsNull() {
-			quota = 0
-		} else {
-			quota = response.Integer()
 		}
+		// exists=false 表示 key 不存在（当前不校验配额）；exists=true, quota=0 表示有记录但已耗尽
 		result := struct {
 			Consumer string `json:"consumer"`
 			Quota    int    `json:"quota"`
+			Exists   bool   `json:"exists"`
 		}{
 			Consumer: queryConsumer,
-			Quota:    quota,
+			Exists:   !response.IsNull(),
+		}
+		if !response.IsNull() {
+			result.Quota = response.Integer()
 		}
 		body, _ := json.Marshal(result)
 		util.SendResponse(http.StatusOK, "ai-quota.queryquota", "application/json", string(body))
