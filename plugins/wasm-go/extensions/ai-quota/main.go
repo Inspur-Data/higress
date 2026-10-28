@@ -55,11 +55,11 @@ func init() {
 }
 
 type QuotaConfig struct {
-	redisInfo          RedisInfo         `yaml:"redis"`
-	RedisKeyPrefix     string            `yaml:"redis_key_prefix"`
-	AdminConsumer      string            `yaml:"admin_consumer"`
-	AdminBasePath      string            `yaml:"admin_base_path"`
-	AdminPath          string            `yaml:"admin_path"`
+	redisInfo            RedisInfo         `yaml:"redis"`
+	RedisKeyPrefix       string            `yaml:"redis_key_prefix"`
+	AdminConsumer        string            `yaml:"admin_consumer"`
+	AdminBasePath        string            `yaml:"admin_base_path"`
+	AdminPath            string            `yaml:"admin_path"`
 	EnablePathSuffixes   []string          `yaml:"enable_path_suffixes"`
 	FailOpenOnRedisError bool              `yaml:"fail_open_on_redis_error"`
 	credential2Name      map[string]string `yaml:"-"`
@@ -296,7 +296,21 @@ func onHttpStreamingResponseBody(ctx wrapper.HttpContext, config QuotaConfig, da
 	}
 	totalToken := int(inputToken + outputToken)
 	log.Debugf("update consumer:%s, totalToken:%d", consumer, totalToken)
-	config.redisClient.DecrBy(config.RedisKeyPrefix+consumer, totalToken, nil)
+
+	// 扣减前先检查 Redis 中是否存在该消费者的配额记录：
+	// key 不存在时视为不限制配额，直接跳过扣减，
+	// 避免 DECRBY 对不存在的 key 自动初始化（0 - totalToken）而凭空生成负数配额数据。
+	config.redisClient.Get(config.RedisKeyPrefix+consumer, func(response resp.Value) {
+		if err := response.Error(); err != nil {
+			log.Errorf("check consumer:%s quota before deduction redis error:%v", consumer, err)
+			return
+		}
+		if response.IsNull() {
+			log.Debugf("consumer:%s quota key not found, skip quota deduction", consumer)
+			return
+		}
+		config.redisClient.DecrBy(config.RedisKeyPrefix+consumer, totalToken, nil)
+	})
 	return data
 }
 
