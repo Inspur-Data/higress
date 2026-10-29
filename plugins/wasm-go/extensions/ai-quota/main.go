@@ -227,6 +227,8 @@ func onHttpRequestHeaders(context wrapper.HttpContext, config QuotaConfig) types
 			return
 		}
 		log.Debugf("get consumer:%s quota:%d", consumer, response.Integer())
+		// 标记该请求有配额记录，响应结束后需要扣减
+		context.SetContext("quotaExists", true)
 		proxywasm.ResumeHttpRequest()
 	})
 	return types.HeaderStopAllIterationAndWatermark
@@ -282,6 +284,18 @@ func onHttpStreamingResponseBody(ctx wrapper.HttpContext, config QuotaConfig, da
 		return data
 	}
 
+	consumer, ok := ctx.GetContext("consumer").(string)
+	if !ok {
+		return data
+	}
+
+	// 请求准入时如果没有配额记录（quotaExists 未设置），响应结束后不做扣减，
+	// 避免对不存在的 key 执行 DECRBY 导致 Redis 自动初始化为负数。
+	if ctx.GetContext("quotaExists") == nil {
+		log.Debugf("consumer:%s quota key not found at request time, skip quota deduction", consumer)
+		return data
+	}
+
 	inputToken, ok := ctx.GetContext(tokenusage.CtxKeyInputToken).(int64)
 	if !ok {
 		return data
@@ -290,27 +304,20 @@ func onHttpStreamingResponseBody(ctx wrapper.HttpContext, config QuotaConfig, da
 	if !ok {
 		return data
 	}
-	consumer, ok := ctx.GetContext("consumer").(string)
-	if !ok {
-		return data
-	}
 	totalToken := int(inputToken + outputToken)
 	log.Debugf("update consumer:%s, totalToken:%d", consumer, totalToken)
 
-	// 扣减前先检查 Redis 中是否存在该消费者的配额记录：
-	// key 不存在时视为不限制配额，直接跳过扣减，
-	// 避免 DECRBY 对不存在的 key 自动初始化（0 - totalToken）而凭空生成负数配额数据。
-	config.redisClient.Get(config.RedisKeyPrefix+consumer, func(response resp.Value) {
+	// 直接执行 DecrBy，不再嵌套在 Get 回调中，避免 endOfStream 后异步回调丢失。
+	err := config.redisClient.DecrBy(config.RedisKeyPrefix+consumer, totalToken, func(response resp.Value) {
 		if err := response.Error(); err != nil {
-			log.Errorf("check consumer:%s quota before deduction redis error:%v", consumer, err)
+			log.Errorf("DecrBy consumer:%s redis error:%v", consumer, err)
 			return
 		}
-		if response.IsNull() {
-			log.Debugf("consumer:%s quota key not found, skip quota deduction", consumer)
-			return
-		}
-		config.redisClient.DecrBy(config.RedisKeyPrefix+consumer, totalToken, nil)
+		log.Debugf("DecrBy consumer:%s success, remaining quota:%d", consumer, response.Integer())
 	})
+	if err != nil {
+		log.Errorf("DecrBy consumer:%s call failed:%v", consumer, err)
+	}
 	return data
 }
 
